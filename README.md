@@ -1,8 +1,10 @@
 <p align="center">
-  <img src="docs/images/banner.jpg" alt="golemancer — Many golems. One will. Commands golemide agents.">
+  <img src="docs/images/golemancer.jpg" alt="Golemancer, a hooded low-poly figure of black stone with glowing amber eyes and seams, raising a hand wreathed in light" width="300">
 </p>
 
-<p align="center">A coding conversation in the terminal that hands the work to golemide.</p>
+<h1 align="center">golemancer</h1>
+<p align="center"><strong>Many golems. One will.</strong></p>
+<p align="center">A coding conversation in the terminal that commands golemide agents.</p>
 
 ```sh
 gmc                                   # a conversation in this directory; /exit to leave
@@ -10,8 +12,6 @@ gmc run "fix the flaky tests"         # one request, answered, then exit
 gmc --yes --root ../project           # run shell and verify commands without asking
 gmc emet claims.json                  # the claim gate, below
 ```
-
-<img src="docs/images/golemancer.jpg" alt="Golemancer, a hooded low-poly figure of black stone with glowing amber eyes and seams, raising a hand wreathed in light" width="200" align="right">
 
 golemide is the golem that does the work: it reads the code, edits it and runs the
 tests until they pass. golemancer is the one who commands it. `gmc` is its short name;
