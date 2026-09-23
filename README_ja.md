@@ -74,12 +74,6 @@ docker run -d --name searxng --restart unless-stopped \
 `formats: [html, json]` を書いて `docker restart searxng`。別のインスタンスを使うなら
 `$GOLEMANCER_SEARXNG_URL` で指定します。
 
-## emet
-
-このリポジトリは **emet** から始まりました。主張に含まれる数値を、出典として挙げたページと
-照らし合わせ、終了ステータスで答えるゲートです。今も `gmc emet` として使えます。
-何を確かめ、何ができず、どう測ったかは [docs/emet.md](docs/emet.md)（英語）にあります。
-
 ## ライセンス
 
 MIT または Apache-2.0 のどちらかを選べます。

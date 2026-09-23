@@ -75,12 +75,6 @@ In `~/.config/searxng/settings.yml`, set `limiter: false` under `server:` and
 `formats: [html, json]` under `search:`, then `docker restart searxng`.
 `$GOLEMANCER_SEARXNG_URL` points at another instance.
 
-## emet
-
-This repository began as **emet**, a gate that checks every figure in a claim against
-the pages it cites and answers with an exit status. It is still here as `gmc emet`.
-What it checks, what it cannot, and how it measured: [docs/emet.md](docs/emet.md).
-
 ## License
 
 MIT or Apache-2.0, at your option.
