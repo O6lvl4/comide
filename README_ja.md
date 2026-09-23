@@ -1,9 +1,7 @@
 <p align="center">
-  <img src="docs/images/golemancer.jpg" alt="golemancer。フードをかぶったローポリの黒い石の人形で、目と継ぎ目が琥珀色に光り、光をまとった手を掲げている" width="300">
+  <img src="docs/images/banner.jpg" alt="golemancer — Many golems. One will. Commands golemide agents. とんがり帽子とルーン文字のローブを着た、黒い石のローポリの魔法使い。目は琥珀色に光り、杖を持っている">
 </p>
 
-<h1 align="center">golemancer</h1>
-<p align="center"><strong>Many golems. One will.</strong></p>
 <p align="center">golemide を指揮する、ターミナルの対話型コーディングエージェント。</p>
 <p align="center"><a href="README.md">English</a></p>
 

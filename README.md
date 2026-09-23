@@ -1,9 +1,7 @@
 <p align="center">
-  <img src="docs/images/golemancer.jpg" alt="Golemancer, a hooded low-poly figure of black stone with glowing amber eyes and seams, raising a hand wreathed in light" width="300">
+  <img src="docs/images/banner.jpg" alt="golemancer — Many golems. One will. Commands golemide agents. A low-poly wizard of black stone in a pointed hat and runed robe, eyes glowing amber, holding a staff.">
 </p>
 
-<h1 align="center">golemancer</h1>
-<p align="center"><strong>Many golems. One will.</strong></p>
 <p align="center">A coding conversation in the terminal that commands golemide agents.</p>
 <p align="center"><a href="README_ja.md">日本語</a></p>
 
