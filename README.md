@@ -95,7 +95,9 @@ wasmtime, not inside a Worker.
 
 ## Install
 
-Needs [Almide](https://github.com/almide/almide) 0.62 or newer.
+Needs [Almide](https://github.com/almide/almide) develop at `ce7cd7553` or later, until
+0.63 is released: `io.read_line_opt`, and the HTTP client that reads a chunked body
+with a character split across chunks (almide#2536), are not in 0.62.
 
 ```
 almide build src/main.almd -o emet     # single native binary (2.8 MB)

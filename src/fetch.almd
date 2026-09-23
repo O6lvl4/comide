@@ -38,16 +38,18 @@ local effect fn hop(url: String) -> Result[HttpResponse, String] = {
 // Relative targets are resolved against the host only, which covers every
 // redirect seen in practice (`/news/x` from a newsroom root). A relative hop with
 // a path-relative target is left alone and reported rather than guessed at.
-local fn resolve(from: String, target: String) -> String =
+fn resolve(from: String, target: String) -> String = {
+  let scheme = if string.starts_with(from, "http://") then "http://" else "https://"
   if string.starts_with(target, "http://") or string.starts_with(target, "https://") then target
-  else if string.starts_with(target, "//") then "https:" + target
+  else if string.starts_with(target, "//") then string.drop_end(scheme, 2) + target
   else if string.starts_with(target, "/") then {
-    let after = string.drop(from, string.len("https://"))
+    let after = string.drop(from, string.len(scheme))
     match string.index_of(after, "/") {
       none => from + target,
-      some(i) => string.take(from, string.len("https://") + i) + target,
+      some(i) => string.take(from, string.len(scheme) + i) + target,
     }
   } else from
+}
 
 local effect fn follow(url: String, hops_left: Int) -> Result[String, String] = {
   guard hops_left > 0 else err("リダイレクトが多すぎる")
@@ -100,4 +102,9 @@ test "root-relative targets resolve against the host" {
 
 test "protocol-relative targets keep https" {
   assert_eq(resolve("https://a.example/x", "//b.example/y"), "https://b.example/y")
+}
+
+test "relative targets keep the scheme of the page that redirected" {
+  assert_eq(resolve("http://a.example/x", "/y"), "http://a.example/y")
+  assert_eq(resolve("http://a.example/x", "//b.example/y"), "http://b.example/y")
 }

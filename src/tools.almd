@@ -16,7 +16,8 @@ import fs
 import env
 import process
 import url
-import bytes
+import http
+import self.fetch
 import self.page
 
 // `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
@@ -262,24 +263,35 @@ let UA = "Mozilla/5.0 (compatible; emet/0.1; +https://github.com/O6lvl4/emet)"
 
 type Got = { status: Int, body: String, error: String }
 
-// One GET, through curl rather than Almide's `http`. That client turns a chunked body
-// into text before it takes the chunk framing out, so a multibyte character split
-// across two chunks becomes U+FFFD, the byte counts stop matching, and the process
-// panics (almide#2536). Measured 2026-09-23: asking for tenki.jp's forecast for Miyazaki ended the
-// whole conversation that way. curl hands the bytes back whole, and follows redirects.
-effect fn get(s: Setup, address: String, accept: String) -> Got = {
-  let out = s.scratch + "/web-" + int.to_string(env.millis()) + ".body"
-  let args = ["-sS", "-L", "--max-redirs", "5", "--max-time", "20", "--compressed", "--proto", "=http,https",
-    "-A", UA, "-H", "Accept: " + accept, "-o", out, "-w", "%{http_code}", address]
-  let (code, said_back) = run_program("curl", args, 30)!
-  let body = bytes.to_string_lossy(bytes.from_list(fs.read_bytes(out) ?? []))
-  let _ = fs.remove(out)
-  if code != 0 then Got { status: 0, body: "", error: first_line_of(said_back, 200) }
-  else Got { status: int.parse(string.trim(said_back)) ?? 0, body: body, error: "" }
+let WEB_HOPS = 5
+let WEB_TIMEOUT_SECS = "20"
+
+// One GET, redirects followed here, one hop at a time, so that with `public_only` every
+// hop is held to `private_host` and not only the address the model gave: a public page
+// may redirect anywhere. The read timeout is the runtime's process-wide knob.
+effect fn get(address: String, accept: String, public_only: Bool) -> Got = {
+  env.set("ALMIDE_HTTP_TIMEOUT_SECS", WEB_TIMEOUT_SECS)
+  hop(address, accept, public_only, WEB_HOPS)!
 }
 
+effect fn hop(address: String, accept: String, public_only: Bool, left: Int) -> Got =
+  if left == 0 then Got { status: 0, body: "", error: "more than " + int.to_string(WEB_HOPS) + " redirects" }
+  else if public_only and private_host(host_of(address)) then
+    Got { status: 0, body: "", error: "redirected to " + host_of(address) + ", which is on this machine or a private network" }
+  else match http.request_response("GET", address, "", ["User-Agent": UA, "Accept": accept]) {
+    err(e) => Got { status: 0, body: "", error: first_line_of(e, 200) },
+    ok(r) => {
+      let code = http.status_code(r)
+      let target = if code >= 300 and code < 400 then http.get_header(r, "Location") else none
+      match target {
+        some(t) => hop(fetch.resolve(address, t), accept, public_only, left - 1)!,
+        none => Got { status: code, body: http.body(r), error: "" },
+      }
+    },
+  }
+
 effect fn web_search(s: Setup, a: Value) -> ToolResult = {
-  let g = get(s, search_url(s.searx, str_arg(a, "query")), "application/json")!
+  let g = get(search_url(s.searx, str_arg(a, "query")), "application/json", false)!
   if g.error != "" then failed("the search engine did not answer: " + g.error + ". It is the SearXNG at " + s.searx
       + "; if it runs in Docker, `docker start searxng` starts it.", "search unavailable: " + first_line_of(g.error, 70))
   else if g.status != 200 then failed("SearXNG at " + s.searx + " answered HTTP " + int.to_string(g.status)
@@ -320,7 +332,7 @@ effect fn web_fetch(s: Setup, a: Value) -> ToolResult = {
   else if private_host(host) then
     failed("not read: " + host + " is on this machine or a private network, and pages are only read from the public web", "not read: private address")
   else {
-    let g = get(s, address, "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8")!
+    let g = get(address, "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8", true)!
     if g.error != "" then failed("could not read " + address + ": " + g.error, "could not read: " + first_line_of(g.error, 70))
     else if g.status < 200 or g.status >= 300 then failed("could not read " + address + ": HTTP " + int.to_string(g.status), "could not read: HTTP " + int.to_string(g.status))
     else {

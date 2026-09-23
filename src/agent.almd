@@ -88,17 +88,11 @@ fn usd(x: Float) -> String = {
   "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
 }
 
-// `io.read_line` answers "" both for an empty line and at the end of input, and the
-// loop has to tell them apart: one is a person pressing return, the other is the end
-// (almide#2539).
-effect fn read_input() -> String? = {
-  var b = io.read_byte()
-  if b < 0 then none
-  else {
-    var bytes: List[Int] = []
-    while b >= 0 and b != 10 { list.push(bytes, b); b = io.read_byte() }
-    some(string.trim_end(string.from_bytes(bytes)))
-  }
+// `read_line_opt`, not `read_line`: the loop has to tell an empty line (a person
+// pressing return) from the end of input, and `read_line` answers "" for both.
+effect fn read_input() -> String? = match io.read_line_opt() {
+  some(l) => some(string.trim_end(l)),
+  none => none,
 }
 
 // Where the person watching sees progress: stdout in a conversation, stderr under -p.
