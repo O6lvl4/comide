@@ -1,4 +1,4 @@
-// The input box: a line editor that golemancer draws itself, in the shape Claude Code made
+// The input box: a line editor that shemide draws itself, in the shape Claude Code made
 // familiar. A rounded box that grows with the text, a dim line under it with the model,
 // the project and the cost, and slash commands listed as they are typed.
 //

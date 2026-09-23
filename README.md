@@ -1,35 +1,33 @@
-<p align="center">
-  <img src="docs/images/banner.jpg" alt="golemancer — Many golems. One will. Commands golemide agents. A low-poly wizard of black stone in a pointed hat and runed robe, eyes glowing amber, holding a staff.">
-</p>
-
-<p align="center">A coding conversation in the terminal that commands golemide agents.</p>
+<h1 align="center">shemide</h1>
+<p align="center"><strong>The word that moves the golem.</strong></p>
+<p align="center">A coding agent in the terminal, in the line of Claude Code, Codex and Aider,<br>that hands its code changes to golemide.</p>
 <p align="center"><a href="README_ja.md">日本語</a></p>
 
 ```sh
-gmc                                   # a conversation in this directory; /exit to leave
-gmc run "fix the flaky tests"         # one request, answered, then exit
-gmc --yes --root ../project           # run shell and verify commands without asking
+shemide                               # a conversation in this directory; /exit to leave
+shemide run "fix the flaky tests"     # one request, answered, then exit
+shemide --yes --root ../project       # run shell and verify commands without asking
 ```
 
-[golemide](https://github.com/O6lvl4/golemide) is the golem that does the work: it
-reads the code, edits it and runs the tests until they pass. golemancer is the one who
-commands it. `gmc` is its short name; `golemancer` is the same program.
+In the story, a golem moves while a *shem*, a holy name written on paper, is in its
+mouth. [golemide](https://github.com/O6lvl4/golemide) is the golem that does the work:
+it reads the code, edits it and runs the tests until they pass. shemide (*SHEM-ide*)
+is the word that moves it.
 
 ## Setup
 
 1. **Almide** develop at `ce7cd7553` or later, until 0.63 is released.
-2. **golemide 0.2.0 or later** on `PATH`. golemancer's edits and `solve` go through it,
+2. **golemide 0.2.0 or later** on `PATH`. shemide's edits and `solve` go through it,
    and it says at startup when golemide is missing or too old.
    ```sh
    git clone https://github.com/O6lvl4/golemide && cd golemide
    almide build src/main.almd -o golemide && ln -s "$PWD/golemide" ~/.local/bin/golemide
    ```
-3. **golemancer**
+3. **shemide**
    ```sh
-   git clone https://github.com/O6lvl4/golemancer && cd golemancer
-   almide build src/main.almd -o golemancer
-   ln -s "$PWD/bin/golemancer" ~/.local/bin/golemancer
-   ln -s "$PWD/bin/gmc" ~/.local/bin/gmc
+   git clone https://github.com/O6lvl4/shemide && cd shemide
+   almide build src/main.almd -o shemide
+   ln -s "$PWD/bin/shemide" ~/.local/bin/shemide
    ```
 4. **Credentials**, shared with golemide: Cloudflare Workers AI's
    `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in `~/.config/golemide/.env`
@@ -72,7 +70,7 @@ docker run -d --name searxng --restart unless-stopped \
 
 In `~/.config/searxng/settings.yml`, set `limiter: false` under `server:` and
 `formats: [html, json]` under `search:`, then `docker restart searxng`.
-`$GOLEMANCER_SEARXNG_URL` points at another instance.
+`$SHEMIDE_SEARXNG_URL` points at another instance.
 
 ## License
 

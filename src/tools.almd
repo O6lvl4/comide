@@ -258,7 +258,7 @@ fn search_results(body: String, max: Int) -> (String, Int) =
     },
   }
 
-let UA = "Mozilla/5.0 (compatible; golemancer/0.2; +https://github.com/O6lvl4/golemancer)"
+let UA = "Mozilla/5.0 (compatible; shemide/0.3; +https://github.com/O6lvl4/shemide)"
 
 type Got = { status: Int, body: String, error: String }
 

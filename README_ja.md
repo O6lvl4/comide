@@ -1,35 +1,32 @@
-<p align="center">
-  <img src="docs/images/banner.jpg" alt="golemancer — Many golems. One will. Commands golemide agents. とんがり帽子とルーン文字のローブを着た、黒い石のローポリの魔法使い。目は琥珀色に光り、杖を持っている">
-</p>
-
-<p align="center">golemide を指揮する、ターミナルの対話型コーディングエージェント。</p>
+<h1 align="center">shemide</h1>
+<p align="center"><strong>The word that moves the golem.</strong></p>
+<p align="center">Claude Code、Codex、Aider と同じ種類の、ターミナルのコーディングエージェント。<br>コードの変更は golemide に任せます。</p>
 <p align="center"><a href="README.md">English</a></p>
 
 ```sh
-gmc                                   # このディレクトリで会話する。/exit で終わる
-gmc run "fix the flaky tests"         # 頼みごとを 1 回だけ実行して終わる
-gmc --yes --root ../project           # シェルと検証コマンドを確認なしで実行する
+shemide                               # このディレクトリで会話する。/exit で終わる
+shemide run "fix the flaky tests"     # 頼みごとを 1 回だけ実行して終わる
+shemide --yes --root ../project       # シェルと検証コマンドを確認なしで実行する
 ```
 
+伝承では、ゴーレムは神の名を書いた紙（*シェム*）を口に入れている間だけ動きます。
 [golemide](https://github.com/O6lvl4/golemide) は実際に手を動かすゴーレムで、コードを読み、
-編集し、テストが通るまで繰り返します。golemancer はそれを指揮する側です。`gmc` は短い名前で、
-`golemancer` と同じプログラムです。
+編集し、テストが通るまで繰り返します。shemide（シェマイド）は、それを動かす言葉です。
 
 ## セットアップ
 
 1. **Almide**：0.63 が出るまでは develop の `ce7cd7553` 以降。
-2. **golemide 0.2.0 以降**を `PATH` に置く。golemancer の編集と `solve` は golemide を通ります。
+2. **golemide 0.2.0 以降**を `PATH` に置く。shemide の編集と `solve` は golemide を通ります。
    見つからないときや古いときは、起動時にそう表示します。
    ```sh
    git clone https://github.com/O6lvl4/golemide && cd golemide
    almide build src/main.almd -o golemide && ln -s "$PWD/golemide" ~/.local/bin/golemide
    ```
-3. **golemancer**
+3. **shemide**
    ```sh
-   git clone https://github.com/O6lvl4/golemancer && cd golemancer
-   almide build src/main.almd -o golemancer
-   ln -s "$PWD/bin/golemancer" ~/.local/bin/golemancer
-   ln -s "$PWD/bin/gmc" ~/.local/bin/gmc
+   git clone https://github.com/O6lvl4/shemide && cd shemide
+   almide build src/main.almd -o shemide
+   ln -s "$PWD/bin/shemide" ~/.local/bin/shemide
    ```
 4. **認証情報**は golemide と共通です。Cloudflare Workers AI の `CLOUDFLARE_ACCOUNT_ID` と
    `CLOUDFLARE_API_TOKEN` を `~/.config/golemide/.env` に書きます（プロジェクトの `.env` や環境変数でも可）。
@@ -71,7 +68,7 @@ docker run -d --name searxng --restart unless-stopped \
 
 `~/.config/searxng/settings.yml` の `server:` に `limiter: false`、`search:` に
 `formats: [html, json]` を書いて `docker restart searxng`。別のインスタンスを使うなら
-`$GOLEMANCER_SEARXNG_URL` で指定します。
+`$SHEMIDE_SEARXNG_URL` で指定します。
 
 ## ライセンス
 
