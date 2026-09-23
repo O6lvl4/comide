@@ -53,7 +53,7 @@ local effect fn follow(url: String, hops_left: Int) -> Result[String, String] = 
   guard hops_left > 0 else err("リダイレクトが多すぎる")
   let resp = hop(url)!
   let code = http.status_code(resp)
-  if code >= 200 and code < 300 then ok(page.text_of(http.body(resp)))
+  if code >= 200 and code < 300 then ok(http.body(resp))
   else if code >= 300 and code < 400 then match http.get_header(resp, "Location") {
     none => err("HTTP " + int.to_string(code) + " (Location がない)"),
     some(target) => follow(resolve(url, target), hops_left - 1)!,
@@ -61,9 +61,16 @@ local effect fn follow(url: String, hops_left: Int) -> Result[String, String] = 
   else err("HTTP " + int.to_string(code))
 }
 
-effect fn page_text(url: String) -> Result[String, String] = {
+// The document as the server sent it, after redirects. emet reads pages in a
+// conversation with this and `page.readable`; the claim gate matches `page_text`.
+effect fn document(url: String) -> Result[String, String] = {
   guard string.starts_with(url, "http://") or string.starts_with(url, "https://") else err("http(s) ではない URL")
   follow(url, MAX_HOPS)
+}
+
+effect fn page_text(url: String) -> Result[String, String] = {
+  let doc = document(url)!
+  ok(page.text_of(doc))
 }
 
 // The read timeout is process-wide. Set once, before anything is fetched.

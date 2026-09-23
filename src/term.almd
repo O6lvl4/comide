@@ -1,0 +1,179 @@
+// The terminal, one key at a time.
+//
+// A line-mode terminal hands a program nothing until Return, and draws what is typed
+// itself: arrows print ^[[D, there is no history, and nothing can be redrawn. So in a
+// conversation the terminal is put in a mode where every key arrives as it is pressed
+// and nothing is echoed, and emet draws the input itself (editor.almd).
+//
+// Reads wait at most a tenth of a second (`min 0 time 1`): a key that has not come by
+// then reads as `none`. That is what lets the wait for a model's answer also watch for
+// Esc, with no second thread.
+//
+// `stty` is run through a shell with `< /dev/tty`. `exec_status` gives a child no stdin
+// at all, and `exec_status_timeout` puts it in a process group of its own, where the
+// terminal treats it as a background job: reading the settings works, but changing them
+// stops the child with SIGTTOU until the timeout kills it (almide#2540). Measured
+// 2026-09-23: the first TUI build drew its input box over a terminal that was still
+// echoing, and the first ^C, still a signal, ended emet.
+
+import process
+import io
+
+type Key = { kind: String, text: String }
+
+fn key(kind: String) -> Key = Key { kind: kind, text: "" }
+fn none_key() -> Key = key("none")
+
+// The arguments are this file's own constants and a `stty -g` string, which is letters,
+// digits, `:` and `=`; nothing here needs quoting.
+effect fn stty(args: List[String]) -> (Int, String) =
+  match process.exec_status("sh", ["-c", "stty " + string.join(args, " ") + " < /dev/tty"]) {
+    ok(st) => (st.code, string.trim(st.stdout)),
+    err(e) => (-1, e),
+  }
+
+// Whether stdin is a terminal at all. A pipe gets the line reader, not this. This one
+// does use `exec_status_timeout`, because it is the call that passes stdin on, and
+// `test -t` only looks.
+effect fn is_tty() -> Bool =
+  match process.exec_status_timeout("sh", ["-c", "test -t 0"], 3000) {
+    ok(st) => st.code == 0,
+    err(_) => false,
+  }
+
+// Keys one at a time, no echo, no signals from ^C (it arrives as a key and interrupts a
+// turn, not the program), and bracketed paste on, so a pasted newline is text and not
+// Return. Returns the settings to put back, or none if this is not a terminal.
+effect fn enter_raw() -> String? = {
+  let (code, saved) = stty(["-g"])!
+  if code != 0 or saved == "" then none
+  else {
+    let _ = stty(["-icanon", "-echo", "-isig", "-ixon", "-iexten", "min", "0", "time", "1"])!
+    io.print("\u{1b}[?2004h")
+    some(saved)
+  }
+}
+
+effect fn leave_raw(saved: String) -> Unit = {
+  io.print("\u{1b}[?2004l")
+  let _ = stty([saved])!
+  ()
+}
+
+// (rows, columns); 24 x 80 when the terminal will not say.
+effect fn size() -> (Int, Int) = {
+  let (code, out) = stty(["size"])!
+  let parts = string.split(out, " ")
+  if code != 0 or list.len(parts) != 2 then (24, 80)
+  else (int.parse(list.get(parts, 0) ?? "") ?? 24, int.parse(list.get(parts, 1) ?? "") ?? 80)
+}
+
+// ---- keys -------------------------------------------------------------------------
+
+// How many bytes a UTF-8 sequence starting with `b` has.
+fn utf8_len(b: Int) -> Int = if b < 128 then 1 else if b < 224 then 2 else if b < 240 then 3 else 4
+
+// The key a control byte stands for. 9, 10, 13 and 127 have names of their own.
+fn control(b: Int) -> Key =
+  if b == 13 or b == 10 then key("enter")
+  else if b == 9 then key("tab")
+  else if b == 127 or b == 8 then key("backspace")
+  else if b >= 1 and b <= 26 then Key { kind: "ctrl", text: string.from_bytes([b + 96]) }
+  else none_key()
+
+// The key a CSI sequence (`ESC [` params final) stands for.
+fn csi(params: String, final: String) -> Key =
+  if final == "A" then key("up")
+  else if final == "B" then key("down")
+  else if final == "C" then (if params == "1;3" or params == "1;5" then key("wordright") else key("right"))
+  else if final == "D" then (if params == "1;3" or params == "1;5" then key("wordleft") else key("left"))
+  else if final == "H" then key("home")
+  else if final == "F" then key("end")
+  else if final == "~" then (
+    if params == "1" or params == "7" then key("home")
+    else if params == "4" or params == "8" then key("end")
+    else if params == "3" then key("delete")
+    else if params == "200" then key("paste_start")
+    else none_key())
+  else none_key()
+
+// Esc followed by one more byte: Alt with a key, or the start of a sequence.
+fn after_escape(b: Int) -> Key =
+  if b == 13 or b == 10 then key("newline")
+  else if b == 98 then key("wordleft")
+  else if b == 102 then key("wordright")
+  else if b == 127 or b == 8 then key("delete_word")
+  else key("esc")
+
+// One byte, or -1 when nothing came within the read timeout.
+fn byte() -> Int = io.read_byte()
+
+// The rest of a pasted block, up to `ESC [ 2 0 1 ~`. Returns and carriage returns are
+// the terminal's line ends and become newlines.
+fn read_paste() -> String = {
+  var bytes: List[Int] = []
+  var going = true
+  var idle = 0
+  while going {
+    let b = byte()
+    if b < 0 then { idle = idle + 1; if idle > 20 then going = false else () }
+    else {
+      idle = 0
+      list.push(bytes, b)
+      let n = list.len(bytes)
+      if n >= 6 and list.drop(bytes, n - 6) == [27, 91, 50, 48, 49, 126] then { bytes = list.take(bytes, n - 6); going = false } else ()
+    }
+  }
+  string.replace(string.replace(string.from_bytes(bytes), "\r\n", "\n"), "\r", "\n")
+}
+
+fn read_csi() -> Key = {
+  var params: List[Int] = []
+  var final = ""
+  var going = true
+  while going {
+    let b = byte()
+    if b < 0 then going = false
+    else if b >= 64 and b <= 126 then { final = string.from_bytes([b]); going = false }
+    else list.push(params, b)
+  }
+  let k = csi(string.from_bytes(params), final)
+  if k.kind == "paste_start" then Key { kind: "paste", text: read_paste() } else k
+}
+
+// The next key, or `none` when nothing was pressed within a tenth of a second.
+fn read_key() -> Key = {
+  let b = byte()
+  if b < 0 then none_key()
+  else if b == 27 then {
+    let n = byte()
+    if n < 0 then key("esc")
+    else if n == 91 then read_csi()
+    else if n == 79 then {
+      let f = byte()
+      if f < 0 then key("esc") else csi("", string.from_bytes([f]))
+    }
+    else after_escape(n)
+  }
+  else if b < 32 or b == 127 then control(b)
+  else {
+    var bytes = [b]
+    var i = 1
+    while i < utf8_len(b) { let c = byte(); if c >= 0 then list.push(bytes, c) else (); i = i + 1 }
+    Key { kind: "char", text: string.from_bytes(bytes) }
+  }
+}
+
+test "control bytes and escape sequences name the keys they are" {
+  assert_eq(control(13).kind, "enter")
+  assert_eq(control(127).kind, "backspace")
+  assert_eq(control(1), Key { kind: "ctrl", text: "a" })
+  assert_eq(control(3), Key { kind: "ctrl", text: "c" })
+  assert_eq(csi("", "D").kind, "left")
+  assert_eq(csi("1;3", "C").kind, "wordright")
+  assert_eq(csi("3", "~").kind, "delete")
+  assert_eq(csi("200", "~").kind, "paste_start")
+  assert_eq(after_escape(13).kind, "newline")
+  assert_eq(after_escape(98).kind, "wordleft")
+  assert_eq(utf8_len(227), 3)
+}

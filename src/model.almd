@@ -1,0 +1,291 @@
+// One chat-completion turn with tools, spoken to Cloudflare Workers AI.
+//
+// What golemide measured about this endpoint is kept (its src/llm.almd):
+//   - the request is streamed: a non-streamed one past about four minutes is ended by
+//     the provider with `408 Request timeout`
+//   - curl reads the request from a config file, so the token never sits in `ps`
+//   - cost comes from `neurons` when the provider sends it, else from the price table
+// What golemide needs and this does not: the hedged second request, and a JSON schema
+// for the answer. Here the model answers in text or in tool calls, and one call at a
+// time is what a conversation is.
+
+import json
+import env
+import fs
+import process
+
+type Credentials = { account_id: String, token: String, email: String, key: String }
+type Price = { input: Float, output: Float, cached: Float }  // USD per Mtok
+
+// `arguments` is the JSON text the model wrote, parsed only when the tool runs, so a
+// malformed one can be answered as a tool error the model reads, not a crash.
+type ToolCall = { id: String, name: String, arguments: String }
+type Reply = { content: String, reasoning: String, calls: List[ToolCall], finish: String,
+  cost_usd: Float, input_tokens: Int, cached_tokens: Int, output_tokens: Int, ms: Int }
+
+let NEURON_USD = 0.011 / 1000.0
+let TOTAL_TIMEOUT_S = 900
+let IDLE_TIMEOUT_S = 120
+
+fn cf_id_of(model: String) -> String = {
+  let short = string.strip_prefix(model, "cf:") ?? model
+  if short == "glm-5.3-flash" then "@cf/zai-org/glm-5.3-flash"
+  else if short == "glm-5.3" then "@cf/zai-org/glm-5.3"
+  else if short == "deepseek-v4-flash-0731" then "@cf/deepseek-ai/deepseek-v4-flash-0731"
+  else if short == "gemma-4-26b" then "@cf/google/gemma-4-26b-a4b-it"
+  else if string.starts_with(short, "@cf/") then short
+  else "@cf/" + short
+}
+
+fn price_of(model: String) -> Price? = {
+  let id = cf_id_of(model)
+  if id == "@cf/zai-org/glm-5.3-flash" then some(Price { input: 0.15, output: 0.5, cached: 0.03 })
+  else if id == "@cf/zai-org/glm-5.3" then some(Price { input: 1.4, output: 4.4, cached: 0.26 })
+  else if id == "@cf/deepseek-ai/deepseek-v4-flash-0731" then some(Price { input: 0.44, output: 1.32, cached: 0.014 })
+  else if id == "@cf/google/gemma-4-26b-a4b-it" then some(Price { input: 0.1, output: 0.3, cached: 0.1 })
+  else none
+}
+
+effect fn credentials_from_env() -> Credentials? = {
+  let account = string.trim(env.get("CLOUDFLARE_ACCOUNT_ID") ?? "")
+  let token = string.trim(env.get("CLOUDFLARE_API_TOKEN") ?? "")
+  let email = string.trim(env.get("CLOUDFLARE_EMAIL") ?? "")
+  let key = string.trim(env.get("CLOUDFLARE_API_KEY") ?? "")
+  if account == "" then none
+  else if token != "" then some(Credentials { account_id: account, token: token, email: "", key: "" })
+  else if email != "" and key != "" then some(Credentials { account_id: account, token: "", email: email, key: key })
+  else none
+}
+
+fn body_of(model: String, messages: List[Value], tools: List[Value], max_tokens: Int, effort: String) -> String =
+  json.stringify(value.object([
+    ("model", value.str(cf_id_of(model))),
+    ("messages", value.array(messages)),
+    ("tools", value.array(tools)),
+    ("stream", value.bool(true)),
+    ("max_completion_tokens", value.int(max_tokens)),
+    ("reasoning_effort", value.str(effort)),
+  ]))
+
+fn quoted(s: String) -> String = "\"" + string.replace(string.replace(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+
+fn curl_config(creds: Credentials, body_path: String, sse_path: String) -> String = {
+  var lines = [
+    "url = " + quoted("https://api.cloudflare.com/client/v4/accounts/" + creds.account_id + "/ai/v1/chat/completions"),
+    "request = \"POST\"",
+    "header = \"Content-Type: application/json\"",
+  ]
+  if creds.token != "" then list.push(lines, "header = " + quoted("Authorization: Bearer " + creds.token))
+  else {
+    list.push(lines, "header = " + quoted("X-Auth-Email: " + creds.email))
+    list.push(lines, "header = " + quoted("X-Auth-Key: " + creds.key))
+  }
+  list.push(lines, "data = " + quoted("@" + body_path))
+  list.push(lines, "output = " + quoted(sse_path))
+  list.push(lines, "max-time = " + int.to_string(TOTAL_TIMEOUT_S))
+  list.push(lines, "speed-limit = 1")
+  list.push(lines, "speed-time = " + int.to_string(IDLE_TIMEOUT_S))
+  list.push(lines, "silent")
+  list.push(lines, "show-error")
+  list.push(lines, "write-out = \"%{http_code}\"")
+  string.join(lines, "\n") + "\n"
+}
+
+// A tool call arrives in pieces: the first chunk for an index carries its id and name,
+// later ones carry more of the arguments.
+fn merge_call(calls: List[ToolCall], d: Value) -> List[ToolCall] = {
+  let i = json.get_int(d, "index") ?? list.len(calls)
+  var out = calls
+  while list.len(out) <= i { list.push(out, ToolCall { id: "", name: "", arguments: "" }) }
+  let f = value.field(d, "function") ?? value.object([])
+  let id = json.get_string(d, "id") ?? ""
+  let name = json.get_string(f, "name") ?? ""
+  let args = json.get_string(f, "arguments") ?? ""
+  list.update(out, i, (c) => ToolCall {
+    id: if c.id == "" then id else c.id,
+    name: if c.name == "" then name else c.name,
+    arguments: c.arguments + args,
+  })
+}
+
+type Folded = { content: String, reasoning: String, calls: List[ToolCall], finish: String, usage: Value? }
+
+fn num(v: Value?, key: String) -> Int = match v {
+  some(u) => match json.get_int(u, key) { some(n) => n, none => float.to_int(json.get_float(u, key) ?? 0.0) },
+  none => 0,
+}
+
+fn first_some(a: String?, b: String?) -> String? = match a { some(_) => a, none => b }
+
+fn fold_delta(acc: Folded, c: Value) -> Folded = {
+  let delta = value.field(c, "delta") ?? (value.field(c, "message") ?? value.object([]))
+  let content = acc.content + (json.get_string(delta, "content") ?? "")
+  let reasoning = acc.reasoning + (first_some(json.get_string(delta, "reasoning_content"), json.get_string(delta, "reasoning")) ?? "")
+  var calls = acc.calls
+  for d in json.get_array(delta, "tool_calls") ?? [] { calls = merge_call(calls, d) }
+  Folded { content: content, reasoning: reasoning, calls: calls, finish: json.get_string(c, "finish_reason") ?? acc.finish, usage: acc.usage }
+}
+
+fn fold_chunk(acc: Folded, chunk: Value) -> Folded = {
+  let choice = option.map(json.get_array(chunk, "choices"), (cs) => list.first(cs)) |> option.flatten
+  let folded = match choice { some(c) => fold_delta(acc, c), none => acc }
+  match value.field(chunk, "usage") {
+    ok(u) => if num(some(u), "completion_tokens") >= num(folded.usage, "completion_tokens") then Folded { content: folded.content, reasoning: folded.reasoning, calls: folded.calls, finish: folded.finish, usage: some(u) } else folded,
+    err(_) => folded,
+  }
+}
+
+// A streamed body is `data: {chunk}` lines; a provider that ignored `stream` sends one
+// completion, which folds the same way through `message` instead of `delta`.
+fn fold(body: String) -> Result[Folded, String] = {
+  var acc = Folded { content: "", reasoning: "", calls: [], finish: "", usage: none }
+  var failure = ""
+  let streamed = string.starts_with(string.trim_start(body), "data:")
+  let payloads = if streamed then list.map(list.filter(string.split(body, "\n"), (l) => string.starts_with(l, "data:")), (l) => string.trim(string.drop(l, 5))) else [body]
+  for p in payloads {
+    if failure == "" and p != "" and p != "[DONE]" then {
+      match json.parse(p) {
+        err(e) => { failure = "unreadable answer: " + e + "; raw: " + string.take(p, 200) },
+        ok(chunk) => match value.field(chunk, "error") {
+          ok(e) => { failure = "api error: " + json.stringify(e) },
+          err(_) => { acc = fold_chunk(acc, chunk) },
+        },
+      }
+    } else ()
+  }
+  if failure != "" then err(failure) else ok(acc)
+}
+
+fn reply_of(f: Folded, model: String, ms: Int) -> Reply = {
+  let details: Value? = match f.usage { some(u) => match value.field(u, "prompt_tokens_details") { ok(d) => some(d), err(_) => none }, none => none }
+  let cached = num(details, "cached_tokens")
+  let input = int.max(0, num(f.usage, "prompt_tokens") - cached)
+  let output = num(f.usage, "completion_tokens")
+  let neurons = option.map(f.usage, (u) => json.get_float(u, "neurons") ?? float.from_int(json.get_int(u, "neurons") ?? -1)) ?? -1.0
+  let cost = if neurons >= 0.0 then neurons * NEURON_USD
+    else match price_of(model) {
+      some(p) => (float.from_int(input) * p.input + float.from_int(cached) * p.cached + float.from_int(output) * p.output) / 1000000.0,
+      none => 0.0,
+    }
+  Reply { content: f.content, reasoning: f.reasoning, calls: list.filter(f.calls, (c) => c.name != ""), finish: f.finish,
+    cost_usd: cost, input_tokens: input, cached_tokens: cached, output_tokens: output, ms: ms }
+}
+
+// A request in flight. curl writes the stream to a file and runs in the background, so
+// the answer can be read as it is written and shown to the person while the model is
+// still talking; a request held inside one blocking call can only be shown once it is
+// over. The shell appends curl's exit status on its own line when it is really finished,
+// which is what "done" means here -- the file having stopped growing does not.
+type Call = { sh_pid: Int, pid_file: String, sse: String, cfg: String, body: String, out: String, err: String, t0: Int, model: String }
+
+fn sh_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
+
+effect fn start(creds: Credentials, model: String, messages: List[Value], tools: List[Value], max_tokens: Int, effort: String, scratch: String) -> Result[Call, String] = {
+  let t0 = env.millis()
+  let stem = scratch + "/call-" + int.to_string(t0)
+  let c = Call { sh_pid: 0, pid_file: stem + ".pid", sse: stem + ".sse", cfg: stem + ".cfg", body: stem + ".json",
+    out: stem + ".out", err: stem + ".err", t0: t0, model: model }
+  fs.write(c.body, body_of(model, messages, tools, max_tokens, effort))!
+  fs.write(c.cfg, curl_config(creds, c.body, c.sse))!
+  // curl runs in the background so its own pid is known: killing the shell alone would
+  // leave the request running, still streaming and still billed.
+  let script = "curl --config " + sh_quote(c.cfg) + " > " + sh_quote(c.out) + " 2> " + sh_quote(c.err)
+    + " & p=$!; echo $p > " + sh_quote(c.pid_file) + "; wait $p; printf '\\n%s\\n' \"$?\" >> " + sh_quote(c.out)
+  let pid = process.spawn("sh", ["-c", script]) |> result.map_err((e) => "transport: spawn: " + e)!
+  ok(Call { sh_pid: pid, pid_file: c.pid_file, sse: c.sse, cfg: c.cfg, body: c.body, out: c.out, err: c.err, t0: t0, model: model })
+}
+
+// curl's stdout is `%{http_code}` with no newline; the second line is the exit status.
+fn call_result(out: String) -> (Int, Int)? = {
+  let lines = string.split(out, "\n")
+  if list.len(lines) < 2 then none
+  else match int.parse(string.trim(list.get(lines, 1) ?? "")) {
+    ok(code) => some((int.parse(string.trim(list.get(lines, 0) ?? "")) ?? 0, code)),
+    err(_) => none,
+  }
+}
+
+effect fn is_done(c: Call) -> Bool = option.is_some(call_result(fs.read_text(c.out) ?? ""))
+
+// Only whole `data:` lines can be read; the last one may still be arriving.
+fn whole_lines(s: String) -> String = match string.last_index_of(s, "\n") { some(i) => string.take(s, i + 1), none => "" }
+
+// What the model has written so far, from the chunks that have arrived complete.
+effect fn text_so_far(c: Call) -> String = match fold(whole_lines(fs.read_text(c.sse) ?? "")) {
+  ok(f) => f.content,
+  err(_) => "",
+}
+
+effect fn clean_up(c: Call) -> Unit = {
+  // The config holds the token, so it goes whatever else happens.
+  let _ = fs.remove(c.cfg)
+  let _ = fs.remove(c.body)
+  let _ = fs.remove(c.sse)
+  let _ = fs.remove(c.out)
+  let _ = fs.remove(c.err)
+  let _ = fs.remove(c.pid_file)
+  ()
+}
+
+effect fn abandon(c: Call) -> Unit = {
+  match int.parse(string.trim(fs.read_text(c.pid_file) ?? "")) {
+    ok(curl_pid) => if process.is_alive(curl_pid) then { let _ = process.kill(curl_pid, 15); () } else (),
+    err(_) => (),
+  }
+  if process.is_alive(c.sh_pid) then { let _ = process.kill(c.sh_pid, 15); () } else ()
+  clean_up(c)!
+}
+
+// What the finished request amounts to. Called once `is_done` says so.
+effect fn settle(c: Call) -> Result[Reply, String] = {
+  let (status, code) = call_result(fs.read_text(c.out) ?? "") ?? (0, 0)
+  let body = fs.read_text(c.sse) ?? ""
+  let said = string.trim(fs.read_text(c.err) ?? "")
+  clean_up(c)!
+  if code == 28 then err("transport: no answer within " + int.to_string(TOTAL_TIMEOUT_S) + "s, or nothing for " + int.to_string(IDLE_TIMEOUT_S) + "s")
+  else if code != 0 then err("transport: curl exit " + int.to_string(code) + (if said == "" then "" else ": " + string.take(said, 300)))
+  else if status < 200 or status >= 300 then err("status " + int.to_string(status) + ": " + string.take(string.trim(body), 500))
+  else match fold(body) {
+    err(e) => err(e),
+    ok(f) => ok(reply_of(f, c.model, env.millis() - c.t0)),
+  }
+}
+
+test "tool calls are put back together from their pieces" {
+  let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Let me look.\"}}]}\n"
+    + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"pa\"}}]}}]}\n"
+    + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"th\\\":\\\"a.py\\\"}\"}}]}}]}\n"
+    + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"c2\",\"function\":{\"name\":\"outline\",\"arguments\":\"{}\"}}]}}]}\n"
+    + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20}}\n"
+    + "data: [DONE]\n"
+  let f = fold(sse) ?? Folded { content: "", reasoning: "", calls: [], finish: "", usage: none }
+  assert_eq(f.content, "Let me look.")
+  assert_eq(f.calls, [ToolCall { id: "c1", name: "read", arguments: "{\"path\":\"a.py\"}" }, ToolCall { id: "c2", name: "outline", arguments: "{}" }])
+  assert_eq(f.finish, "tool_calls")
+  let r = reply_of(f, "cf:glm-5.3-flash", 10)
+  assert_eq(r.input_tokens, 100)
+  assert_eq(r.output_tokens, 20)
+}
+
+test "an answer that was not streamed folds the same way" {
+  let body = "{\"choices\":[{\"message\":{\"content\":\"hi\",\"tool_calls\":[{\"id\":\"x\",\"function\":{\"name\":\"tree\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}"
+  let f = fold(body) ?? Folded { content: "", reasoning: "", calls: [], finish: "", usage: none }
+  assert_eq(f.content, "hi")
+  assert_eq(list.len(f.calls), 1)
+}
+
+test "a request is finished only once the shell has written the exit status" {
+  assert_eq(call_result("200"), none)
+  assert_eq(call_result("200\n0\n"), some((200, 0)))
+  assert_eq(call_result("000\n28\n"), some((0, 28)))
+}
+
+test "only the chunks that arrived whole are read while the answer is still coming" {
+  let partial = "data: {\"choices\":[{\"delta\":{\"content\":\"Let me \"}}]}\ndata: {\"choices\":[{\"delta\":{\"cont"
+  assert_eq(match fold(whole_lines(partial)) { ok(f) => f.content, err(_) => "ERR" }, "Let me ")
+  assert_eq(whole_lines("no newline yet"), "")
+}
+
+test "an error in the stream is an error" {
+  assert(result.is_err(fold("data: {\"error\":{\"message\":\"rate limited\"}}\n")))
+}

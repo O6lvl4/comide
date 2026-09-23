@@ -1,0 +1,419 @@
+// The input box: a line editor that emet draws itself, in the shape Claude Code made
+// familiar. A rounded box that grows with the text, a dim line under it with the model,
+// the project and the cost, and slash commands listed as they are typed.
+//
+// Everything that decides what the text becomes or where the cursor sits is a pure
+// function over `Ed`, so it is tested without a terminal. `prompt` is the one effect:
+// it reads keys (term.almd) and redraws the box after each.
+//
+//   ← → Home End, Ctrl+A/E           move; Alt+← → (or Alt+B/F) by word
+//   Backspace Delete, Ctrl+U/K/W     delete; to line start, to line end, a word back
+//   ↑ ↓                              between lines of the text, then through history
+//   Alt+Enter, or \ then Enter       a new line in the text
+//   Enter                            send
+//   Tab                              complete a slash command
+//   Ctrl+L                           clear the screen
+//   Ctrl+C                           clear the text; on an empty box, twice to leave
+//   Ctrl+D                           on an empty box, leave
+
+import io
+import fs
+import json
+import self.term
+import self.ui
+
+type Ed = { chars: List[String], cursor: Int }
+
+fn empty() -> Ed = Ed { chars: [], cursor: 0 }
+fn of(s: String) -> Ed = Ed { chars: string.chars(s), cursor: list.len(string.chars(s)) }
+fn text(e: Ed) -> String = string.join(e.chars, "")
+
+// ---- editing ------------------------------------------------------------------------
+
+fn insert(e: Ed, s: String) -> Ed = {
+  let cs = string.chars(s)
+  Ed { chars: list.take(e.chars, e.cursor) + cs + list.drop(e.chars, e.cursor), cursor: e.cursor + list.len(cs) }
+}
+
+fn remove(e: Ed, from: Int, to: Int) -> Ed = {
+  let a = int.max(0, int.min(from, to))
+  let b = int.min(list.len(e.chars), int.max(from, to))
+  Ed { chars: list.take(e.chars, a) + list.drop(e.chars, b), cursor: a }
+}
+
+fn backspace(e: Ed) -> Ed = if e.cursor == 0 then e else remove(e, e.cursor - 1, e.cursor)
+fn delete(e: Ed) -> Ed = if e.cursor >= list.len(e.chars) then e else Ed { chars: remove(e, e.cursor, e.cursor + 1).chars, cursor: e.cursor }
+fn left(e: Ed) -> Ed = Ed { chars: e.chars, cursor: int.max(0, e.cursor - 1) }
+fn right(e: Ed) -> Ed = Ed { chars: e.chars, cursor: int.min(list.len(e.chars), e.cursor + 1) }
+fn at(e: Ed, i: Int) -> String = list.get(e.chars, i) ?? ""
+
+// Where the line the cursor is on starts, and where it ends.
+fn line_start(e: Ed) -> Int = {
+  var i = e.cursor
+  while i > 0 and at(e, i - 1) != "\n" { i = i - 1 }
+  i
+}
+
+fn line_end(e: Ed) -> Int = {
+  var i = e.cursor
+  while i < list.len(e.chars) and at(e, i) != "\n" { i = i + 1 }
+  i
+}
+
+fn home(e: Ed) -> Ed = Ed { chars: e.chars, cursor: line_start(e) }
+fn end(e: Ed) -> Ed = Ed { chars: e.chars, cursor: line_end(e) }
+fn kill_to_start(e: Ed) -> Ed = remove(e, line_start(e), e.cursor)
+fn kill_to_end(e: Ed) -> Ed = { let r = remove(e, e.cursor, line_end(e)); Ed { chars: r.chars, cursor: e.cursor } }
+
+fn is_space(c: String) -> Bool = c == " " or c == "\n" or c == "\t"
+
+fn word_back(e: Ed) -> Int = {
+  var i = e.cursor
+  while i > 0 and is_space(at(e, i - 1)) { i = i - 1 }
+  while i > 0 and not is_space(at(e, i - 1)) { i = i - 1 }
+  i
+}
+
+fn word_forward(e: Ed) -> Int = {
+  var i = e.cursor
+  let n = list.len(e.chars)
+  while i < n and is_space(at(e, i)) { i = i + 1 }
+  while i < n and not is_space(at(e, i)) { i = i + 1 }
+  i
+}
+
+fn word_left(e: Ed) -> Ed = Ed { chars: e.chars, cursor: word_back(e) }
+fn word_right(e: Ed) -> Ed = Ed { chars: e.chars, cursor: word_forward(e) }
+fn delete_word(e: Ed) -> Ed = remove(e, word_back(e), e.cursor)
+
+// The line above or below, at the same column or the end of a shorter line. `none` on
+// the first or last line: there the arrows go through history instead.
+fn up(e: Ed) -> Ed? = {
+  let s = line_start(e)
+  if s == 0 then none
+  else {
+    let col = e.cursor - s
+    let prev_end = s - 1
+    let prev_start = line_start(Ed { chars: e.chars, cursor: prev_end })
+    some(Ed { chars: e.chars, cursor: prev_start + int.min(col, prev_end - prev_start) })
+  }
+}
+
+fn down(e: Ed) -> Ed? = {
+  let t = line_end(e)
+  if t >= list.len(e.chars) then none
+  else {
+    let col = e.cursor - line_start(e)
+    let next_start = t + 1
+    let next_end = line_end(Ed { chars: e.chars, cursor: next_start })
+    some(Ed { chars: e.chars, cursor: next_start + int.min(col, next_end - next_start) })
+  }
+}
+
+// ---- where things go on the screen ---------------------------------------------------
+
+type Layout = { rows: List[String], row: Int, col: Int }
+
+// The text broken into rows `w` columns wide, and the cursor's row and column in them.
+// Newlines break a row; a character that would cross the edge starts the next one.
+fn layout(e: Ed, w: Int) -> Layout = {
+  var rows: List[String] = []
+  var cur = ""
+  var col = 0
+  var crow = 0
+  var ccol = 0
+  var i = 0
+  for c in e.chars {
+    if i == e.cursor then { crow = list.len(rows); ccol = col } else ()
+    if c == "\n" then { list.push(rows, cur); cur = ""; col = 0 }
+    else {
+      let cw = ui.char_columns(c)
+      if col + cw > w then { list.push(rows, cur); cur = ""; col = 0 } else ()
+      if i == e.cursor then { crow = list.len(rows); ccol = col } else ()
+      cur = cur + c
+      col = col + cw
+    }
+    i = i + 1
+  }
+  if e.cursor >= list.len(e.chars) then {
+    if col >= w then { list.push(rows, cur); cur = ""; col = 0 } else ()
+    crow = list.len(rows)
+    ccol = col
+  } else ()
+  list.push(rows, cur)
+  Layout { rows: rows, row: crow, col: ccol }
+}
+
+type Command = { name: String, about: String }
+
+fn matching(commands: List[Command], typed: String) -> List[Command] =
+  if not string.starts_with(typed, "/") or string.contains(typed, " ") or string.contains(typed, "\n") then []
+  else list.filter(commands, (c) => string.starts_with(c.name, typed))
+
+type Frame = { lines: List[String], line: Int, col: Int }
+
+// The box, the status line and any command hints; `line` and `col` are where the
+// cursor goes, counted from the frame's first line.
+fn frame(u: ui.Ui, e: Ed, placeholder: String, status: String, commands: List[Command]) -> Frame = {
+  let w = int.max(10, u.width - 6)
+  let lay = layout(e, w)
+  var lines = [ui.dim(u, "╭" + string.repeat("─", u.width - 2) + "╮")]
+  var i = 0
+  for r in lay.rows {
+    let lead = if i == 0 then ui.cyan(u, "❯") else " "
+    let shown = if list.is_empty(e.chars) and i == 0 then ui.dim(u, string.take(placeholder, w)) else r
+    let used = if list.is_empty(e.chars) and i == 0 then ui.columns(string.take(placeholder, w)) else ui.columns(r)
+    list.push(lines, ui.dim(u, "│") + " " + lead + " " + shown + string.repeat(" ", int.max(0, w - used)) + " " + ui.dim(u, "│"))
+    i = i + 1
+  }
+  list.push(lines, ui.dim(u, "╰" + string.repeat("─", u.width - 2) + "╯"))
+  list.push(lines, "  " + ui.dim(u, ui.fit(status, u.width - 3)))
+  for c in list.take(matching(commands, text(e)), 8) {
+    list.push(lines, "  " + ui.cyan(u, string.pad_end(c.name, 14, " ")) + ui.dim(u, ui.fit(c.about, u.width - 18)))
+  }
+  Frame { lines: lines, line: 1 + lay.row, col: 4 + lay.col }
+}
+
+// ---- drawing ---------------------------------------------------------------------------
+
+// Redraws a frame over the last one. `above` is how many lines the cursor sits below the
+// top of what was drawn last time; the new value is returned for the next redraw.
+effect fn draw(above: Int, f: Frame) -> Int = {
+  let back = if above > 0 then "\u{1b}[" + int.to_string(above) + "A" else ""
+  let up = list.len(f.lines) - 1 - f.line
+  io.print("\u{1b}[?25l" + back + "\r\u{1b}[J" + string.join(f.lines, "\n")
+    + (if up > 0 then "\u{1b}[" + int.to_string(up) + "A" else "") + "\r"
+    + (if f.col > 0 then "\u{1b}[" + int.to_string(f.col) + "C" else "") + "\u{1b}[?25h")
+  f.line
+}
+
+// Takes the frame off the screen, leaving the cursor where it began.
+effect fn erase(above: Int) -> Unit =
+  io.print((if above > 0 then "\u{1b}[" + int.to_string(above) + "A" else "") + "\r\u{1b}[J")
+
+// What was sent, left in the scrollback the way Claude Code leaves it.
+fn echo(u: ui.Ui, s: String) -> String = {
+  var out: List[String] = []
+  var i = 0
+  for l in string.split(s, "\n") {
+    list.push(out, (if i == 0 then ui.dim(u, "❯ ") else "  ") + ui.dim(u, l))
+    i = i + 1
+  }
+  string.join(out, "\n")
+}
+
+// ---- history ---------------------------------------------------------------------------
+
+// One JSON string per line, so a request that spans lines stays one entry.
+effect fn load_history(path: String) -> List[String] =
+  match fs.read_text(path) {
+    err(_) => [],
+    ok(t) => list.take(list.reverse(list.filter_map(string.split(t, "\n"), (l) =>
+      match json.parse(l) { ok(v) => match value.as_string(v) { ok(s) => some(s), err(_) => none }, err(_) => none })), 500) |> list.reverse,
+  }
+
+effect fn remember(path: String, s: String) -> Unit = {
+  let _ = fs.append(path, json.stringify(value.str(s)) + "\n")
+  ()
+}
+
+// ---- the loop ----------------------------------------------------------------------------
+
+// "send" with the text, "leave" for Ctrl+D or a second Ctrl+C on an empty box.
+type Prompted = { kind: String, text: String }
+
+type Box = { ed: Ed, above: Int, history_at: Int, draft: String, armed: Bool }
+
+effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: String, commands: List[Command]) -> Prompted = {
+  var b = Box { ed: empty(), above: 0, history_at: list.len(history), draft: "", armed: false }
+  var result: Prompted? = none
+  b = Box { ed: b.ed, above: draw(0, frame(u, b.ed, placeholder, status, commands))!, history_at: b.history_at, draft: b.draft, armed: b.armed }
+  while option.is_none(result) {
+    let k = term.read_key()
+    if k.kind != "none" then {
+      let (next, done) = on_key(b, k, history, commands)
+      match done {
+        some(p) => {
+          erase(next.above)!
+          if p.kind == "send" then println(echo(u, p.text)) else ()
+          result = some(p)
+        },
+        none => {
+          if k.kind == "ctrl" and k.text == "l" then io.print("\u{1b}[2J\u{1b}[H") else ()
+          let above = if k.kind == "ctrl" and k.text == "l" then 0 else next.above
+          let shown_status = if next.armed then "press Ctrl+C again to leave" else status
+          b = Box { ed: next.ed, above: draw(above, frame(u, next.ed, placeholder, shown_status, commands))!, history_at: next.history_at, draft: next.draft, armed: next.armed }
+        },
+      }
+    } else ()
+  }
+  result ?? Prompted { kind: "leave", text: "" }
+}
+
+fn with_ed(b: Box, e: Ed) -> Box = Box { ed: e, above: b.above, history_at: b.history_at, draft: b.draft, armed: false }
+
+// What a key does to the box, and whether it ends the prompt. Pure, so the whole
+// editing surface is tested key by key.
+fn on_key(b: Box, k: term.Key, history: List[String], commands: List[Command]) -> (Box, Prompted?) = {
+  let e = b.ed
+  let t = text(e)
+  if k.kind == "enter" then {
+    if string.ends_with(t, "\\") and e.cursor == list.len(e.chars) then (with_ed(b, insert(backspace(e), "\n")), none)
+    else if string.trim(t) == "" then (b, none)
+    else (b, some(Prompted { kind: "send", text: t }))
+  }
+  else if k.kind == "newline" then (with_ed(b, insert(e, "\n")), none)
+  // Esc on an empty box gives up on it: a question can be skipped, the main prompt
+  // simply comes back.
+  else if k.kind == "esc" then (if list.is_empty(e.chars) then (b, some(Prompted { kind: "skip", text: "" })) else (b, none))
+  else if k.kind == "char" then (with_ed(b, insert(e, k.text)), none)
+  else if k.kind == "paste" then (with_ed(b, insert(e, k.text)), none)
+  else if k.kind == "backspace" then (with_ed(b, backspace(e)), none)
+  else if k.kind == "delete" then (with_ed(b, delete(e)), none)
+  else if k.kind == "left" then (with_ed(b, left(e)), none)
+  else if k.kind == "right" then (with_ed(b, right(e)), none)
+  else if k.kind == "home" then (with_ed(b, home(e)), none)
+  else if k.kind == "end" then (with_ed(b, end(e)), none)
+  else if k.kind == "wordleft" then (with_ed(b, word_left(e)), none)
+  else if k.kind == "wordright" then (with_ed(b, word_right(e)), none)
+  else if k.kind == "delete_word" then (with_ed(b, delete_word(e)), none)
+  else if k.kind == "tab" then {
+    let m = matching(commands, t)
+    if list.len(m) >= 1 then (with_ed(b, of((list.first(m) ?? Command { name: t, about: "" }).name + " ")), none) else (b, none)
+  }
+  else if k.kind == "up" then match up(e) {
+    some(moved) => (with_ed(b, moved), none),
+    none => if b.history_at > 0 then {
+      let draft = if b.history_at == list.len(history) then t else b.draft
+      (Box { ed: of(list.get(history, b.history_at - 1) ?? ""), above: b.above, history_at: b.history_at - 1, draft: draft, armed: false }, none)
+    } else (b, none),
+  }
+  else if k.kind == "down" then match down(e) {
+    some(moved) => (with_ed(b, moved), none),
+    none => if b.history_at < list.len(history) then {
+      let n = b.history_at + 1
+      let shown = if n == list.len(history) then b.draft else list.get(history, n) ?? ""
+      (Box { ed: of(shown), above: b.above, history_at: n, draft: b.draft, armed: false }, none)
+    } else (b, none),
+  }
+  else if k.kind == "ctrl" then {
+    if k.text == "a" then (with_ed(b, home(e)), none)
+    else if k.text == "e" then (with_ed(b, end(e)), none)
+    else if k.text == "b" then (with_ed(b, left(e)), none)
+    else if k.text == "f" then (with_ed(b, right(e)), none)
+    else if k.text == "u" then (with_ed(b, kill_to_start(e)), none)
+    else if k.text == "k" then (with_ed(b, kill_to_end(e)), none)
+    else if k.text == "w" then (with_ed(b, delete_word(e)), none)
+    else if k.text == "d" then (if list.is_empty(e.chars) then (b, some(Prompted { kind: "leave", text: "" })) else (with_ed(b, delete(e)), none))
+    else if k.text == "c" then {
+      if not list.is_empty(e.chars) then (with_ed(b, empty()), none)
+      else if b.armed then (b, some(Prompted { kind: "leave", text: "" }))
+      else (Box { ed: e, above: b.above, history_at: b.history_at, draft: b.draft, armed: true }, none)
+    }
+    else (b, none)
+  }
+  else (b, none)
+}
+
+// ---- choosing one of a few --------------------------------------------------------------
+
+// A menu under a question: ↑ ↓ and Enter, or the number. Esc and Ctrl+C choose none,
+// which is -1. The choice stays on the screen as one line.
+effect fn choose(u: ui.Ui, question: String, options: List[String]) -> Int = {
+  var sel = 0
+  var picked: Int? = none
+  var above = 0
+  while option.is_none(picked) {
+    var lines = ["  " + ui.dim(u, "⎿ ") + ui.bold(u, question)]
+    var i = 0
+    for o in options {
+      list.push(lines, (if i == sel then "   " + ui.cyan(u, "❯ " + int.to_string(i + 1) + ". " + o) else "     " + ui.dim(u, int.to_string(i + 1) + ".") + " " + o))
+      i = i + 1
+    }
+    list.push(lines, "  " + ui.dim(u, "↑↓ to choose · enter to confirm · esc to decline"))
+    above = draw(above, Frame { lines: lines, line: list.len(lines) - 1, col: 0 })!
+    var waiting = true
+    while waiting {
+      let k = term.read_key()
+      if k.kind == "none" then ()
+      else {
+        waiting = false
+        let digit = int.parse(k.text) ?? 0
+        if k.kind == "up" then { sel = if sel == 0 then list.len(options) - 1 else sel - 1 }
+        else if k.kind == "down" or k.kind == "tab" then { sel = (sel + 1) % list.len(options) }
+        else if k.kind == "enter" then { picked = some(sel) }
+        else if k.kind == "esc" or (k.kind == "ctrl" and k.text == "c") then { picked = some(-1) }
+        else if k.kind == "char" and digit >= 1 and digit <= list.len(options) then { picked = some(digit - 1) }
+        else ()
+      }
+    }
+  }
+  let p = picked ?? -1
+  erase(above)!
+  println("  " + ui.dim(u, "⎿ ") + ui.bold(u, question) + " " + ui.dim(u, if p < 0 then "declined" else list.get(options, p) ?? ""))
+  p
+}
+
+test "typing, moving and deleting keep the cursor where a person expects it" {
+  let e = insert(insert(empty(), "hello"), " world")
+  assert_eq(text(e), "hello world")
+  assert_eq(e.cursor, 11)
+  assert_eq(text(delete_word(e)), "hello ")
+  let w = word_left(e)
+  assert_eq(w.cursor, 6)
+  assert_eq(text(insert(w, "big ")), "hello big world")
+  assert_eq(text(backspace(home(e))), "hello world")
+  assert_eq(text(kill_to_start(Ed { chars: e.chars, cursor: 5 })), " world")
+  assert_eq(text(kill_to_end(Ed { chars: e.chars, cursor: 5 })), "hello")
+  assert_eq(text(delete(Ed { chars: e.chars, cursor: 0 })), "ello world")
+}
+
+test "up and down move between lines of the text before they reach history" {
+  let e = of("first line\nsecond")
+  assert_eq(e.cursor, 17)
+  let u1 = up(e) ?? empty()
+  assert_eq(u1.cursor, 6)
+  assert_eq(up(u1), none)
+  assert_eq(down(u1) ?? empty(), Ed { chars: e.chars, cursor: 17 })
+  assert_eq(down(e), none)
+}
+
+test "the text wraps at the box edge, counting a Japanese character as two columns" {
+  let lay = layout(of("あいうえお"), 6)
+  assert_eq(lay.rows, ["あいう", "えお"])
+  assert_eq(lay.row, 1)
+  assert_eq(lay.col, 4)
+  let two = layout(Ed { chars: string.chars("ab\ncd"), cursor: 1 }, 10)
+  assert_eq(two.rows, ["ab", "cd"])
+  assert_eq((two.row, two.col), (0, 1))
+  // A full last row puts the cursor at the start of the next.
+  let full = layout(of("abcdef"), 6)
+  assert_eq((full.row, full.col), (1, 0))
+}
+
+test "keys: Enter sends, a trailing backslash continues, Ctrl+C clears then leaves" {
+  let cmds = [Command { name: "/help", about: "" }, Command { name: "/model", about: "" }]
+  let b0 = Box { ed: of("fix it"), above: 0, history_at: 0, draft: "", armed: false }
+  assert_eq(on_key(b0, term.key("enter"), [], cmds).1, some(Prompted { kind: "send", text: "fix it" }))
+  let cont = on_key(Box { ed: of("line one\\"), above: 0, history_at: 0, draft: "", armed: false }, term.key("enter"), [], cmds)
+  assert_eq(text(cont.0.ed), "line one\n")
+  assert_eq(cont.1, none)
+  let cleared = on_key(b0, term.Key { kind: "ctrl", text: "c" }, [], cmds)
+  assert_eq(text(cleared.0.ed), "")
+  let armed = on_key(cleared.0, term.Key { kind: "ctrl", text: "c" }, [], cmds)
+  assert(armed.0.armed)
+  assert_eq(on_key(armed.0, term.Key { kind: "ctrl", text: "c" }, [], cmds).1, some(Prompted { kind: "leave", text: "" }))
+  let tabbed = on_key(Box { ed: of("/mo"), above: 0, history_at: 0, draft: "", armed: false }, term.key("tab"), [], cmds)
+  assert_eq(text(tabbed.0.ed), "/model ")
+}
+
+test "history comes back with ↑ and the unsent text with ↓" {
+  let h = ["first", "second"]
+  let b = Box { ed: of("draft"), above: 0, history_at: 2, draft: "", armed: false }
+  let one = on_key(b, term.key("up"), h, []).0
+  assert_eq(text(one.ed), "second")
+  let two = on_key(one, term.key("up"), h, []).0
+  assert_eq(text(two.ed), "first")
+  let back = on_key(on_key(two, term.key("down"), h, []).0, term.key("down"), h, []).0
+  assert_eq(text(back.ed), "draft")
+}

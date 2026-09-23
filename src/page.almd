@@ -59,6 +59,45 @@ local fn strip_tags(src: String) -> String = {
 fn text_of(doc: String) -> String =
   strip_tags(drop_blocks(drop_blocks(tokens.normalize(string.take(doc, MAX_CHARS)), "<script", "</script>"), "<style", "</style>"))
 
+// ---- for reading ------------------------------------------------------------------
+
+// `text_of` is text for matching: lowercased, commas taken out of figures. A person or a
+// model reading a page needs the page as it was written, so this keeps case and
+// punctuation, turns the ends of blocks into line breaks, decodes the common entities,
+// and closes up the blank space tags leave behind. Script and style bodies go here too.
+let READABLE_MAX_CHARS = 600000
+
+let BLOCK_ENDS = ["</p>", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>",
+  "</pre>", "</blockquote>", "</section>", "</article>", "</header>", "</footer>", "<br>", "<br/>", "<br />"]
+
+local fn decode_entities(s: String) -> String =
+  string.replace(string.replace(string.replace(string.replace(string.replace(string.replace(string.replace(s,
+    "&nbsp;", " "), "&lt;", "<"), "&gt;", ">"), "&quot;", "\""), "&#39;", "'"), "&#x27;", "'"), "&amp;", "&")
+
+fn readable(doc: String) -> String = {
+  var s = string.take(doc, READABLE_MAX_CHARS)
+  for t in [("<script", "</script>"), ("<style", "</style>"), ("<noscript", "</noscript>"), ("<svg", "</svg>"),
+            ("<SCRIPT", "</SCRIPT>"), ("<STYLE", "</STYLE>")] {
+    s = drop_blocks(s, t.0, t.1)
+  }
+  for b in BLOCK_ENDS { s = string.replace(s, b, "\n" + b) }
+  let text = decode_entities(strip_tags(s))
+  var lines: List[String] = []
+  var blank = false
+  for l in string.split(text, "\n") {
+    let t = string.trim(string.join(list.filter(string.split(string.replace(l, "\t", " "), " "), (w) => w != ""), " "))
+    if t == "" then { if not blank and not list.is_empty(lines) then { list.push(lines, ""); blank = true } else () }
+    else { list.push(lines, t); blank = false }
+  }
+  string.trim(string.join(lines, "\n"))
+}
+
+test "a page read for reading keeps its words as written, one block to a line" {
+  let doc = "<html><head><style>p{color:red}</style><script>var x=1</script></head><body>"
+    + "<h1>Almide  0.63</h1><p>Released on   <b>Sept 22</b>.</p><p>Tom &amp; Jerry&nbsp;&lt;3</p></body></html>"
+  assert_eq(readable(doc), "Almide 0.63\nReleased on Sept 22 .\nTom & Jerry <3")
+}
+
 test "tags go, and leave a boundary where they were" {
   assert_eq(text_of("<td>53</td><td>3</td>"), " 53  3 ")
 }

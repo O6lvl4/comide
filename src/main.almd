@@ -18,9 +18,12 @@ import self.claim
 import self.fetch
 import self.judge
 import self.report
+import self.agent
 
 let USAGE = """
-emet <claims.json|-> [options]
+emet                                 a coding conversation in this directory
+emet -p PROMPT [--root DIR] ...      one request, answered, then exit (emet chat --help)
+emet <claims.json|-> [options]       check claims against the pages they cite
 
   --report <path>          refusals and passes as JSON, one row per claim
   --allow-unverifiable     let claims with no checkable figure through
@@ -67,12 +70,29 @@ local fn line(j: claim.Judged) -> String = {
   mark + string.pad_end(j.claim.id, 12, " ") + " " + string.pad_end(claim.tag(j.verdict), 13, " ") + " " + claim.reason(j.verdict)
 }
 
+// The flags that only mean something to the conversation.
+let CHAT_FLAGS = ["-p", "--root", "--model", "--effort", "--yes", "--max-steps", "--golemide"]
+
+// `emet` alone is the conversation, the way `claude` is: the thing typed most should be
+// the shortest. The claim gate is reached by naming its input, a file or `-`, which a
+// conversation never takes as its first word.
+local fn chat_args(args: List[String]) -> List[String]? = {
+  let first = list.get(args, 1) ?? ""
+  if first == "chat" then some(list.drop(args, 2))
+  else if first == "" or list.contains(CHAT_FLAGS, first) then some(list.drop(args, 1))
+  else none
+}
+
 effect fn main() -> Unit = {
   let args = process.args()
   let source = list.get(args, 1) ?? ""
-  if source == "" or source == "-h" or source == "--help" then {
+  match chat_args(args) {
+    some(rest) => process.exit(agent.cli(rest)!),
+    none => (),
+  }
+  if source == "-h" or source == "--help" then {
     println(USAGE)
-    process.exit(if source == "" then 2 else 0)
+    process.exit(0)
   } else ()
 
   let raw = if source == "-" then io.read_all() else match fs.read_text(source) {
@@ -126,4 +146,14 @@ effect fn main() -> Unit = {
   }
 
   process.exit(if list.is_empty(refused) then 0 else 1)
+}
+
+test "emet alone is the conversation; a file or - is the claim gate" {
+  assert_eq(chat_args(["emet"]), some([]))
+  assert_eq(chat_args(["emet", "-p", "fix it"]), some(["-p", "fix it"]))
+  assert_eq(chat_args(["emet", "--root", "../x"]), some(["--root", "../x"]))
+  assert_eq(chat_args(["emet", "chat", "--yes"]), some(["--yes"]))
+  assert_eq(chat_args(["emet", "claims.json", "--quiet"]), none)
+  assert_eq(chat_args(["emet", "-"]), none)
+  assert_eq(chat_args(["emet", "--help"]), none)
 }

@@ -1,0 +1,240 @@
+// What the conversation looks like in a terminal.
+//
+// The shape is the one people already know from Claude Code and ZCode: a banner, an
+// input box, a bullet per tool call with its result indented under it, the answer
+// streamed as it is written, and a dim line of what the turn cost. Nothing here talks
+// to a model or touches a file; it only decides what the person sees.
+//
+// Colour is off when NO_COLOR is set or TERM says the terminal cannot, so the same
+// output is readable in a pipe or a log.
+
+import env
+
+type Ui = { color: Bool, width: Int }
+
+let DEFAULT_WIDTH = 72
+
+effect fn detect() -> Ui = {
+  let term = env.get("TERM") ?? ""
+  let plain = (env.get("NO_COLOR") ?? "") != "" or term == "" or term == "dumb"
+  Ui { color: not plain, width: int.max(40, int.min(100, int.parse(env.get("COLUMNS") ?? "") ?? DEFAULT_WIDTH)) }
+}
+
+fn paint(u: Ui, code: String, s: String) -> String = if u.color then "\u{1b}[" + code + "m" + s + "\u{1b}[0m" else s
+
+fn dim(u: Ui, s: String) -> String = paint(u, "2", s)
+fn bold(u: Ui, s: String) -> String = paint(u, "1", s)
+fn cyan(u: Ui, s: String) -> String = paint(u, "36", s)
+fn green(u: Ui, s: String) -> String = paint(u, "32", s)
+fn red(u: Ui, s: String) -> String = paint(u, "31", s)
+fn yellow(u: Ui, s: String) -> String = paint(u, "33", s)
+
+// ---- the pieces of a turn ------------------------------------------------------------
+
+// A tool call, as one line: `⏺ read(shop/cart.py)`.
+fn call_line(u: Ui, name: String, arg: String) -> String =
+  green(u, "⏺ ") + bold(u, name) + dim(u, "(") + arg + dim(u, ")")
+
+// Its result, indented under it: `  ⎿ 29 lines`. A refusal is worth a colour.
+fn result_line(u: Ui, text: String, refused: Bool) -> String =
+  "  " + dim(u, "⎿ ") + (if refused then red(u, text) else dim(u, text))
+
+fn note_line(u: Ui, text: String) -> String = "  " + dim(u, text)
+
+// A path cut from the left to fit, because the end of a path is the part that says
+// which project it is.
+fn fit_path(p: String, room: Int) -> String =
+  if string.len(p) <= room then p else "…" + string.drop(p, string.len(p) - int.max(1, room - 1))
+
+// How many terminal columns a string takes. CJK, kana, Hangul and full-width forms take
+// two; a box drawn by counting characters came out ragged on the right as soon as a
+// path held Japanese.
+fn wide(cp: Int) -> Bool =
+  (cp >= 4352 and cp <= 4447) or (cp >= 11904 and cp <= 42191) or (cp >= 44032 and cp <= 55203)
+    or (cp >= 63744 and cp <= 64255) or (cp >= 65040 and cp <= 65103) or (cp >= 65280 and cp <= 65376)
+    or (cp >= 65504 and cp <= 65510) or (cp >= 127744 and cp <= 129791) or (cp >= 131072 and cp <= 262141)
+
+fn char_columns(c: String) -> Int = match string.codepoint(c) { some(cp) => if wide(cp) then 2 else 1, none => 1 }
+
+fn columns(s: String) -> Int = list.fold(string.chars(s), 0, (n, c) => n + char_columns(c))
+
+// The start of `s` that fits in `room` columns, with an ellipsis when something was cut.
+// A line wider than the terminal wraps, and a wrapped line throws off every redraw that
+// counts lines to find its way back up.
+fn fit(s: String, room: Int) -> String =
+  if columns(s) <= room then s
+  else {
+    var out = ""
+    var used = 0
+    var going = true
+    for c in string.chars(s) {
+      if going and used + char_columns(c) <= room - 1 then { out = out + c; used = used + char_columns(c) } else { going = false }
+    }
+    out + "…"
+  }
+
+// One line of the banner box: the plain text decides the padding, the styled text is
+// what is printed, so colour never shifts the right edge.
+fn box_line(u: Ui, plain: String, styled: String) -> String =
+  dim(u, "│") + styled + string.repeat(" ", int.max(0, u.width - 2 - columns(plain))) + dim(u, "│")
+
+// The banner, closed on all four sides.
+fn banner(u: Ui, model: String, root: String) -> String = {
+  let inner = u.width - 2
+  let place = fit_path(root, inner - string.len(model) - 5)
+  string.join([
+    dim(u, "╭" + string.repeat("─", inner) + "╮"),
+    box_line(u, " ✻ emet · a coding conversation", " " + yellow(u, "✻") + " " + bold(u, "emet") + dim(u, " · a coding conversation")),
+    box_line(u, " " + model + " · " + place, " " + cyan(u, model) + dim(u, " · " + place)),
+    box_line(u, " /help for commands, /exit to leave", dim(u, " /help for commands, /exit to leave")),
+    dim(u, "╰" + string.repeat("─", inner) + "╯"),
+  ], "\n")
+}
+
+// The input line. A box around it would need its right edge drawn before the person has
+// typed anything, which a line-mode terminal cannot redraw, so it is a rule and a mark.
+fn prompt_rule(u: Ui) -> String = dim(u, string.repeat("─", u.width))
+fn prompt_head(u: Ui) -> String = cyan(u, "❯ ")
+
+// One line, rewritten in place, while the model is still quiet.
+fn waiting(u: Ui, frame: Int, seconds: Int, what: String, hint: String) -> String = {
+  let spin = list.get(["✻", "✦", "✧", "✶"], frame % 4) ?? "✻"
+  "\r" + yellow(u, spin) + " " + yellow(u, what + "…") + dim(u, " " + int.to_string(seconds) + "s" + (if hint == "" then "" else " · " + hint)) + "\u{1b}[K"
+}
+
+fn clear_line(u: Ui) -> String = if u.color then "\r\u{1b}[K" else "\n"
+
+// The cost of a turn, and of the session so far.
+// `tin` is what was sent and not served from the cache; the line shows the whole input
+// and how much of it was cached, since "1.1k in (1.3k cached)" read as more cached than sent.
+fn footer(u: Ui, steps: Int, tin: Int, tcached: Int, tout: Int, turn_cost: String, session_cost: String) -> String =
+  dim(u, "  " + int.to_string(steps) + (if steps == 1 then " step · " else " steps · ")
+    + k(tin + tcached) + " in" + (if tcached > 0 then " (" + k(tcached) + " cached)" else "") + " · " + k(tout) + " out · "
+    + turn_cost + " · session " + session_cost)
+
+fn k(n: Int) -> String = if n < 1000 then int.to_string(n) else int.to_string(n / 1000) + "." + int.to_string((n % 1000) / 100) + "k"
+
+// ---- the answer ----------------------------------------------------------------------
+
+// Markdown as far as a terminal needs it, one line at a time: a heading in bold, a code
+// fence shown as it is, **bold** and `code` inside a line, and a bulleted list left as
+// it is. Anything else is text, because an answer is mostly text.
+fn render(u: Ui, s: String) -> String = {
+  let t = string.trim_start(s)
+  let hashes = leading_hashes(t)
+  if not u.color then s
+  // Read as inline code, ```sh lost its backticks and left a bare "sh" on the screen.
+  else if string.starts_with(t, "```") then dim(u, s)
+  else if hashes >= 1 and hashes <= 6 and string.starts_with(string.drop(t, hashes), " ") then bold(u, string.trim(string.drop(t, hashes)))
+  else inline(u, s)
+}
+
+fn leading_hashes(t: String) -> Int = {
+  var n = 0
+  while string.slice(t, n, n + 1) == "#" { n = n + 1 }
+  n
+}
+
+fn inline(u: Ui, s: String) -> String = {
+    var out = ""
+    var rest = s
+    var going = true
+    while going {
+      match string.index_of(rest, "**") {
+        none => { out = out + code_spans(u, rest); going = false },
+        some(i) => {
+          let after = string.drop(rest, i + 2)
+          match string.index_of(after, "**") {
+            none => { out = out + code_spans(u, rest); going = false },
+            some(j) => {
+              out = out + code_spans(u, string.take(rest, i)) + bold(u, code_spans(u, string.take(after, j)))
+              rest = string.drop(after, j + 2)
+            },
+          }
+        },
+      }
+    }
+    out
+}
+
+fn code_spans(u: Ui, s: String) -> String = {
+  let parts = string.split(s, "`")
+  var out = ""
+  var i = 0
+  for p in parts {
+    out = out + (if i % 2 == 1 then cyan(u, p) else p)
+    i = i + 1
+  }
+  out
+}
+
+// ---- asking to run something ----------------------------------------------------------
+
+fn permission(u: Ui, question: String) -> String = string.join([
+  "  " + dim(u, "⎿ ") + bold(u, question),
+  "     " + dim(u, "1.") + " Yes",
+  "     " + dim(u, "2.") + " Yes, and stop asking this session",
+  "     " + dim(u, "3.") + " No, and tell emet what to do instead",
+  "  " + dim(u, "choice (1/2/3), or type what to do instead: "),
+], "\n")
+
+let HELP = """
+  /help        this list
+  /clear       forget the conversation so far, keep the project and the cost
+  /cost        what this session has spent
+  /model M     switch model, e.g. /model cf:glm-5.3-flash
+  /yes         stop asking before shell and verify commands (or ask again)
+  /transcript  where this session's messages are written
+  /exit        leave
+"""
+
+fn help(u: Ui) -> String = dim(u, HELP)
+
+test "colour is a choice, and the same text survives without it" {
+  let plain = Ui { color: false, width: 72 }
+  assert_eq(call_line(plain, "read", "a.py"), "⏺ read(a.py)")
+  assert_eq(result_line(plain, "29 lines", false), "  ⎿ 29 lines")
+  assert_eq(render(plain, "**bold** and `code`"), "**bold** and `code`")
+  let colour = Ui { color: true, width: 72 }
+  assert(string.contains(render(colour, "**bold**"), "\u{1b}[1mbold"))
+  assert(string.contains(render(colour, "a `x` b"), "\u{1b}[36mx"))
+  // Text either side of the marks is kept, in order.
+  assert(string.contains(render(colour, "one **two** three"), "one "))
+  assert(string.contains(render(colour, "one **two** three"), " three"))
+  assert_eq(render(plain, "unclosed ** here"), "unclosed ** here")
+}
+
+test "a fence keeps its backticks, and a heading is bold without its marks" {
+  let colour = Ui { color: true, width: 72 }
+  assert(string.contains(render(colour, "```sh"), "```sh"))
+  assert_eq(render(colour, "## インストール"), bold(colour, "インストール"))
+  assert(string.contains(render(colour, "#hashtag is text"), "#hashtag"))
+  assert_eq(leading_hashes("### x"), 3)
+}
+
+test "the banner is closed on the right, Japanese in the path or not" {
+  let u = Ui { color: false, width: 40 }
+  assert_eq(columns("abc"), 3)
+  assert_eq(columns("宮崎abc"), 7)
+  for line in string.split(banner(u, "cf:glm-5.3", "/home/me/天気"), "\n") {
+    assert_eq(columns(line), 40)
+  }
+}
+
+test "a line is cut to the columns it has" {
+  assert_eq(fit("short", 10), "short")
+  assert_eq(fit("abcdefghij", 5), "abcd…")
+  assert_eq(fit("宮崎市の天気", 7), "宮崎市…")
+}
+
+test "a long project path keeps its end" {
+  assert_eq(fit_path("/a/b/shop", 20), "/a/b/shop")
+  assert_eq(fit_path("/private/tmp/scratchpad/shop", 10), "…hpad/shop")
+}
+
+test "the waiting line rewrites itself in place" {
+  let u = Ui { color: true, width: 72 }
+  assert(string.starts_with(waiting(u, 0, 3, "Thinking", ""), "\r"))
+  assert(string.contains(waiting(u, 1, 3, "Thinking", ""), "3s"))
+  assert(string.contains(waiting(u, 5, 12, "Running", "esc to interrupt"), "Running"))
+}

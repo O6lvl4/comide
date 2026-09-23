@@ -1,0 +1,447 @@
+// The tools the conversation can call, each one a program that already exists:
+//
+//   read, outline, search, tree   hew           reads code by symbol, range or match
+//   map                           gramide map   ranks files against a task
+//   edit, write                   golemide edit the replacement ladder and the syntax gate
+//   solve                         golemide solve --json   edit, verify, retry until it passes
+//   shell                         ctxgate exec  long runner output summarised, exit kept
+//
+// None of them is reimplemented here. What this module adds is the schema the model
+// sees, the paths resolved against the project root, and a ceiling on what a result
+// may put into the conversation: past it, the whole output is kept in a file and the
+// model is told where, so it can read the part it needs with `read`.
+
+import json
+import fs
+import env
+import process
+import url
+import bytes
+import self.page
+
+// `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
+type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String }
+
+// What goes back to the model; the one line the person watching sees under the call;
+// whether that line is bad news; and what the tool spent on a model of its own (solve
+// does), so the session's cost is the whole cost.
+type ToolResult = { text: String, brief: String, failed: Bool, cost_usd: Float }
+
+fn said(text: String, brief: String) -> ToolResult = ToolResult { text: text, brief: brief, failed: false, cost_usd: 0.0 }
+fn failed(text: String, brief: String) -> ToolResult = ToolResult { text: text, brief: brief, failed: true, cost_usd: 0.0 }
+
+fn count_lines(s: String) -> String = {
+  let n = if string.trim(s) == "" then 0 else list.len(string.split(string.trim_end(s), "\n"))
+  int.to_string(n) + (if n == 1 then " line" else " lines")
+}
+
+fn first_line_of(s: String, n: Int) -> String = {
+  let l = list.first(string.split(string.trim(s), "\n")) ?? ""
+  if string.len(l) > n then string.take(l, n) + "…" else l
+}
+
+let MAX_RESULT_CHARS = 16000
+let KEEP_EACH_END = 6000
+let SHELL_TIMEOUT_S = 300
+let SOLVE_TIMEOUT_S = 1800
+let SEARCH_RESULTS = 8
+let SNIPPET_CHARS = 300
+
+// ---- the schema the model sees -------------------------------------------------------
+
+fn prop(name: String, kind: String, desc: String) -> (String, Value) =
+  (name, value.object([("type", value.str(kind)), ("description", value.str(desc))]))
+
+fn tool(name: String, desc: String, props: List[(String, Value)], required: List[String]) -> Value =
+  value.object([("type", value.str("function")), ("function", value.object([
+    ("name", value.str(name)),
+    ("description", value.str(desc)),
+    ("parameters", value.object([("type", value.str("object")), ("properties", value.object(props)),
+      ("required", value.array(list.map(required, (r) => value.str(r))))])),
+  ]))])
+
+fn definitions() -> List[Value] = [
+  tool("read", "Read a file with line numbers. Narrow it with symbol (one function or type by name), lines (\"A-B\"), or grep (a regex) with around lines of context. Read a file before editing it.",
+    [prop("path", "string", "file path, relative to the project root"), prop("symbol", "string", "function, method or type name"),
+     prop("lines", "string", "line range, e.g. \"40-90\""), prop("grep", "string", "regex; matching lines with context"),
+     prop("around", "integer", "context lines around each grep match (default 3)")], ["path"]),
+  tool("outline", "List the functions and types in a file, or in every file under a directory, with their line ranges.",
+    [prop("path", "string", "file or directory, relative to the project root")], ["path"]),
+  tool("search", "Search file contents for a regex. Each hit is labelled with the function it is in.",
+    [prop("pattern", "string", "regex"), prop("path", "string", "file or directory to search (default: the whole project)")], ["pattern"]),
+  tool("tree", "The directory tree, without version-control, build and dependency directories.",
+    [prop("path", "string", "directory (default: the project root)"), prop("depth", "integer", "levels to show (default 3)")], []),
+  tool("map", "Rank the project's files by relevance to a task and list their main symbols. Useful first in a project you have not seen.",
+    [prop("task", "string", "what you are trying to do")], ["task"]),
+  tool("edit", "Replace text in a file. Copy old exactly from what read showed, without the line-number prefix; it is matched exactly first, then with indentation and whitespace loosened, and must match one place. The syntax of the result is checked before it is written: an edit that breaks it is refused and nothing is written.",
+    [prop("path", "string", "file to change"), prop("old", "string", "the text to replace"), prop("new", "string", "the replacement")], ["path", "old", "new"]),
+  tool("write", "Create a file, or replace a file's whole content. The syntax is checked before it is written.",
+    [prop("path", "string", "file to write"), prop("content", "string", "the complete file content")], ["path", "content"]),
+  tool("shell", "Run a shell command in the project root: tests, builds, git. Returns the exit status and output. Long output is shortened for you, so do not pipe it through head or tail. The user may decline to run it.",
+    [prop("command", "string", "the command line"), prop("timeout_s", "integer", "seconds before it is stopped (default 300)")], ["command"]),
+  tool("solve", "Hand a code change to golemide. It reads the code, edits it, runs verify, and retries with the failure until verify exits 0. Use it when a command can tell whether the change is right, such as a test suite. Returns the status, the files changed and the end of the last verify output.",
+    [prop("task", "string", "the change, stated precisely"), prop("verify", "string", "command whose exit status 0 means done, e.g. \"cargo test\""),
+     prop("attempts", "integer", "edit/verify rounds before giving up (default 6)")], ["task", "verify"]),
+  tool("web_search", "Search the web. Use it for what the project cannot tell you: library and API documentation, error messages, versions, recent changes. Returns titles, addresses and snippets; read the page with web_fetch before relying on it.",
+    [prop("query", "string", "the search query"), prop("max_results", "integer", "how many results (default 8)")], ["query"]),
+  tool("web_fetch", "Read a web page on the public internet as text: a result from web_search, or an address the user gave. Long pages are shortened, and the whole text is kept in a file you can read with read (lines or grep).",
+    [prop("url", "string", "the http or https address")], ["url"]),
+]
+
+// ---- running them --------------------------------------------------------------------
+
+fn shell_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
+
+fn under_root(s: Setup, p: String) -> String =
+  if p == "" or p == "." then s.root else if string.starts_with(p, "/") then p else s.root + "/" + (string.strip_prefix(p, "./") ?? p)
+
+// Paths in results read relative to the root, as the model named them.
+fn relative(s: Setup, text: String) -> String = string.replace(text, s.root + "/", "")
+
+effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
+  match process.exec_status_timeout(prog, args, timeout_s * 1000) {
+    ok(st) => (st.code, string.trim_end(st.stdout + (if string.trim(st.stderr) == "" then "" else "\n" + st.stderr))),
+    err(e) => (-1, e),
+  }
+
+effect fn capped(s: Setup, text: String) -> String =
+  if string.len(text) <= MAX_RESULT_CHARS then text
+  else {
+    let path = s.scratch + "/output-" + int.to_string(env.millis()) + ".txt"
+    let _ = fs.write(path, text)
+    string.take(text, KEEP_EACH_END)
+      + "\n\n[… " + int.to_string(string.len(text) - 2 * KEEP_EACH_END) + " characters left out. The whole output is in "
+      + path + ": read it with lines or grep.]\n\n"
+      + string.drop(text, string.len(text) - KEEP_EACH_END)
+  }
+
+fn str_arg(a: Value, k: String) -> String = json.get_string(a, k) ?? ""
+fn strings(a: Value, k: String) -> List[String] =
+  list.filter_map(json.get_array(a, k) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
+fn int_arg(a: Value, k: String, d: Int) -> Int = json.get_int(a, k) ?? (int.parse(json.get_string(a, k) ?? "") ?? d)
+
+effect fn read(s: Setup, a: Value) -> ToolResult = {
+  var args = [under_root(s, str_arg(a, "path"))]
+  if str_arg(a, "symbol") != "" then { args = args + ["--symbol", str_arg(a, "symbol")] } else ()
+  if str_arg(a, "lines") != "" then { args = args + ["--lines", str_arg(a, "lines")] } else ()
+  if str_arg(a, "grep") != "" then { args = args + ["--grep", str_arg(a, "grep"), "--around", int.to_string(int_arg(a, "around", 3))] } else ()
+  let (_, out) = run_program("hew", args, 60)!
+  said(capped(s, relative(s, out))!, count_lines(out))
+}
+
+effect fn hew_listing(s: Setup, sub: String, a: Value) -> ToolResult = {
+  let target = under_root(s, str_arg(a, "path"))
+  let args = if sub == "tree" then ["tree", target, "--depth", int.to_string(int_arg(a, "depth", 3))]
+    else if sub == "search" then ["grep", str_arg(a, "pattern"), target]
+    else ["outline", target]
+  let (_, out) = run_program("hew", args, 60)!
+  said(capped(s, relative(s, out))!, count_lines(out))
+}
+
+effect fn map(s: Setup, a: Value) -> ToolResult = {
+  let (_, out) = run_program("gramide", ["map", s.root, "--budget", "3000", "--task", str_arg(a, "task")], 120)!
+  said(capped(s, relative(s, out))!, count_lines(out))
+}
+
+// golemide edit reads its request on stdin; the request goes through a file so the
+// timeout-bounded runner, which has no stdin, can still be used.
+effect fn golemide_edit(s: Setup, request: Value, create: Bool) -> ToolResult = {
+  let req_path = s.scratch + "/edit-" + int.to_string(env.millis()) + ".json"
+  let _ = fs.write(req_path, json.stringify(request))
+  let script = "exec \"$0\" edit --root \"$1\"" + (if create then " --create" else "") + " < \"$2\""
+  let (code, out) = run_program("bash", ["-c", script, s.golemide, s.root, req_path], 60)!
+  let _ = fs.remove(req_path)
+  match json.parse(out) {
+    err(_) => failed("golemide edit failed (exit " + int.to_string(code) + "): " + string.take(out, 2000), "golemide edit failed (exit " + int.to_string(code) + ")"),
+    ok(r) => if json.get_bool(r, "ok") ?? false then {
+      let matched = strings(r, "matched")
+      let checked = str_arg(r, "checked_by")
+      let text = "Written: " + str_arg(r, "path") + " (" + int.to_string(json.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
+        + (if list.is_empty(matched) then "" else "\nnote: " + string.join(matched, "; "))
+        + "\n" + str_arg(r, "diff")
+      let diff = str_arg(r, "diff")
+      let added = list.len(list.filter(string.split(diff, "\n"), (l) => string.starts_with(l, "+ ")))
+      let removed = list.len(list.filter(string.split(diff, "\n"), (l) => string.starts_with(l, "- ")))
+      said(capped(s, text)!, "+" + int.to_string(added) + " -" + int.to_string(removed)
+        + (if checked == "" then "" else " · checked by " + checked)
+        + (if list.is_empty(matched) then "" else " · found by a loosened match"))
+    } else failed(capped(s, "Not written: " + str_arg(r, "error"))!, "refused: " + first_line_of(str_arg(r, "error"), 90)),
+  }
+}
+
+effect fn edit(s: Setup, a: Value) -> ToolResult =
+  golemide_edit(s, value.object([("path", value.str(str_arg(a, "path"))),
+    ("replacements", value.array([value.object([("old", value.str(str_arg(a, "old"))), ("new", value.str(str_arg(a, "new")))])]))]), false)!
+
+effect fn write(s: Setup, a: Value) -> ToolResult =
+  golemide_edit(s, value.object([("path", value.str(str_arg(a, "path"))), ("source", value.str(str_arg(a, "content")))]), true)!
+
+effect fn shell(s: Setup, a: Value) -> ToolResult = {
+  let command = str_arg(a, "command")
+  let line = "cd " + shell_quote(s.root) + " && " + command
+  // pipefail: measured on the first conversation, `npm test 2>&1 | tail -30` in a
+  // project with no package.json came back exit 0, tail's status, not npm's.
+  let bash = ["bash", "-o", "pipefail", "-c", line]
+  let (code, out) = if s.ctxgate then run_program("ctxgate", ["exec", "--"] + bash, int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
+    else run_program("bash", list.drop(bash, 1), int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
+  let status = if code == -1 then "did not finish: " else "exit " + int.to_string(code) + "\n"
+  let brief = if code == -1 then "did not finish: " + first_line_of(out, 80) else "exit " + int.to_string(code) + " · " + count_lines(out)
+  if code == 0 then said(capped(s, status + out)!, brief) else failed(capped(s, status + out)!, brief)
+}
+
+fn solve_summary(doc: Value) -> String = {
+  let status = str_arg(doc, "status")
+  var lines = [status + " (exit " + int.to_string(json.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(json.get_int(doc, "attempts") ?? 0) + " attempt(s)"]
+  let changed = strings(doc, "changed")
+  if not list.is_empty(changed) then list.push(lines, "changed: " + string.join(changed, ", ")) else ()
+  for w in strings(doc, "warnings") { list.push(lines, "warning: " + w) }
+  if str_arg(doc, "message") != "" then list.push(lines, str_arg(doc, "message")) else ()
+  match list.last(json.get_array(doc, "attempt_log") ?? []) {
+    some(t) => if str_arg(t, "explanation") != "" then list.push(lines, "last change: " + str_arg(t, "explanation")) else (),
+    none => (),
+  }
+  if str_arg(doc, "diff") != "" then list.push(lines, "what it changed, from before its first write:\n" + str_arg(doc, "diff")) else ()
+  match value.field(doc, "last_verify") {
+    ok(v) => list.push(lines, "last verify, exit " + int.to_string(json.get_int(v, "exit") ?? -1) + ":\n" + str_arg(v, "output_tail")),
+    err(_) => (),
+  }
+  string.join(lines, "\n")
+}
+
+// No --model: golemide runs its repair loop on its own default (flash, escalating to
+// glm-5.3 when it stalls), whatever model the conversation is on.
+effect fn solve(s: Setup, a: Value) -> ToolResult = {
+  let args = ["solve", str_arg(a, "task"), "--root", s.root, "--verify", str_arg(a, "verify"),
+    "--attempts", int.to_string(int_arg(a, "attempts", 6)), "--json", "--quiet"]
+  let (code, out) = run_program(s.golemide, args, SOLVE_TIMEOUT_S)!
+  // stdout is one JSON object; stderr, which run_program appends, is progress.
+  let first_line = list.first(string.split(out, "\n")) ?? ""
+  let parsed = json.parse(first_line)
+  let text = match parsed {
+    ok(doc) => solve_summary(doc),
+    err(_) => "golemide solve failed (exit " + int.to_string(code) + "):\n" + out,
+  }
+  let spent = match parsed { ok(doc) => json.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
+  let solved = match parsed { ok(doc) => json.get_bool(doc, "ok") ?? false, err(_) => false }
+  ToolResult { text: capped(s, text)!, brief: first_line_of(text, 90), failed: not solved, cost_usd: spent }
+}
+
+// ---- the web -------------------------------------------------------------------------
+
+fn search_url(base: String, query: String) -> String =
+  base + "/search?q=" + url.encode_component(query) + "&format=json"
+
+// The engines SearXNG asked that did not answer, each reported as [name, reason].
+fn silent_engines(d: Value) -> List[String] =
+  list.filter_map(json.get_array(d, "unresponsive_engines") ?? [], (e) => match value.as_array(e) {
+    ok(pair) => match list.first(pair) { some(n) => match value.as_string(n) { ok(name) => some(name), err(_) => none }, none => none },
+    err(_) => none,
+  })
+
+// Numbered, so the model can say which one it means; the address on its own line, so
+// it can be passed to web_fetch as it is.
+fn search_results(body: String, max: Int) -> (String, Int) =
+  match json.parse(body) {
+    err(_) => ("the search engine answered something that is not JSON: " + string.take(body, 200), 0),
+    ok(d) => {
+      var out: List[String] = []
+      var n = 0
+      for r in list.take(json.get_array(d, "results") ?? [], max) {
+        n = n + 1
+        let snippet = string.trim(str_arg(r, "content"))
+        list.push(out, int.to_string(n) + ". " + str_arg(r, "title") + "\n   " + str_arg(r, "url")
+          + (if snippet == "" then "" else "\n   " + string.take(snippet, SNIPPET_CHARS)))
+      }
+      let silent = silent_engines(d)
+      let note = if list.is_empty(silent) then "" else "\n(did not answer: " + string.join(silent, ", ") + ")"
+      ((if n == 0 then "no results" else string.join(out, "\n")) + note, n)
+    },
+  }
+
+let UA = "Mozilla/5.0 (compatible; emet/0.1; +https://github.com/O6lvl4/emet)"
+
+type Got = { status: Int, body: String, error: String }
+
+// One GET, through curl rather than Almide's `http`. That client turns a chunked body
+// into text before it takes the chunk framing out, so a multibyte character split
+// across two chunks becomes U+FFFD, the byte counts stop matching, and the process
+// panics (almide#2536). Measured 2026-09-23: asking for tenki.jp's forecast for Miyazaki ended the
+// whole conversation that way. curl hands the bytes back whole, and follows redirects.
+effect fn get(s: Setup, address: String, accept: String) -> Got = {
+  let out = s.scratch + "/web-" + int.to_string(env.millis()) + ".body"
+  let args = ["-sS", "-L", "--max-redirs", "5", "--max-time", "20", "--compressed", "--proto", "=http,https",
+    "-A", UA, "-H", "Accept: " + accept, "-o", out, "-w", "%{http_code}", address]
+  let (code, said_back) = run_program("curl", args, 30)!
+  let body = bytes.to_string_lossy(bytes.from_list(fs.read_bytes(out) ?? []))
+  let _ = fs.remove(out)
+  if code != 0 then Got { status: 0, body: "", error: first_line_of(said_back, 200) }
+  else Got { status: int.parse(string.trim(said_back)) ?? 0, body: body, error: "" }
+}
+
+effect fn web_search(s: Setup, a: Value) -> ToolResult = {
+  let g = get(s, search_url(s.searx, str_arg(a, "query")), "application/json")!
+  if g.error != "" then failed("the search engine did not answer: " + g.error + ". It is the SearXNG at " + s.searx
+      + "; if it runs in Docker, `docker start searxng` starts it.", "search unavailable: " + first_line_of(g.error, 70))
+  else if g.status != 200 then failed("SearXNG at " + s.searx + " answered HTTP " + int.to_string(g.status)
+      + " (403 means JSON is not enabled in its settings.yml: search.formats needs json)", "search unavailable: HTTP " + int.to_string(g.status))
+  else {
+    let (text, n) = search_results(g.body, int_arg(a, "max_results", SEARCH_RESULTS))
+    if n == 0 then failed(text, "no results") else said(text, int.to_string(n) + (if n == 1 then " result" else " results"))
+  }
+}
+
+// The host part of an address, lowercased, without user, port or brackets.
+fn host_of(address: String) -> String = {
+  let rest = string.strip_prefix(address, "https://") ?? (string.strip_prefix(address, "http://") ?? "")
+  let authority = list.first(string.split(list.first(string.split(list.first(string.split(rest, "/")) ?? "", "?")) ?? "", "#")) ?? ""
+  let hostport = list.last(string.split(authority, "@")) ?? ""
+  let bare = if string.starts_with(hostport, "[") then list.first(string.split(string.drop(hostport, 1), "]")) ?? "" else list.first(string.split(hostport, ":")) ?? ""
+  string.to_lower(bare)
+}
+
+// Pages are read without asking, so what a page could point the model at is limited to
+// the public web: not this machine, not the local network, not a bare intranet name.
+// A name that resolves to a private address is not caught here; this is a guard
+// against the obvious addresses, not a firewall.
+fn private_host(h: String) -> Bool = {
+  let second = int.parse(list.get(string.split(h, "."), 1) ?? "") ?? -1
+  h == "" or h == "localhost" or string.ends_with(h, ".localhost") or string.ends_with(h, ".local") or string.ends_with(h, ".internal")
+    or not string.contains(h, ".") or string.contains(h, ":")
+    or string.starts_with(h, "127.") or string.starts_with(h, "10.") or string.starts_with(h, "0.")
+    or string.starts_with(h, "192.168.") or string.starts_with(h, "169.254.")
+    or (string.starts_with(h, "172.") and second >= 16 and second <= 31)
+}
+
+effect fn web_fetch(s: Setup, a: Value) -> ToolResult = {
+  let address = str_arg(a, "url")
+  let host = host_of(address)
+  if not (string.starts_with(address, "http://") or string.starts_with(address, "https://")) then
+    failed("only http and https addresses can be read: " + address, "not an http(s) address")
+  else if private_host(host) then
+    failed("not read: " + host + " is on this machine or a private network, and pages are only read from the public web", "not read: private address")
+  else {
+    let g = get(s, address, "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8")!
+    if g.error != "" then failed("could not read " + address + ": " + g.error, "could not read: " + first_line_of(g.error, 70))
+    else if g.status < 200 or g.status >= 300 then failed("could not read " + address + ": HTTP " + int.to_string(g.status), "could not read: HTTP " + int.to_string(g.status))
+    else {
+      let text = page.readable(g.body)
+      if string.trim(text) == "" then failed("the page at " + address + " has no readable text (it may be built by scripts)", "no readable text")
+      else said(capped(s, "# " + address + "\n\n" + text)!, count_lines(text))
+    }
+  }
+}
+
+effect fn run(s: Setup, name: String, arguments: String) -> ToolResult =
+  match json.parse(if string.trim(arguments) == "" then "{}" else arguments) {
+    err(e) => failed("the arguments were not valid JSON (" + e + "): " + string.take(arguments, 300), "the arguments were not valid JSON"),
+    ok(a) =>
+      if name == "read" then read(s, a)!
+      else if name == "outline" or name == "tree" or name == "search" then hew_listing(s, name, a)!
+      else if name == "map" then map(s, a)!
+      else if name == "edit" then edit(s, a)!
+      else if name == "write" then write(s, a)!
+      else if name == "shell" then shell(s, a)!
+      else if name == "solve" then solve(s, a)!
+      else if name == "web_search" then web_search(s, a)!
+      else if name == "web_fetch" then web_fetch(s, a)!
+      else failed("there is no tool called " + name, "no such tool"),
+  }
+
+// What the model is told about the project before the first request: its layout and
+// its git state, both cheap, neither needing permission. Measured on the first
+// conversation without it: asked to run the tests of a Python project, the model's
+// first command was `npm test`.
+effect fn project_context(s: Setup) -> String = {
+  let (_, tree) = run_program("hew", ["tree", s.root, "--depth", "2"], 30)!
+  let (git_code, git) = run_program("bash", ["-c", "cd " + shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
+  let tree_part = string.take(relative(s, tree), 3000)
+  let git_part = if git_code == 0 then "\n\ngit branch and uncommitted changes:\n" + git else "\n\nnot a git repository"
+  "Project layout:\n" + tree_part + git_part
+}
+
+// The call as the person sees it, `read(shop/cart.py:40-90)`: the argument that says
+// what the call is about, not all of them.
+fn call_label(name: String, arguments: String) -> String =
+  match json.parse(arguments) {
+    err(_) => "",
+    ok(a) => {
+      let path = if str_arg(a, "path") == "" then "." else str_arg(a, "path")
+      let narrowed = if str_arg(a, "symbol") != "" then " " + str_arg(a, "symbol")
+        else if str_arg(a, "lines") != "" then ":" + str_arg(a, "lines")
+        else if str_arg(a, "grep") != "" then " /" + str_arg(a, "grep") + "/" else ""
+      let label = if name == "read" then path + narrowed
+        else if name == "search" then "/" + str_arg(a, "pattern") + "/" + (if str_arg(a, "path") == "" then "" else " in " + str_arg(a, "path"))
+        else if name == "map" then str_arg(a, "task")
+        else if name == "shell" then str_arg(a, "command")
+        else if name == "solve" then str_arg(a, "task") + " · verify: " + str_arg(a, "verify")
+        else if name == "web_search" then str_arg(a, "query")
+        else if name == "web_fetch" then str_arg(a, "url")
+        else path
+      if string.len(label) > 100 then string.take(label, 100) + "…" else label
+    },
+  }
+
+// The part of a call that decides whether the person is asked first: a shell command,
+// or the verify command golemide will run, which is a shell command too.
+fn command_of(name: String, arguments: String) -> String? =
+  match json.parse(arguments) {
+    ok(a) => if name == "shell" then some(str_arg(a, "command"))
+      else if name == "solve" then some(str_arg(a, "verify"))
+      else none,
+    err(_) => none,
+  }
+
+test "paths resolve against the root, and results read relative to it" {
+  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888" }
+  assert_eq(under_root(s, "src/a.py"), "/w/proj/src/a.py")
+  assert_eq(under_root(s, "./src/a.py"), "/w/proj/src/a.py")
+  assert_eq(under_root(s, ""), "/w/proj")
+  assert_eq(relative(s, "# /w/proj/src/a.py  (3 lines)"), "# src/a.py  (3 lines)")
+}
+
+test "a solve report keeps what the next decision needs" {
+  let doc = json.parse("{\"status\":\"not_solved\",\"exit\":1,\"attempts\":2,\"changed\":[\"a.py\"],\"warnings\":[],\"attempt_log\":[{\"explanation\":\"cap at hi\"}],\"diff\":\"--- a.py ---\\n- return x\\n+ return min(x, hi)\",\"last_verify\":{\"exit\":1,\"output_tail\":\"AssertionError\"}}") ?? value.object([])
+  let text = solve_summary(doc)
+  assert(string.starts_with(text, "not_solved (exit 1) after 2 attempt(s)"))
+  assert(string.contains(text, "changed: a.py"))
+  assert(string.contains(text, "last change: cap at hi"))
+  assert(string.contains(text, "AssertionError"))
+  assert(string.contains(text, "+ return min(x, hi)"))
+}
+
+test "a call is shown by what it is about" {
+  assert_eq(call_label("read", "{\"path\":\"a.py\",\"lines\":\"3-9\"}"), "a.py:3-9")
+  assert_eq(call_label("shell", "{\"command\":\"go test ./...\"}"), "go test ./...")
+  assert_eq(call_label("tree", "{}"), ".")
+  assert_eq(count_lines("a\nb\n"), "2 lines")
+  assert_eq(count_lines(""), "0 lines")
+}
+
+test "only a shell command or a verify command asks first" {
+  assert_eq(command_of("shell", "{\"command\":\"rm -rf build\"}"), some("rm -rf build"))
+  assert_eq(command_of("solve", "{\"task\":\"t\",\"verify\":\"pytest\"}"), some("pytest"))
+  assert_eq(command_of("read", "{\"path\":\"a\"}"), none)
+  assert_eq(command_of("web_fetch", "{\"url\":\"https://example.com\"}"), none)
+  assert_eq(command_of("web_search", "{\"query\":\"almide\"}"), none)
+}
+
+test "search results are numbered, with the address on its own line and the silent engines named" {
+  let body = "{\"results\":[{\"title\":\"almide/almide\",\"url\":\"https://github.com/almide/almide\",\"content\":\"A statically-typed language\"},{\"title\":\"Zenn\",\"url\":\"https://zenn.dev/x\",\"content\":\"\"}],\"unresponsive_engines\":[[\"duckduckgo\",\"CAPTCHA\"]]}"
+  let (text, n) = search_results(body, 8)
+  assert_eq(n, 2)
+  assert(string.starts_with(text, "1. almide/almide\n   https://github.com/almide/almide\n   A statically-typed language\n2. Zenn"))
+  assert(string.contains(text, "(did not answer: duckduckgo)"))
+  assert_eq(search_results("{\"results\":[]}", 8).1, 0)
+  assert_eq(search_url("http://127.0.0.1:8888", "境界 test"), "http://127.0.0.1:8888/search?q=%E5%A2%83%E7%95%8C%20test&format=json")
+}
+
+test "pages on this machine or a private network are not read" {
+  assert_eq(host_of("https://tenki.jp/forecast/9/48/"), "tenki.jp")
+  assert_eq(host_of("http://user@Example.COM:8080/x?y#z"), "example.com")
+  assert_eq(host_of("http://[::1]:8888/"), "::1")
+  assert(not private_host("tenki.jp"))
+  assert(not private_host("172.32.0.1"))
+  for h in ["localhost", "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.20.1.1", "169.254.169.254", "::1", "intranet", "printer.local", "0.0.0.0"] {
+    assert(private_host(h))
+  }
+}

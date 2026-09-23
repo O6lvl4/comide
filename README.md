@@ -325,12 +325,16 @@ thread 'main' panicked: end byte index 57647 is not a char boundary;
 it is inside '\u{fffd}' (bytes 57645..57648 of string)
 ```
 
-The page contains invalid UTF-8. `fs.read_text` refuses such input outright; the HTTP
-client decodes it lossily, so the string arrives carrying replacement characters.
-Normalising before any index is taken did not clear it, and a synthetic invalid-UTF-8
-page served over HTTP does not reproduce it. A pure-regex rewrite of the page path was
-tried and reverted — it overflowed the stack on a 200 KB page. `bench/fetch.mjs`
-decodes in Node and sidesteps it, which is how the numbers above were obtained.
+The cause is in Almide's HTTP client, not in the page
+([almide#2536](https://github.com/almide/almide/issues/2536)). A chunked response is
+decoded to text before the chunk framing is taken out, so a multibyte character that
+straddles two chunks becomes U+FFFD, the byte counts in the framing stop matching the
+text, and cutting a chunk at its stated length lands inside a character. That is why a
+synthetic invalid-UTF-8 page never reproduced it, and why the byte offset changes from
+one fetch to the next. It was found again on 2026-09-23, when `emet chat` read a
+Japanese weather page and the whole conversation ended the same way; `emet chat` now
+reads pages through curl. The claim gate still uses the Almide client, and
+`bench/fetch.mjs`, which decodes in Node, is still how the numbers above were obtained.
 
 ## Not built yet## Not built yet## Not built yet
 
@@ -343,6 +347,99 @@ how often a refusal is wrong.
 The order is deliberate: citation coverage is the cheapest of the three and the
 only one that needs no inference at all, and the other two are fitted on data this
 one produces.
+
+## emet chat
+
+`emet chat` is a coding conversation in the terminal, the shape of ZCode or Claude Code,
+whose tools are programs that already exist rather than new code:
+
+| Tool | Program | What it adds |
+|---|---|---|
+| `read`, `outline`, `search`, `tree` | [hew](https://github.com/O6lvl4/hew) | reads a function by name, a range or a match, not whole files |
+| `map` | [gramide](https://github.com/O6lvl4/gramide) | ranks the project's files against the task |
+| `edit`, `write` | `golemide edit` | loosened matching for quotes from memory; a syntax gate before any byte is written |
+| `solve` | `golemide solve --json` | a failing test handed over whole: edit, verify, retry, and only the result comes back |
+| `shell` | [ctxgate](https://github.com/O6lvl4/ctxgate) `exec` | test-runner output summarised, the exit status kept |
+| `web_search` | [SearXNG](https://github.com/searxng/searxng) on this machine | search with no API key and no account |
+| `web_fetch` | curl, and emet's own page reader | a page as readable text, redirects followed |
+
+```sh
+emet                                  # a conversation in this directory; /exit to leave
+emet -p "the tests fail; fix them"    # one request, then exit
+emet --yes --root ../project          # run shell and verify commands without asking
+```
+
+Searching needs a SearXNG with JSON answers turned on. Run it once in Docker, bound to
+this machine only:
+
+```sh
+mkdir -p ~/.config/searxng
+docker run -d --name searxng --restart unless-stopped \
+  -p 127.0.0.1:8888:8080 -v ~/.config/searxng:/etc/searxng searxng/searxng
+```
+
+then add `limiter: false` under `server:` and `formats: [html, json]` under `search:` in
+`~/.config/searxng/settings.yml`, and `docker restart searxng`. `$EMET_SEARXNG_URL` points
+emet at another instance. Engines that turn a query away, as DuckDuckGo did with a
+CAPTCHA on the first search, are named under the results; when SearXNG is not running,
+the search says so and names the command that starts it.
+
+`emet chat` still means the same thing. The claim gate is reached by giving it its
+input, `emet claims.json` or `emet -`.
+
+It uses the same Cloudflare Workers AI credentials as golemide. The conversation runs
+on `cf:glm-5.3` unless `--model` or `/model` says otherwise; the repair loop behind
+`solve` stays on golemide's own default, `cf:glm-5.3-flash`. golemide, hew and gramide are found on `PATH`;
+`--golemide` or `$EMET_GOLEMIDE` points at another golemide. To put both agents on
+`PATH` from their checkouts:
+
+```sh
+ln -s "$PWD/bin/emet" ~/.local/bin/emet
+ln -s "$(cd ../golemide && pwd)/golemide" ~/.local/bin/golemide
+```
+
+`bin/emet` is a small shell script that runs the binary and puts the terminal settings
+back afterwards, so a crash cannot leave the terminal without echo.
+
+In a conversation the answer streams in as it is written, each tool call is a line
+with its result under it, and every turn ends with what it cost:
+
+```
+⏺ solve(make the failing tests in lru_test.go pass · verify: go test ./...)
+  ⎿ solved (exit 0) after 1 attempt(s)
+
+⏺ go test ./... passes now. lru.go had four bugs: …
+
+  2 steps · 3.7k in · 268 out · $0.001222 · session $0.001222
+```
+
+On a terminal emet takes the input over key by key and draws it itself: a box that
+grows with the text and wraps Japanese at its real width, and a status line under it.
+
+| Key | Does |
+|---|---|
+| Enter | send |
+| Alt+Enter, or `\` then Enter | a new line in the text; pasted newlines stay text |
+| ← → Home End, Ctrl+A/E, Alt+← → | move, by character, line or word |
+| Backspace Delete, Ctrl+U/K/W | delete; to line start, to line end, a word back |
+| ↑ ↓ | between lines of the text, then through history (`~/.emet/history`) |
+| Tab | complete a slash command; typing `/` lists them |
+| Esc or Ctrl+C while emet works | interrupt the turn, keep the conversation |
+| Ctrl+C | clear the text; on an empty box, twice to leave |
+| Ctrl+D | on an empty box, leave |
+| Ctrl+L | clear the screen |
+
+A question before a command is a menu: ↑ ↓ and Enter, or its number; choosing "No"
+asks what to do instead. `/help`, `/clear`, `/cost`, `/model`, `/yes`, `/transcript` and
+`/exit` work at the prompt. From a pipe emet reads plain lines instead, and with `-p`
+the answer alone goes to stdout and the rest to stderr.
+
+Two things are asked before they run: a shell command, and the verify command golemide
+would run, which is a shell command too. Pages are read without asking, but only from
+the public web: addresses on this machine, on a private network or with no dot in the
+host are refused. The question offers yes, yes for the rest of the
+session, and no; typing a sentence instead declines and passes the sentence to the
+model. The claim gate above is untouched: `emet claims.json` behaves exactly as before.
 
 ## License
 

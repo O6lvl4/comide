@@ -1,0 +1,593 @@
+// emet chat: a conversation that can look at code and change it.
+//
+// The loop is the one every coding agent has: send the conversation and the tools, run
+// whatever tools the model calls, send their results back, and stop when it answers in
+// words. What is particular here is what the tools are (see tools.almd): the reads are
+// hew, the writes go through golemide's syntax gate, and a change a command can check
+// is handed to golemide solve whole, so its repair loop runs outside the conversation
+// and only its result comes back into it.
+//
+// Two things are asked before they happen: a shell command, and the verify command
+// golemide would run, which is a shell command too. Measured on the ZCode run: an agent
+// allowed to run anything installed Boost on the host to get a C++ exercise through.
+//
+// What it looks like is ui.almd. Interactively everything goes to stdout, the answer
+// streamed as it is written; with -p the answer alone goes to stdout and the tool calls
+// to stderr, so a script can take the answer and a person can still watch.
+
+import json
+import io
+import env
+import fs
+import process
+import self.model
+import self.tools
+import self.envfile
+import self.ui
+import self.term
+import self.editor
+
+// `live` is a conversation rather than one -p request: the answer streams and questions
+// can be asked. `tui` is a live conversation on a terminal that emet has taken over key by
+// key (term.almd): the input box, menus, and Esc to interrupt.
+type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui }
+
+fn with_model(o: Options, m: String) -> Options =
+  Options { root: o.root, model: m, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: o.tui, ui: o.ui }
+
+fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options =
+  Options { root: o.root, model: o.model, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: tui, ui: u }
+type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int }
+
+fn system_prompt(root: String) -> String = """
+You are emet, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
+
+How to work:
+- Look before you change anything. In a project you have not seen, start with map or tree. Read narrowly, by symbol, lines or grep, rather than whole large files.
+- Look with tree, map, outline, search and read, never with shell (no ls, cat, grep or find): they need no permission, and shell does.
+- Change a file with edit, copying old exactly from what read showed, without the line numbers. Use write for a new file or a complete rewrite.
+- When failing tests or a failing build define the work, call solve with that command as verify instead of editing yourself. It reads the code, edits, runs the command and retries on its own, at a fraction of the cost of doing the same here step by step. Edit yourself only for a change you can already see in full, such as one line.
+- Run tests and other commands with shell. The user may decline.
+- For what the project cannot tell you, such as library documentation, an unfamiliar error or a recent release, use web_search and then web_fetch the page that answers. Say which page an answer came from, and do not present a snippet you have not read as fact.
+- Every write is syntax-checked first. If an edit is refused, read the reason, look again, and retry.
+
+When you answer:
+- Be brief. Say what you changed and how you know it works. If nothing checked it, say so.
+- Answer in the language the user wrote in.
+"""
+
+fn message(role: String, content: String) -> Value = value.object([("role", value.str(role)), ("content", value.str(content))])
+
+fn tool_message(id: String, content: String) -> Value =
+  value.object([("role", value.str("tool")), ("tool_call_id", value.str(id)), ("content", value.str(content))])
+
+// A tool result has to answer to the id of the call it belongs to. A provider that
+// leaves the id empty gets one made up here, before the assistant message is recorded.
+fn with_ids(calls: List[model.ToolCall], step: Int) -> List[model.ToolCall] = {
+  var out: List[model.ToolCall] = []
+  var i = 0
+  for c in calls {
+    list.push(out, model.ToolCall { id: if c.id == "" then "call_" + int.to_string(step) + "_" + int.to_string(i) else c.id, name: c.name,
+      arguments: if string.trim(c.arguments) == "" then "{}" else c.arguments })
+    i = i + 1
+  }
+  out
+}
+
+fn assistant_message(content: String, calls: List[model.ToolCall]) -> Value = {
+  var fields = [("role", value.str("assistant")), ("content", value.str(content))]
+  if not list.is_empty(calls) then list.push(fields, ("tool_calls", value.array(list.map(calls, (c) => value.object([
+    ("id", value.str(c.id)), ("type", value.str("function")),
+    ("function", value.object([("name", value.str(c.name)), ("arguments", value.str(c.arguments))])),
+  ]))))) else ()
+  value.object(fields)
+}
+
+fn usd(x: Float) -> String = {
+  let micros = float.to_int(x * 1000000.0 + 0.5)
+  "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
+}
+
+// `io.read_line` answers "" both for an empty line and at the end of input, and the
+// loop has to tell them apart: one is a person pressing return, the other is the end
+// (almide#2539).
+effect fn read_input() -> String? = {
+  var b = io.read_byte()
+  if b < 0 then none
+  else {
+    var bytes: List[Int] = []
+    while b >= 0 and b != 10 { list.push(bytes, b); b = io.read_byte() }
+    some(string.trim_end(string.from_bytes(bytes)))
+  }
+}
+
+// Where the person watching sees progress: stdout in a conversation, stderr under -p.
+effect fn show(opts: Options, s: String) -> Unit = if opts.live then println(s) else eprintln(s)
+
+// ---- asking first --------------------------------------------------------------------
+
+type Permission = { run: Bool, allow_from_now: Bool, said: String }
+
+// Anything typed at the question other than the choices is a no with a reason, and the
+// reason goes to the model. Measured on the first scripted conversation: the next
+// request, typed while the question was open, was read as the answer, counted as a no,
+// and lost.
+fn answer_of(raw: String) -> Permission = {
+  let a = string.to_lower(string.trim(raw))
+  if a == "2" or a == "a" or a == "always" then Permission { run: true, allow_from_now: true, said: "" }
+  else if a == "1" or a == "y" or a == "yes" then Permission { run: true, allow_from_now: false, said: "" }
+  else if a == "" or a == "3" or a == "n" or a == "no" then Permission { run: false, allow_from_now: false, said: "" }
+  else Permission { run: false, allow_from_now: false, said: string.trim(raw) }
+}
+
+effect fn permitted(opts: Options, allow: Bool, question: String) -> Permission =
+  if allow then Permission { run: true, allow_from_now: true, said: "" }
+  else if not opts.live then Permission { run: false, allow_from_now: false, said: "" }
+  else if opts.tui then {
+    let pick = editor.choose(opts.ui, question, ["Yes", "Yes, and stop asking this session", "No, and tell emet what to do instead"])!
+    if pick == 0 then Permission { run: true, allow_from_now: false, said: "" }
+    else if pick == 1 then Permission { run: true, allow_from_now: true, said: "" }
+    else if pick == 2 then {
+      let p = editor.prompt(opts.ui, [], "what should emet do instead?  (esc to skip)", "", [])!
+      Permission { run: false, allow_from_now: false, said: if p.kind == "send" then p.text else "" }
+    }
+    else Permission { run: false, allow_from_now: false, said: "" }
+  }
+  else {
+    io.print(ui.permission(opts.ui, question))
+    answer_of(read_input()! ?? "3")
+  }
+
+fn declined(opts: Options, said: String) -> String =
+  if not opts.live then "Not run: this session does not allow shell commands. The user can allow them by starting emet with --yes."
+  else if said != "" then "Not run. The user declined and said: " + said
+  else "Not run: the user declined this command. Do not retry it; answer with what you have, or ask."
+
+// ---- one model call, watched -----------------------------------------------------------
+
+fn retryable(e: String) -> Bool =
+  string.contains(e, "status 429") or string.contains(e, "status 50") or string.starts_with(e, "transport")
+
+// The whole lines of the answer not yet on screen, the first of a message marked as
+// the assistant's. Lines, not chunks: **bold** split across two chunks would be printed
+// as asterisks.
+fn answer_lines(u: ui.Ui, chunk: String, first: Bool) -> String = {
+  let lines = string.split(string.trim_end(chunk), "\n")
+  var out: List[String] = []
+  var i = 0
+  for l in lines {
+    list.push(out, (if i == 0 and first then "⏺ " else "  ") + ui.render(u, l))
+    i = i + 1
+  }
+  string.join(out, "\n")
+}
+
+// `interrupted` is the person pressing Esc or Ctrl+C while the model was still answering;
+// the reply is then empty and nothing of it is recorded.
+type Heard = { reply: model.Reply, printed: Int, interrupted: Bool }
+
+fn no_reply() -> model.Reply = model.Reply { content: "", reasoning: "", calls: [], finish: "", cost_usd: 0.0, input_tokens: 0, cached_tokens: 0, output_tokens: 0, ms: 0 }
+
+// Waits for the request, and in a conversation shows it arriving: a spinner while the
+// model is quiet, then each whole line of its answer as soon as it is written.
+effect fn await_reply(opts: Options, c: model.Call) -> Result[Heard, String] = {
+  let u = opts.ui
+  let t0 = env.millis()
+  var printed = 0
+  var frame = 0
+  var spinning = false
+  var timed_out = false
+  var interrupted = false
+  while not model.is_done(c)! and not timed_out and not interrupted {
+    // On a taken-over terminal the wait is a key read with a tenth of a second's timeout,
+    // so Esc or Ctrl+C stops the request mid-answer; otherwise it is a plain sleep.
+    if opts.tui then {
+      let k = term.read_key()
+      if k.kind == "esc" or (k.kind == "ctrl" and k.text == "c") then interrupted = true else ()
+    } else env.sleep_ms(100)
+    if opts.live then {
+      let text = model.text_so_far(c)!
+      let upto = match string.last_index_of(text, "\n") { some(i) => i + 1, none => 0 }
+      if upto > printed and string.trim(string.slice(text, printed, upto)) != "" then {
+        if spinning then { io.print(ui.clear_line(u)); spinning = false } else ()
+        println((if printed == 0 then "\n" else "") + answer_lines(u, string.slice(text, printed, upto), printed == 0))
+        printed = upto
+      } else if printed == 0 and u.color then {
+        io.print(ui.waiting(u, frame / 3, (env.millis() - t0) / 1000, "Thinking", if opts.tui then "esc to interrupt" else ""))
+        spinning = true
+      } else ()
+      frame = frame + 1
+    } else ()
+    if env.millis() - t0 > 930000 then timed_out = true else ()
+  }
+  if spinning then io.print(ui.clear_line(u)) else ()
+  if interrupted then { model.abandon(c)!; ok(Heard { reply: no_reply(), printed: printed, interrupted: true }) }
+  else if timed_out then { model.abandon(c)!; err("request timeout: no complete answer within 930s") }
+  else match model.settle(c) {
+    err(e) => err(e),
+    ok(r) => ok(Heard { reply: r, printed: printed, interrupted: false }),
+  }
+}
+
+effect fn ask_once(creds: model.Credentials, opts: Options, scratch: String, messages: List[Value]) -> Result[Heard, String] = {
+  let c = model.start(creds, opts.model, messages, tools.definitions(), opts.max_tokens, opts.effort, scratch)!
+  await_reply(opts, c)
+}
+
+effect fn call_model(creds: model.Credentials, opts: Options, scratch: String, messages: List[Value], tries: Int) -> Result[Heard, String] =
+  match ask_once(creds, opts, scratch, messages) {
+    ok(h) => ok(h),
+    err(e) => if tries < 3 and retryable(e) then {
+      show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in 15s"))!
+      env.sleep_ms(15000)
+      call_model(creds, opts, scratch, messages, tries + 1)
+    } else err(e),
+  }
+
+// ---- the tools, shown ------------------------------------------------------------------
+
+// (tool messages, shell allowed from now on, what the tools spent on models of their own)
+effect fn run_calls(opts: Options, setup: tools.Setup, calls: List[model.ToolCall], allow0: Bool) -> (List[Value], Bool, Float) = {
+  let u = opts.ui
+  var results: List[Value] = []
+  var allow = allow0
+  var spent = 0.0
+  for c in calls {
+    show(opts, "\n" + ui.call_line(u, c.name, tools.call_label(c.name, c.arguments)))!
+    let p = match tools.command_of(c.name, c.arguments) {
+      some(_) => permitted(opts, allow, "Run this command?")!,
+      none => Permission { run: true, allow_from_now: allow, said: "" },
+    }
+    allow = p.allow_from_now
+    let r = if p.run then tools.run(setup, c.name, c.arguments)!
+      else tools.failed(declined(opts, p.said), if p.said == "" then "not run" else "not run: " + p.said)
+    show(opts, ui.result_line(u, r.brief, r.failed))!
+    spent = spent + r.cost_usd
+    list.push(results, tool_message(c.id, r.text))
+  }
+  (results, allow, spent)
+}
+
+// ---- the conversation ------------------------------------------------------------------
+
+// Every model call sends the whole conversation again, and in a long one most of it is
+// old tool output the model has already acted on. Past a size, the older results are cut
+// to their opening lines; the most recent stay whole, and the model is told it can run
+// the tool again. The requests and the answers are never cut.
+let COMPACT_ABOVE_CHARS = 200000
+let KEEP_RECENT_TOOL_RESULTS = 6
+let OLD_RESULT_CHARS = 400
+
+fn content_of(m: Value) -> String = json.get_string(m, "content") ?? ""
+fn is_tool(m: Value) -> Bool = (json.get_string(m, "role") ?? "") == "tool"
+
+fn compacted(messages: List[Value]) -> List[Value] = {
+  let size = list.fold(messages, 0, (acc, m) => acc + string.len(content_of(m)))
+  let tools_total = list.len(list.filter(messages, is_tool))
+  if size <= COMPACT_ABOVE_CHARS then messages
+  else {
+    var out: List[Value] = []
+    var seen = 0
+    for m in messages {
+      if is_tool(m) then {
+        seen = seen + 1
+        let c = content_of(m)
+        if seen <= tools_total - KEEP_RECENT_TOOL_RESULTS and string.len(c) > OLD_RESULT_CHARS then
+          list.push(out, tool_message(json.get_string(m, "tool_call_id") ?? "", string.take(c, OLD_RESULT_CHARS) + "\n[… an older result, shortened. Run the tool again if you need it whole.]"))
+        else list.push(out, m)
+      } else list.push(out, m)
+    }
+    out
+  }
+}
+
+fn final_text(r: model.Reply) -> String =
+  if string.trim(r.content) != "" then string.trim(r.content)
+  else if r.finish == "length" then "(the answer was cut off before any text: try --effort low or a larger --max-tokens)"
+  else "(no answer)"
+
+// What is left of an answer once the streamed lines are on screen.
+effect fn finish_answer(opts: Options, r: model.Reply, printed: Int) -> Unit =
+  if not opts.live then println(final_text(r))
+  else {
+    let rest = string.drop(r.content, printed)
+    if string.trim(rest) != "" then println((if printed == 0 then "\n" else "") + answer_lines(opts.ui, rest, printed == 0))
+    else if printed == 0 then println("\n" + answer_lines(opts.ui, final_text(r), true))
+    else ()
+  }
+
+effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: Session, user: String) -> Session = {
+  let u = opts.ui
+  var messages = s.messages
+  list.push(messages, message("user", user))
+  var cost = 0.0
+  var allow = s.allow_shell
+  var steps = 0
+  var done = false
+  var tin = 0
+  var tcached = 0
+  var tout = 0
+  var interrupted = false
+  while not done {
+    messages = compacted(messages)
+    if steps >= opts.max_steps then {
+      show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(steps) + " steps without a final answer; say how to continue"))!
+      done = true
+    } else match call_model(creds, opts, setup.scratch, messages, 0) {
+      err(e) => {
+        show(opts, "\n" + ui.result_line(u, "the model could not be reached: " + string.take(e, 300), true))!
+        done = true
+      },
+      ok(h) => if h.interrupted then {
+        show(opts, ui.result_line(u, "Interrupted · what should emet do instead?", true))!
+        interrupted = true
+        done = true
+      } else {
+        let r = h.reply
+        cost = cost + r.cost_usd
+        tin = tin + r.input_tokens
+        tcached = tcached + r.cached_tokens
+        tout = tout + r.output_tokens
+        let calls = with_ids(r.calls, s.steps + steps)
+        list.push(messages, assistant_message(r.content, calls))
+        if list.is_empty(calls) then {
+          finish_answer(opts, r, h.printed)!
+          done = true
+        } else {
+          // Words said before the calls: streamed already in a conversation.
+          if not opts.live and string.trim(r.content) != "" then eprintln("\n" + answer_lines(u, r.content, true))
+          else if opts.live and string.trim(string.drop(r.content, h.printed)) != "" then println(answer_lines(u, string.drop(r.content, h.printed), h.printed == 0))
+          else ()
+          let (results, allow_now, spent) = run_calls(opts, setup, calls, allow)!
+          allow = allow_now
+          cost = cost + spent
+          for m in results { list.push(messages, m) }
+        }
+        steps = steps + 1
+      },
+    }
+  }
+  let _ = fs.write(setup.scratch + "/transcript.json", json.stringify(value.array(messages)))
+  // A turn stopped before the model said anything cost nothing and did nothing; a line
+  // of zeros under it would only be noise.
+  if not (interrupted and steps == 0) then show(opts, "\n" + ui.footer(u, steps, tin, tcached, tout, usd(cost), usd(s.cost + cost)))! else ()
+  Session { messages: messages, cost: s.cost + cost, allow_shell: allow, steps: s.steps + steps }
+}
+
+// ---- slash commands --------------------------------------------------------------------
+
+type Slash = { name: String, arg: String }
+
+fn command_of(line: String) -> Slash? = {
+  let t = string.trim(line)
+  if not string.starts_with(t, "/") then none
+  else match string.split_once(t, " ") {
+    some((n, a)) => some(Slash { name: n, arg: string.trim(a) }),
+    none => some(Slash { name: t, arg: "" }),
+  }
+}
+
+let COMMANDS = [
+  editor.Command { name: "/help", about: "keys and commands" },
+  editor.Command { name: "/clear", about: "forget the conversation, keep the project and the cost" },
+  editor.Command { name: "/cost", about: "what this session has spent" },
+  editor.Command { name: "/model", about: "show or switch the model" },
+  editor.Command { name: "/yes", about: "run shell and verify commands without asking, or ask again" },
+  editor.Command { name: "/transcript", about: "where this session's messages are written" },
+  editor.Command { name: "/exit", about: "leave" },
+]
+
+let KEYS_HELP = """
+  enter send · alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
+  esc or ctrl+c while emet works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
+"""
+
+type Place = { creds: model.Credentials, setup: tools.Setup, fresh: Session, transcript: String, shown_root: String, history_file: String }
+
+effect fn chat(opts0: Options) -> Result[Int, String] = {
+  let home = env.get("HOME") ?? ""
+  let _ = envfile.load([opts0.root, env.cwd() ?? ".", home + "/workspace/github.com/O6lvl4/_agent", home + "/workspace/github.com/Aid-On/famulus5", home + "/workspace/github.com/Aid-On/famulus4"])!
+  let creds = model.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
+  let scratch = (string.strip_suffix(env.temp_dir(), "/") ?? env.temp_dir()) + "/emet-" + int.to_string(process.pid())
+  fs.mkdir_p(scratch)!
+  let has_ctxgate = match process.exec_status("bash", ["-c", "command -v ctxgate"]) { ok(st) => st.code == 0, err(_) => false }
+  let searx = string.strip_suffix(env.get("EMET_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
+  let setup = tools.Setup { root: opts0.root, golemide: opts0.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx }
+  let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
+  let fresh = Session { messages: [message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0 }
+  let _ = fs.mkdir_p(home + "/.emet")
+  let place = Place { creds: creds, setup: setup, fresh: fresh, transcript: scratch + "/transcript.json",
+    shown_root: match string.strip_prefix(opts0.root, home) { some(rest) => "~" + rest, none => opts0.root },
+    history_file: home + "/.emet/history" }
+  if not opts0.live then {
+    let _ = turn(creds, opts0, setup, fresh, opts0.prompt)!
+    eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript))
+    ok(0)
+  } else {
+    // The terminal is taken over only when stdin is one; a pipe keeps the line reader.
+    let saved = if term.is_tty()! then term.enter_raw()! else none
+    let tui = option.is_some(saved)
+    let (_, cols) = if tui then term.size()! else (24, opts0.ui.width)
+    let opts = with_terminal(opts0, tui, ui.Ui { color: opts0.ui.color, width: int.max(40, int.min(160, cols)) })
+    let outcome = match talk(opts, place) {
+      ok(n) => ok(n),
+      err(e) => err(e),
+    }
+    match saved { some(sv) => term.leave_raw(sv)!, none => () }
+    outcome
+  }
+}
+
+fn status_of(opts: Options, place: Place, s: Session) -> String =
+  opts.model + " · " + ui.fit_path(place.shown_root, 40) + " · " + usd(s.cost)
+    + (if s.allow_shell then " · commands run without asking" else "") + " · /help"
+
+// One line of the conversation from the person: the input box on a terminal, a plain
+// line from a pipe. `none` is the end of the conversation.
+effect fn next_line(opts: Options, place: Place, s: Session, history: List[String]) -> String? =
+  if opts.tui then {
+    var got: String? = none
+    var asking = true
+    while asking {
+      let p = editor.prompt(opts.ui, history, "ask, or tell emet what to change  ·  / for commands", status_of(opts, place, s), COMMANDS)!
+      if p.kind == "send" then { got = some(p.text); asking = false }
+      else if p.kind == "leave" then asking = false
+      else ()
+    }
+    got
+  } else {
+    println("\n" + ui.prompt_rule(opts.ui))
+    io.print(ui.prompt_head(opts.ui))
+    read_input()!
+  }
+
+effect fn talk(opts0: Options, place: Place) -> Result[Int, String] = {
+  var opts = opts0
+  let u = opts0.ui
+  var s = place.fresh
+  var history = if opts.tui then editor.load_history(place.history_file)! else []
+  println(ui.banner(u, opts.model, place.shown_root))
+  var open = true
+  while open {
+    // Measured before every prompt, so a window made wider or narrower mid-session gets
+    // a box that fits it.
+    if opts.tui then {
+      println("")
+      let (_, cols) = term.size()!
+      opts = with_terminal(opts, true, ui.Ui { color: opts.ui.color, width: int.max(40, int.min(160, cols)) })
+    } else ()
+    match next_line(opts, place, s, history)! {
+      none => { open = false },
+      some(text) => {
+        if opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) } else ()
+        match command_of(text) {
+          some(c) => {
+            if c.name == "/exit" or c.name == "/quit" then { open = false }
+            else if c.name == "/help" then println(ui.help(u) + (if opts.tui then ui.dim(u, KEYS_HELP) else ""))
+            else if c.name == "/clear" then {
+              s = Session { messages: place.fresh.messages, cost: s.cost, allow_shell: s.allow_shell, steps: s.steps }
+              println(ui.note_line(u, "the conversation is cleared; the project and the cost so far are kept"))
+            }
+            else if c.name == "/cost" then println(ui.note_line(u, "this session: " + usd(s.cost) + " over " + int.to_string(s.steps) + " model calls"))
+            else if c.name == "/model" then {
+              if c.arg == "" then println(ui.note_line(u, "model: " + opts.model + "   (/model cf:glm-5.3-flash to switch)"))
+              else { opts = with_model(opts, c.arg); println(ui.note_line(u, "model: " + c.arg)) }
+            }
+            else if c.name == "/yes" then {
+              s = Session { messages: s.messages, cost: s.cost, allow_shell: not s.allow_shell, steps: s.steps }
+              println(ui.note_line(u, if s.allow_shell then "shell and verify commands now run without asking" else "shell and verify commands are asked about again"))
+            }
+            else if c.name == "/transcript" then println(ui.note_line(u, place.transcript))
+            else println(ui.note_line(u, "no command " + c.name + "; /help lists them"))
+          },
+          none => if string.trim(text) == "" then () else { s = turn(place.creds, opts, place.setup, s, text)! },
+        }
+      },
+    }
+  }
+  println(ui.note_line(u, "transcript: " + place.transcript + " · session " + usd(s.cost)))
+  ok(0)
+}
+
+fn opt(args: List[String], name: String) -> String? =
+  match list.index_of(args, name) { none => none, some(i) => list.get(args, i + 1) }
+
+fn absolute(root: String, cwd: String) -> String = {
+  let r = string.strip_suffix(root, "/") ?? root
+  if string.starts_with(root, "/") then (if r == "" then "/" else r)
+  else if r == "" or r == "." then cwd
+  else cwd + "/" + (string.strip_prefix(r, "./") ?? r)
+}
+
+let CHAT_USAGE = """
+emet [-p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH]
+
+  -p PROMPT        one request, answered, then exit; without it, a conversation
+  --root DIR       the project (default: the working directory)
+  --model M        cf:glm-5.3 (default), cf:glm-5.3-flash, cf:deepseek-v4-flash-0731, ...
+  --effort E       reasoning effort: low (default), medium, high
+  --yes            run shell and verify commands without asking
+  --max-steps N    model calls per request before it stops to ask (default 40)
+  --golemide PATH  the golemide binary (default: $EMET_GOLEMIDE, else golemide on PATH)
+
+In a conversation: /help /clear /cost /model /yes /transcript /exit
+"""
+
+effect fn cli(args: List[String]) -> Int =
+  if list.contains(args, "--help") or list.contains(args, "-h") then { println(CHAT_USAGE); 0 }
+  else {
+    let prompt = opt(args, "-p") ?? ""
+    let opts = Options {
+      root: absolute(opt(args, "--root") ?? ".", env.cwd() ?? "."),
+      // The conversation runs on the full model: it is where the request is understood,
+      // the tools are chosen and the answer is written, a few calls a turn. The repair
+      // loop behind `solve` stays on golemide's own default, flash, which is where the
+      // many cheap calls are and where golemide was measured.
+      model: opt(args, "--model") ?? "cf:glm-5.3",
+      effort: opt(args, "--effort") ?? "low",
+      max_steps: int.parse(opt(args, "--max-steps") ?? "40") ?? 40,
+      max_tokens: 16384,
+      yes: list.contains(args, "--yes"),
+      prompt: prompt,
+      golemide: opt(args, "--golemide") ?? (env.get("EMET_GOLEMIDE") ?? "golemide"),
+      live: prompt == "",
+      tui: false,
+      ui: ui.detect()!,
+    }
+    match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
+  }
+
+test "every tool call carries an id its result can answer to" {
+  let calls = with_ids([model.ToolCall { id: "", name: "read", arguments: "" }, model.ToolCall { id: "x", name: "tree", arguments: "{}" }], 4)
+  assert_eq(list.map(calls, (c) => c.id), ["call_4_0", "x"])
+  assert_eq((list.first(calls) ?? model.ToolCall { id: "", name: "", arguments: "" }).arguments, "{}")
+  let m = json.stringify(assistant_message("", calls))
+  assert(string.contains(m, "\"tool_calls\""))
+  assert(string.contains(m, "\"call_4_0\""))
+}
+
+test "the choices at the question, and a sentence typed there instead" {
+  assert(answer_of("1").run)
+  assert(not answer_of("1").allow_from_now)
+  assert(answer_of("2").allow_from_now)
+  assert(answer_of("y").run)
+  assert(answer_of("A").allow_from_now)
+  assert(not answer_of("").run)
+  assert(not answer_of("3").run)
+  let said = answer_of("まだ実行しないで。何を実行するつもりか教えて")
+  assert(not said.run)
+  assert_eq(said.said, "まだ実行しないで。何を実行するつもりか教えて")
+}
+
+test "a line starting with a slash is a command" {
+  assert_eq(command_of("/model cf:glm-5.3"), some(Slash { name: "/model", arg: "cf:glm-5.3" }))
+  assert_eq(command_of("  /exit "), some(Slash { name: "/exit", arg: "" }))
+  assert_eq(command_of("fix the tests"), none)
+}
+
+test "an answer is shown line by line, the first one marked" {
+  let u = ui.Ui { color: false, width: 72 }
+  assert_eq(answer_lines(u, "one\ntwo\n", true), "⏺ one\n  two")
+  assert_eq(answer_lines(u, "three\n", false), "  three")
+}
+
+test "a long conversation keeps its recent tool results whole and shortens the old" {
+  let big = string.repeat("x", 30000)
+  var ms = [message("system", "s"), message("user", "u")]
+  var i = 0
+  while i < 10 { ms = ms + [tool_message("c" + int.to_string(i), big)]; i = i + 1 }
+  let out = compacted(ms)
+  assert_eq(list.len(out), 12)
+  let sizes = list.map(list.filter(out, is_tool), (m) => string.len(content_of(m)))
+  assert(list.all(list.take(sizes, 4), (n) => n < 1000))
+  assert(list.all(list.drop(sizes, 4), (n) => n == 30000))
+  assert_eq(json.get_string(list.get(out, 2) ?? message("", ""), "tool_call_id"), some("c0"))
+  // A short conversation is sent as it is.
+  assert_eq(compacted([message("user", "hi")]), [message("user", "hi")])
+}
+
+test "a relative root is taken from the working directory" {
+  assert_eq(absolute(".", "/w/p"), "/w/p")
+  assert_eq(absolute("sub/", "/w/p"), "/w/p/sub")
+  assert_eq(absolute("/abs", "/w/p"), "/abs")
+}
