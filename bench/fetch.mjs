@@ -16,7 +16,7 @@ if (!outDir) {
 }
 
 const urls = JSON.parse(fs.readFileSync(path.join(outDir, 'urls.json'), 'utf8'));
-const UA = 'Mozilla/5.0 (compatible; emet/0.1; +https://github.com/O6lvl4/emet)';
+const UA = 'Mozilla/5.0 (compatible; golemancer/0.1; +https://github.com/O6lvl4/golemancer)';
 const pages = [];
 let done = 0;
 

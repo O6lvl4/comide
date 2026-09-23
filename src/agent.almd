@@ -1,4 +1,4 @@
-// emet chat: a conversation that can look at code and change it.
+// golemancer: a conversation that can look at code and change it.
 //
 // The loop is the one every coding agent has: send the conversation and the tools, run
 // whatever tools the model calls, send their results back, and stop when it answers in
@@ -28,7 +28,7 @@ import self.term
 import self.editor
 
 // `live` is a conversation rather than one -p request: the answer streams and questions
-// can be asked. `tui` is a live conversation on a terminal that emet has taken over key by
+// can be asked. `tui` is a live conversation on a terminal that golemancer has taken over key by
 // key (term.almd): the input box, menus, and Esc to interrupt.
 type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui }
 
@@ -40,7 +40,7 @@ fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options =
 type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int }
 
 fn system_prompt(root: String) -> String = """
-You are emet, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
+You are golemancer, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
 
 How to work:
 - Look before you change anything. In a project you have not seen, start with map or tree. Read narrowly, by symbol, lines or grep, rather than whole large files.
@@ -118,11 +118,11 @@ effect fn permitted(opts: Options, allow: Bool, question: String) -> Permission 
   if allow then Permission { run: true, allow_from_now: true, said: "" }
   else if not opts.live then Permission { run: false, allow_from_now: false, said: "" }
   else if opts.tui then {
-    let pick = editor.choose(opts.ui, question, ["Yes", "Yes, and stop asking this session", "No, and tell emet what to do instead"])!
+    let pick = editor.choose(opts.ui, question, ["Yes", "Yes, and stop asking this session", "No, and tell golemancer what to do instead"])!
     if pick == 0 then Permission { run: true, allow_from_now: false, said: "" }
     else if pick == 1 then Permission { run: true, allow_from_now: true, said: "" }
     else if pick == 2 then {
-      let p = editor.prompt(opts.ui, [], "what should emet do instead?  (esc to skip)", "", [])!
+      let p = editor.prompt(opts.ui, [], "what should golemancer do instead?  (esc to skip)", "", [])!
       Permission { run: false, allow_from_now: false, said: if p.kind == "send" then p.text else "" }
     }
     else Permission { run: false, allow_from_now: false, said: "" }
@@ -133,7 +133,7 @@ effect fn permitted(opts: Options, allow: Bool, question: String) -> Permission 
   }
 
 fn declined(opts: Options, said: String) -> String =
-  if not opts.live then "Not run: this session does not allow shell commands. The user can allow them by starting emet with --yes."
+  if not opts.live then "Not run: this session does not allow shell commands. The user can allow them by starting golemancer with --yes."
   else if said != "" then "Not run. The user declined and said: " + said
   else "Not run: the user declined this command. Do not retry it; answer with what you have, or ask."
 
@@ -313,7 +313,7 @@ effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: S
         done = true
       },
       ok(h) => if h.interrupted then {
-        show(opts, ui.result_line(u, "Interrupted · what should emet do instead?", true))!
+        show(opts, ui.result_line(u, "Interrupted · what should golemancer do instead?", true))!
         interrupted = true
         done = true
       } else {
@@ -373,7 +373,7 @@ let COMMANDS = [
 
 let KEYS_HELP = """
   enter send · alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
-  esc or ctrl+c while emet works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
+  esc or ctrl+c while golemancer works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
 """
 
 type Place = { creds: model.Credentials, setup: tools.Setup, fresh: Session, transcript: String, shown_root: String, history_file: String }
@@ -382,17 +382,17 @@ effect fn chat(opts0: Options) -> Result[Int, String] = {
   let home = env.get("HOME") ?? ""
   let _ = envfile.load([opts0.root, env.cwd() ?? ".", home + "/workspace/github.com/O6lvl4/_agent", home + "/workspace/github.com/Aid-On/famulus5", home + "/workspace/github.com/Aid-On/famulus4"])!
   let creds = model.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
-  let scratch = (string.strip_suffix(env.temp_dir(), "/") ?? env.temp_dir()) + "/emet-" + int.to_string(process.pid())
+  let scratch = (string.strip_suffix(env.temp_dir(), "/") ?? env.temp_dir()) + "/golemancer-" + int.to_string(process.pid())
   fs.mkdir_p(scratch)!
   let has_ctxgate = match process.exec_status("bash", ["-c", "command -v ctxgate"]) { ok(st) => st.code == 0, err(_) => false }
-  let searx = string.strip_suffix(env.get("EMET_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
+  let searx = string.strip_suffix(env.get("GOLEMANCER_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
   let setup = tools.Setup { root: opts0.root, golemide: opts0.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx }
   let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
   let fresh = Session { messages: [message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0 }
-  let _ = fs.mkdir_p(home + "/.emet")
+  let _ = fs.mkdir_p(home + "/.golemancer")
   let place = Place { creds: creds, setup: setup, fresh: fresh, transcript: scratch + "/transcript.json",
     shown_root: match string.strip_prefix(opts0.root, home) { some(rest) => "~" + rest, none => opts0.root },
-    history_file: home + "/.emet/history" }
+    history_file: home + "/.golemancer/history" }
   if not opts0.live then {
     let _ = turn(creds, opts0, setup, fresh, opts0.prompt)!
     eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript))
@@ -423,7 +423,7 @@ effect fn next_line(opts: Options, place: Place, s: Session, history: List[Strin
     var got: String? = none
     var asking = true
     while asking {
-      let p = editor.prompt(opts.ui, history, "ask, or tell emet what to change  ·  / for commands", status_of(opts, place, s), COMMANDS)!
+      let p = editor.prompt(opts.ui, history, "ask, or tell golemancer what to change  ·  / for commands", status_of(opts, place, s), COMMANDS)!
       if p.kind == "send" then { got = some(p.text); asking = false }
       else if p.kind == "leave" then asking = false
       else ()
@@ -457,7 +457,7 @@ effect fn talk(opts0: Options, place: Place) -> Result[Int, String] = {
         match command_of(text) {
           some(c) => {
             if c.name == "/exit" or c.name == "/quit" then { open = false }
-            else if c.name == "/help" then println(ui.help(u) + (if opts.tui then ui.dim(u, KEYS_HELP) else ""))
+            else if c.name == "/help" then println(ui.help(u) + (if opts.tui then "\n\n" + ui.dim(u, KEYS_HELP) else ""))
             else if c.name == "/clear" then {
               s = Session { messages: place.fresh.messages, cost: s.cost, allow_shell: s.allow_shell, steps: s.steps }
               println(ui.note_line(u, "the conversation is cleared; the project and the cost so far are kept"))
@@ -494,15 +494,16 @@ fn absolute(root: String, cwd: String) -> String = {
 }
 
 let CHAT_USAGE = """
-emet [-p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH]
+gmc [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH]
 
-  -p PROMPT        one request, answered, then exit; without it, a conversation
+  run PROMPT       one request, answered, then exit; without it, a conversation
+  -p PROMPT        the same as run
   --root DIR       the project (default: the working directory)
   --model M        cf:glm-5.3 (default), cf:glm-5.3-flash, cf:deepseek-v4-flash-0731, ...
   --effort E       reasoning effort: low (default), medium, high
   --yes            run shell and verify commands without asking
   --max-steps N    model calls per request before it stops to ask (default 40)
-  --golemide PATH  the golemide binary (default: $EMET_GOLEMIDE, else golemide on PATH)
+  --golemide PATH  the golemide binary (default: $GOLEMANCER_GOLEMIDE, else golemide on PATH)
 
 In a conversation: /help /clear /cost /model /yes /transcript /exit
 """
@@ -523,7 +524,7 @@ effect fn cli(args: List[String]) -> Int =
       max_tokens: 16384,
       yes: list.contains(args, "--yes"),
       prompt: prompt,
-      golemide: opt(args, "--golemide") ?? (env.get("EMET_GOLEMIDE") ?? "golemide"),
+      golemide: opt(args, "--golemide") ?? (env.get("GOLEMANCER_GOLEMIDE") ?? "golemide"),
       live: prompt == "",
       tui: false,
       ui: ui.detect()!,

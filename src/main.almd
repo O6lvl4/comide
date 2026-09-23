@@ -1,10 +1,14 @@
-// emet — write truth on it, or do not let it move.
+// golemancer — many golems, one will.
 //
-// Reads claims with their sources, checks every figure in each claim against the
-// pages it cites, and answers with an exit status: 0 if every claim is
-// supported, 1 if any is refused. That status is the whole interface. Whatever
-// runs this decides what to do about it — the tool takes no position beyond
-// whether the claim stood up.
+// Two entries in one binary. Alone, or with `run`, it is the conversation
+// (agent.almd), which hands code changes to golemide. With `emet` and a claims file,
+// it is the claim gate this repository began as:
+//
+// emet — write truth on it, or do not let it move. Reads claims with their sources,
+// checks every figure in each claim against the pages it cites, and answers with an
+// exit status: 0 if every claim is supported, 1 if any is refused. That status is the
+// whole interface. Whatever runs this decides what to do about it — the tool takes no
+// position beyond whether the claim stood up.
 //
 // `--allow-unverifiable` is the one loosening, and it is off by default: a claim
 // this tool cannot check is refused unless the caller says otherwise, because a
@@ -21,9 +25,11 @@ import self.report
 import self.agent
 
 let USAGE = """
-emet                                 a coding conversation in this directory
-emet -p PROMPT [--root DIR] ...      one request, answered, then exit (emet chat --help)
-emet <claims.json|-> [options]       check claims against the pages they cite
+gmc                                  a coding conversation in this directory
+gmc run PROMPT [--root DIR] ...      one request, answered, then exit (gmc chat --help)
+gmc emet <claims.json|-> [options]   check claims against the pages they cite
+
+golemancer is the same program; gmc is its short name.
 
   --report <path>          refusals and passes as JSON, one row per claim
   --allow-unverifiable     let claims with no checkable figure through
@@ -73,23 +79,29 @@ local fn line(j: claim.Judged) -> String = {
 // The flags that only mean something to the conversation.
 let CHAT_FLAGS = ["-p", "--root", "--model", "--effort", "--yes", "--max-steps", "--golemide"]
 
-// `emet` alone is the conversation, the way `claude` is: the thing typed most should be
-// the shortest. The claim gate is reached by naming its input, a file or `-`, which a
-// conversation never takes as its first word.
+// `gmc` alone is the conversation, the way `claude` is: the thing typed most should be
+// the shortest. `run PROMPT` is `-p PROMPT` spelled as a verb. The claim gate is
+// reached with `emet`, or by naming its input, a file or `-`, which a conversation
+// never takes as its first word.
 local fn chat_args(args: List[String]) -> List[String]? = {
   let first = list.get(args, 1) ?? ""
   if first == "chat" then some(list.drop(args, 2))
+  else if first == "run" then some(["-p"] + list.drop(args, 2))
   else if first == "" or list.contains(CHAT_FLAGS, first) then some(list.drop(args, 1))
   else none
 }
 
+// The claim gate's arguments, with the `emet` that names it taken out.
+local fn gate_args(args: List[String]) -> List[String] =
+  if list.get(args, 1) == some("emet") then list.take(args, 1) + list.drop(args, 2) else args
+
 effect fn main() -> Unit = {
-  let args = process.args()
-  let source = list.get(args, 1) ?? ""
-  match chat_args(args) {
+  match chat_args(process.args()) {
     some(rest) => process.exit(agent.cli(rest)!),
     none => (),
   }
+  let args = gate_args(process.args())
+  let source = list.get(args, 1) ?? ""
   if source == "-h" or source == "--help" then {
     println(USAGE)
     process.exit(0)
@@ -148,12 +160,17 @@ effect fn main() -> Unit = {
   process.exit(if list.is_empty(refused) then 0 else 1)
 }
 
-test "emet alone is the conversation; a file or - is the claim gate" {
-  assert_eq(chat_args(["emet"]), some([]))
-  assert_eq(chat_args(["emet", "-p", "fix it"]), some(["-p", "fix it"]))
-  assert_eq(chat_args(["emet", "--root", "../x"]), some(["--root", "../x"]))
-  assert_eq(chat_args(["emet", "chat", "--yes"]), some(["--yes"]))
-  assert_eq(chat_args(["emet", "claims.json", "--quiet"]), none)
-  assert_eq(chat_args(["emet", "-"]), none)
-  assert_eq(chat_args(["emet", "--help"]), none)
+test "gmc alone is the conversation; emet, a file or - is the claim gate" {
+  assert_eq(chat_args(["gmc"]), some([]))
+  assert_eq(chat_args(["gmc", "run", "fix the flaky tests"]), some(["-p", "fix the flaky tests"]))
+  assert_eq(chat_args(["gmc", "run", "fix it", "--yes"]), some(["-p", "fix it", "--yes"]))
+  assert_eq(chat_args(["gmc", "-p", "fix it"]), some(["-p", "fix it"]))
+  assert_eq(chat_args(["gmc", "--root", "../x"]), some(["--root", "../x"]))
+  assert_eq(chat_args(["gmc", "chat", "--yes"]), some(["--yes"]))
+  assert_eq(chat_args(["gmc", "emet", "claims.json"]), none)
+  assert_eq(chat_args(["gmc", "claims.json", "--quiet"]), none)
+  assert_eq(chat_args(["gmc", "-"]), none)
+  assert_eq(chat_args(["gmc", "--help"]), none)
+  assert_eq(gate_args(["gmc", "emet", "claims.json", "--quiet"]), ["gmc", "claims.json", "--quiet"])
+  assert_eq(gate_args(["gmc", "claims.json"]), ["gmc", "claims.json"])
 }

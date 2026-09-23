@@ -23,7 +23,7 @@ import self.claim
 import self.numeric
 import self.page
 
-let UA = "Mozilla/5.0 (compatible; emet/0.1; +https://github.com/O6lvl4/emet)"
+let UA = "Mozilla/5.0 (compatible; golemancer/0.1; +https://github.com/O6lvl4/golemancer)"
 
 let MAX_HOPS = 5
 
@@ -63,7 +63,7 @@ local effect fn follow(url: String, hops_left: Int) -> Result[String, String] = 
   else err("HTTP " + int.to_string(code))
 }
 
-// The document as the server sent it, after redirects. emet reads pages in a
+// The document as the server sent it, after redirects. golemancer reads pages in a
 // conversation with this and `page.readable`; the claim gate matches `page_text`.
 effect fn document(url: String) -> Result[String, String] = {
   guard string.starts_with(url, "http://") or string.starts_with(url, "https://") else err("http(s) ではない URL")

@@ -1,4 +1,122 @@
-# emet
+<p align="center">
+  <img src="docs/images/banner.jpg" alt="golemancer — Many golems. One will. Commands golemide agents.">
+</p>
+
+<p align="center">A coding conversation in the terminal that hands the work to golemide.</p>
+
+```sh
+gmc                                   # a conversation in this directory; /exit to leave
+gmc run "fix the flaky tests"         # one request, answered, then exit
+gmc --yes --root ../project           # run shell and verify commands without asking
+gmc emet claims.json                  # the claim gate, below
+```
+
+golemide is the golem that does the work: it reads the code, edits it and runs the
+tests until they pass. golemancer is the one who commands it. `gmc` is its short name;
+`golemancer` is the same program.
+
+This repository began as **emet**, a gate that checks the figures in a claim against
+the pages it cites. That gate is still here, unchanged, as `gmc emet` —
+[see below](#emet-the-claim-gate).
+
+## Install
+
+Needs [Almide](https://github.com/almide/almide) develop at `ce7cd7553` or later, until
+0.63 is released: `io.read_line_opt`, and the HTTP client that reads a chunked body
+with a character split across chunks (almide#2536), are not in 0.62.
+
+```sh
+almide build src/main.almd -o golemancer   # single native binary
+almide test                                # every test in the project
+ln -s "$PWD/bin/golemancer" ~/.local/bin/golemancer
+ln -s "$PWD/bin/gmc" ~/.local/bin/gmc
+ln -s "$(cd ../golemide && pwd)/golemide" ~/.local/bin/golemide
+```
+
+`bin/golemancer` (and `bin/gmc`, a link to it) is a small shell script that runs the
+binary and puts the terminal settings back afterwards, so a crash cannot leave the
+terminal without echo.
+
+It uses the same Cloudflare Workers AI credentials as golemide. The conversation runs
+on `cf:glm-5.3` unless `--model` or `/model` says otherwise; the repair loop behind
+`solve` stays on golemide's own default, `cf:glm-5.3-flash`. golemide, hew and gramide
+are found on `PATH`; `--golemide` or `$GOLEMANCER_GOLEMIDE` points at another golemide.
+
+## The conversation
+
+The shape of ZCode or Claude Code, whose tools are programs that already exist rather
+than new code:
+
+| Tool | Program | What it adds |
+|---|---|---|
+| `read`, `outline`, `search`, `tree` | [hew](https://github.com/O6lvl4/hew) | reads a function by name, a range or a match, not whole files |
+| `map` | [gramide](https://github.com/O6lvl4/gramide) | ranks the project's files against the task |
+| `edit`, `write` | `golemide edit` | loosened matching for quotes from memory; a syntax gate before any byte is written |
+| `solve` | `golemide solve --json` | a failing test handed over whole: edit, verify, retry, and only the result comes back |
+| `shell` | [ctxgate](https://github.com/O6lvl4/ctxgate) `exec` | test-runner output summarised, the exit status kept |
+| `web_search` | [SearXNG](https://github.com/searxng/searxng) on this machine | search with no API key and no account |
+| `web_fetch` | Almide's `http`, and a page reader of its own | a page as readable text, every redirect checked |
+
+The answer streams in as it is written, each tool call is a line with its result under
+it, and every turn ends with what it cost:
+
+```
+⏺ solve(make the failing tests in lru_test.go pass · verify: go test ./...)
+  ⎿ solved (exit 0) after 1 attempt(s)
+
+⏺ go test ./... passes now. lru.go had four bugs: …
+
+  2 steps · 3.7k in · 268 out · $0.001222 · session $0.001222
+```
+
+On a terminal golemancer takes the input over key by key and draws it itself: a box
+that grows with the text and wraps Japanese at its real width, and a status line under
+it.
+
+| Key | Does |
+|---|---|
+| Enter | send |
+| Alt+Enter, or `\` then Enter | a new line in the text; pasted newlines stay text |
+| ← → Home End, Ctrl+A/E, Alt+← → | move, by character, line or word |
+| Backspace Delete, Ctrl+U/K/W | delete; to line start, to line end, a word back |
+| ↑ ↓ | between lines of the text, then through history (`~/.golemancer/history`) |
+| Tab | complete a slash command; typing `/` lists them |
+| Esc or Ctrl+C while it works | interrupt the turn, keep the conversation |
+| Ctrl+C | clear the text; on an empty box, twice to leave |
+| Ctrl+D | on an empty box, leave |
+| Ctrl+L | clear the screen |
+
+A question before a command is a menu: ↑ ↓ and Enter, or its number; choosing "No"
+asks what to do instead. `/help`, `/clear`, `/cost`, `/model`, `/yes`, `/transcript` and
+`/exit` work at the prompt. From a pipe it reads plain lines instead, and with `run`
+the answer alone goes to stdout and the rest to stderr.
+
+Two things are asked before they run: a shell command, and the verify command golemide
+would run, which is a shell command too. Pages are read without asking, but only from
+the public web: addresses on this machine, on a private network or with no dot in the
+host are refused, and so is a redirect to one. The question offers yes, yes for the
+rest of the session, and no; typing a sentence instead declines and passes the sentence
+to the model.
+
+### Web search
+
+Searching needs a SearXNG with JSON answers turned on. Run it once in Docker, bound to
+this machine only:
+
+```sh
+mkdir -p ~/.config/searxng
+docker run -d --name searxng --restart unless-stopped \
+  -p 127.0.0.1:8888:8080 -v ~/.config/searxng:/etc/searxng searxng/searxng
+```
+
+then add `limiter: false` under `server:` and `formats: [html, json]` under `search:` in
+`~/.config/searxng/settings.yml`, and `docker restart searxng`.
+`$GOLEMANCER_SEARXNG_URL` points it at another instance. Engines that turn a query
+away, as DuckDuckGo did with a CAPTCHA on the first search, are named under the
+results; when SearXNG is not running, the search says so and names the command that
+starts it.
+
+## emet: the claim gate
 
 **A claim moves only while its evidence holds.**
 
@@ -8,7 +126,7 @@ it decides what to do — the tool takes no position beyond whether the claim st
 up.
 
 ```
-$ emet claims.json
+$ gmc emet claims.json
 ok  glm-flash    supported     https://huggingface.co/api/models/zai-org/GLM-5.3-Flash
 ok  glm-max      supported     https://huggingface.co/api/models/zai-org/GLM-5.3
 MET tsmc-aug     unsupported   裏が取れない数値 1/2: 5148.1
@@ -25,7 +143,7 @@ In the story, the golem runs while **אמת** (*emet*, truth) is written on it, 
 stops the moment the first letter is rubbed out, leaving **מת** (*met*, dead).
 That is the whole interface: exit 0 or exit 1.
 
-## Why an exit status
+### Why an exit status
 
 A generator that writes code can be held to a compiler. A generator that writes
 claims has had nothing to be held to, so it is held to its own opinion of its
@@ -38,7 +156,7 @@ hallucination. Same accuracy; the whole gap is knowing when not to answer.
 So don't ask the model. Measure it from outside, and put the measurement where
 it cannot be skipped.
 
-## Verdicts
+### Verdicts
 
 Five, and only the first one passes.
 
@@ -59,7 +177,7 @@ The order matters. A claim with no source is refused before anything is fetched,
 and a claim with nothing checkable is refused before that — no request is spent
 to learn that the answer would have been "cannot tell" either way.
 
-## Two entries, one verdict
+### Two entries, one verdict
 
 The judging is a pure function of claim + pages. Only `src/fetch.almd` opens a
 socket, which buys a second entry point that needs no network at all:
@@ -93,23 +211,10 @@ memory access; almide#2133, fixed on develop). The MIR-lowering wall that
 `judge.verdict` used to hit is gone on both versions. So far it has only run under
 wasmtime, not inside a Worker.
 
-## Install
-
-Needs [Almide](https://github.com/almide/almide) develop at `ce7cd7553` or later, until
-0.63 is released: `io.read_line_opt`, and the HTTP client that reads a chunked body
-with a character split across chunks (almide#2536), are not in 0.62.
+### Usage
 
 ```
-almide build src/main.almd -o emet     # single native binary (2.8 MB)
-almide run src/main.almd claims.json   # or run in place
-almide test src/main.almd              # 44 tests
-almide test src/worker.almd            # 42 tests
-```
-
-## Usage
-
-```
-emet <claims.json|-> [options]
+gmc emet <claims.json|-> [options]
 
   --report <path>          refusals and passes as JSON, one row per claim
   --allow-unverifiable     let claims with no checkable figure through
@@ -129,7 +234,7 @@ Input:
 
 Exit `0` every claim supported · `1` something refused · `2` bad input.
 
-## What gets checked
+### What gets checked
 
 Three kinds of probe, and there are three because they fail independently — a claim
 can carry a right number about the wrong company, or a real quote with an invented
@@ -152,7 +257,7 @@ loanword, so `[ァ-ヶー]{3,}` extracted パラメータ, ライセンス and �
 correct claims. Kanji names are not extracted either — there is no boundary to find
 without a tokeniser, and guessing one invents probes rather than finding them.
 
-## What a figure is
+### What a figure is
 
 A run of digits with the separators that appear inside numbers, so `NT$5148.1億`
 yields `5148.1` and `前年同月比53.3%増` yields `53.3`. Commas come out of both the
@@ -167,7 +272,7 @@ A figure counts as found if it appears on **any one** of the cited pages. Source
 are a set, not a ranking: a claim citing two pages and taking one figure from each
 is supported.
 
-## What it cannot do
+### What it cannot do
 
 **It matches figures as written. It does not follow unit conversion or
 rounding.** This is the dominant source of refusals that are not the claim's
@@ -192,7 +297,7 @@ Also outside v0:
   not proof the source says what the claim says.
 - **Anything behind auth, or rendered only by script.**
 
-## The report is the point
+### The report is the point
 
 `--report` writes one row per claim: the verdict, the figures that were checked,
 the ones that matched, the ones that did not.
@@ -203,7 +308,7 @@ on, and one example for training a model to abstain. So the shape is designed an
 flat rather than derived from the type — it has to stay readable by whatever reads
 it next, which is not this program.
 
-## Measured
+### Measured
 
 The gate is a detector, so it is measured as one. Two numbers, and they trade:
 
@@ -226,7 +331,7 @@ matters — changing the last digit was the first attempt and it was invalid, be
 53.3 → 53.7 is 0.75% and sits *inside* the 1% rounding tolerance, so a correct
 matcher scored as a miss.
 
-### The curve, four ways
+#### The curve, four ways
 
 `min_support` is the threshold on a claim's support score. 91 of 115 originals were
 decided (the rest unverifiable or unreachable). Each column is a different way of
@@ -254,7 +359,7 @@ Everything that was tried is in that table, and the total gain from all of it is
 about six points of specificity. That is the result: **not an implementation that
 needs more work, a ceiling.**
 
-### Why the ceiling is there
+#### Why the ceiling is there
 
 Three measurements locate it, and none of them is about the code.
 
@@ -292,7 +397,7 @@ rather than next. They ask a different question — was the model stable when it
 produced this — and that question is indifferent to how the source is worded. It also
 needs a model, which is where this stops.
 
-### What the A-group work did establish
+#### What the A-group work did establish
 
 - **Quotes and names make prose checkable at all.** Claims with no checkable figure
   fell from 36 to 11 of 115. Necessary, just not sufficient.
@@ -307,7 +412,7 @@ needs a model, which is where this stops.
   and where the support threshold belongs. Both need a calibrated score rather than a
   binary, which is the strongest argument for the conformal step there is.
 
-### Reproducing
+#### Reproducing
 
 ```
 node bench/build.mjs <claims.json> /tmp/bench   # originals + corruption sets
@@ -316,27 +421,26 @@ node bench/score.mjs /tmp/bench                 # detection / false refusal
 node bench/curve.mjs /tmp/bench                 # sweep min_support
 ```
 
-### Known crash
+#### Known crash (fixed)
 
-One citation (`si-2`, a `tsmc.com` URL) aborts the process:
+One citation (`si-2`, a `tsmc.com` URL) used to abort the process:
 
 ```
 thread 'main' panicked: end byte index 57647 is not a char boundary;
 it is inside '\u{fffd}' (bytes 57645..57648 of string)
 ```
 
-The cause is in Almide's HTTP client, not in the page
-([almide#2536](https://github.com/almide/almide/issues/2536)). A chunked response is
-decoded to text before the chunk framing is taken out, so a multibyte character that
-straddles two chunks becomes U+FFFD, the byte counts in the framing stop matching the
-text, and cutting a chunk at its stated length lands inside a character. That is why a
-synthetic invalid-UTF-8 page never reproduced it, and why the byte offset changes from
-one fetch to the next. It was found again on 2026-09-23, when `emet chat` read a
-Japanese weather page and the whole conversation ended the same way; `emet chat` now
-reads pages through curl. The claim gate still uses the Almide client, and
-`bench/fetch.mjs`, which decodes in Node, is still how the numbers above were obtained.
+The cause was Almide's HTTP client, not the page
+([almide#2536](https://github.com/almide/almide/issues/2536)). A chunked response was
+decoded to text before the chunk framing was taken out, so a multibyte character that
+straddled two chunks became U+FFFD, the byte counts in the framing stopped matching the
+text, and cutting a chunk at its stated length landed inside a character. That is why a
+synthetic invalid-UTF-8 page never reproduced it, and why the byte offset changed from
+one fetch to the next. It is fixed on Almide develop, which this repository now needs.
+The numbers above were obtained through `bench/fetch.mjs`, which decodes in Node, and
+are not affected.
 
-## Not built yet## Not built yet## Not built yet
+### Not built yet
 
 v0 checks citation coverage and nothing else. The two signals that go with it —
 self-consistency across repeated samples, and stability across paraphrases of the
@@ -347,99 +451,6 @@ how often a refusal is wrong.
 The order is deliberate: citation coverage is the cheapest of the three and the
 only one that needs no inference at all, and the other two are fitted on data this
 one produces.
-
-## emet chat
-
-`emet chat` is a coding conversation in the terminal, the shape of ZCode or Claude Code,
-whose tools are programs that already exist rather than new code:
-
-| Tool | Program | What it adds |
-|---|---|---|
-| `read`, `outline`, `search`, `tree` | [hew](https://github.com/O6lvl4/hew) | reads a function by name, a range or a match, not whole files |
-| `map` | [gramide](https://github.com/O6lvl4/gramide) | ranks the project's files against the task |
-| `edit`, `write` | `golemide edit` | loosened matching for quotes from memory; a syntax gate before any byte is written |
-| `solve` | `golemide solve --json` | a failing test handed over whole: edit, verify, retry, and only the result comes back |
-| `shell` | [ctxgate](https://github.com/O6lvl4/ctxgate) `exec` | test-runner output summarised, the exit status kept |
-| `web_search` | [SearXNG](https://github.com/searxng/searxng) on this machine | search with no API key and no account |
-| `web_fetch` | curl, and emet's own page reader | a page as readable text, redirects followed |
-
-```sh
-emet                                  # a conversation in this directory; /exit to leave
-emet -p "the tests fail; fix them"    # one request, then exit
-emet --yes --root ../project          # run shell and verify commands without asking
-```
-
-Searching needs a SearXNG with JSON answers turned on. Run it once in Docker, bound to
-this machine only:
-
-```sh
-mkdir -p ~/.config/searxng
-docker run -d --name searxng --restart unless-stopped \
-  -p 127.0.0.1:8888:8080 -v ~/.config/searxng:/etc/searxng searxng/searxng
-```
-
-then add `limiter: false` under `server:` and `formats: [html, json]` under `search:` in
-`~/.config/searxng/settings.yml`, and `docker restart searxng`. `$EMET_SEARXNG_URL` points
-emet at another instance. Engines that turn a query away, as DuckDuckGo did with a
-CAPTCHA on the first search, are named under the results; when SearXNG is not running,
-the search says so and names the command that starts it.
-
-`emet chat` still means the same thing. The claim gate is reached by giving it its
-input, `emet claims.json` or `emet -`.
-
-It uses the same Cloudflare Workers AI credentials as golemide. The conversation runs
-on `cf:glm-5.3` unless `--model` or `/model` says otherwise; the repair loop behind
-`solve` stays on golemide's own default, `cf:glm-5.3-flash`. golemide, hew and gramide are found on `PATH`;
-`--golemide` or `$EMET_GOLEMIDE` points at another golemide. To put both agents on
-`PATH` from their checkouts:
-
-```sh
-ln -s "$PWD/bin/emet" ~/.local/bin/emet
-ln -s "$(cd ../golemide && pwd)/golemide" ~/.local/bin/golemide
-```
-
-`bin/emet` is a small shell script that runs the binary and puts the terminal settings
-back afterwards, so a crash cannot leave the terminal without echo.
-
-In a conversation the answer streams in as it is written, each tool call is a line
-with its result under it, and every turn ends with what it cost:
-
-```
-⏺ solve(make the failing tests in lru_test.go pass · verify: go test ./...)
-  ⎿ solved (exit 0) after 1 attempt(s)
-
-⏺ go test ./... passes now. lru.go had four bugs: …
-
-  2 steps · 3.7k in · 268 out · $0.001222 · session $0.001222
-```
-
-On a terminal emet takes the input over key by key and draws it itself: a box that
-grows with the text and wraps Japanese at its real width, and a status line under it.
-
-| Key | Does |
-|---|---|
-| Enter | send |
-| Alt+Enter, or `\` then Enter | a new line in the text; pasted newlines stay text |
-| ← → Home End, Ctrl+A/E, Alt+← → | move, by character, line or word |
-| Backspace Delete, Ctrl+U/K/W | delete; to line start, to line end, a word back |
-| ↑ ↓ | between lines of the text, then through history (`~/.emet/history`) |
-| Tab | complete a slash command; typing `/` lists them |
-| Esc or Ctrl+C while emet works | interrupt the turn, keep the conversation |
-| Ctrl+C | clear the text; on an empty box, twice to leave |
-| Ctrl+D | on an empty box, leave |
-| Ctrl+L | clear the screen |
-
-A question before a command is a menu: ↑ ↓ and Enter, or its number; choosing "No"
-asks what to do instead. `/help`, `/clear`, `/cost`, `/model`, `/yes`, `/transcript` and
-`/exit` work at the prompt. From a pipe emet reads plain lines instead, and with `-p`
-the answer alone goes to stdout and the rest to stderr.
-
-Two things are asked before they run: a shell command, and the verify command golemide
-would run, which is a shell command too. Pages are read without asking, but only from
-the public web: addresses on this machine, on a private network or with no dot in the
-host are refused. The question offers yes, yes for the rest of the
-session, and no; typing a sentence instead declines and passes the sentence to the
-model. The claim gate above is untouched: `emet claims.json` behaves exactly as before.
 
 ## License
 
