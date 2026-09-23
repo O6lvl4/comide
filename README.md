@@ -9,7 +9,6 @@
 gmc                                   # a conversation in this directory; /exit to leave
 gmc run "fix the flaky tests"         # one request, answered, then exit
 gmc --yes --root ../project           # run shell and verify commands without asking
-gmc emet claims.json                  # check claims against the pages they cite
 ```
 
 [golemide](https://github.com/O6lvl4/golemide) is the golem that does the work: it

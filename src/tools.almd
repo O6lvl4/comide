@@ -17,7 +17,6 @@ import env
 import process
 import url
 import http
-import self.fetch
 import self.page
 
 // `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
@@ -296,6 +295,22 @@ effect fn golemide_problem(bin: String) -> String = {
   else ""
 }
 
+// Where a redirect's `Location` points, against the page that sent it. Relative targets
+// are resolved against the host only, which covers the redirects seen in practice
+// (`/news/x` from a newsroom root); a path-relative target is left alone.
+fn resolve(from: String, target: String) -> String = {
+  let scheme = if string.starts_with(from, "http://") then "http://" else "https://"
+  if string.starts_with(target, "http://") or string.starts_with(target, "https://") then target
+  else if string.starts_with(target, "//") then string.drop_end(scheme, 2) + target
+  else if string.starts_with(target, "/") then {
+    let after = string.drop(from, string.len(scheme))
+    match string.index_of(after, "/") {
+      none => from + target,
+      some(i) => string.take(from, string.len(scheme) + i) + target,
+    }
+  } else from
+}
+
 let WEB_HOPS = 5
 let WEB_TIMEOUT_SECS = "20"
 
@@ -317,7 +332,7 @@ effect fn hop(address: String, accept: String, public_only: Bool, left: Int) -> 
       let code = http.status_code(r)
       let target = if code >= 300 and code < 400 then http.get_header(r, "Location") else none
       match target {
-        some(t) => hop(fetch.resolve(address, t), accept, public_only, left - 1)!,
+        some(t) => hop(resolve(address, t), accept, public_only, left - 1)!,
         none => Got { status: code, body: http.body(r), error: "" },
       }
     },
@@ -478,6 +493,14 @@ test "search results are numbered, with the address on its own line and the sile
   assert(string.contains(text, "(did not answer: duckduckgo)"))
   assert_eq(search_results("{\"results\":[]}", 8).1, 0)
   assert_eq(search_url("http://127.0.0.1:8888", "境界 test"), "http://127.0.0.1:8888/search?q=%E5%A2%83%E7%95%8C%20test&format=json")
+}
+
+test "redirect targets resolve against the page that sent them" {
+  assert_eq(resolve("https://ir.amd.com/news/x", "https://ir.amd.com/news/y"), "https://ir.amd.com/news/y")
+  assert_eq(resolve("https://news.samsung.com/global/old", "/global/new"), "https://news.samsung.com/global/new")
+  assert_eq(resolve("https://a.example/x", "//b.example/y"), "https://b.example/y")
+  assert_eq(resolve("http://a.example/x", "/y"), "http://a.example/y")
+  assert_eq(resolve("http://a.example/x", "//b.example/y"), "http://b.example/y")
 }
 
 test "golemide versions are compared part by part" {

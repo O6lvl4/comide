@@ -1,28 +1,17 @@
-// Turning a fetched document into text a figure can be looked for in.
+// A fetched web page as text a person or a model can read: the page as it was
+// written, with case and punctuation kept, the ends of blocks turned into line
+// breaks, the common entities decoded, and the blank space tags leave behind
+// closed up. Script, style, noscript and svg bodies go first.
 //
-// Pure, and separate from the fetching on purpose: whoever read the page — this
-// program's own client, or a Worker's host `fetch` — hands the bytes here, and
-// both get identical text out. This is the half of the tool that runs where
-// there is no socket.
-//
-// `script` and `style` bodies go before the tags do: a figure inside a tracking
-// snippet or a CSS rule must never be allowed to vouch for a claim.
+// A pure-regex version of this was tried and reverted: `(?s)<script.*?>` over a
+// 200 KB page overflowed the stack. Bounded index walking is the version that
+// survives real pages.
 
-import self.tokens
+let READABLE_MAX_CHARS = 600000
 
-// Documents past this are truncated. A figure below the cut reads as missing,
-// which is a refusal rather than a false pass — the safe direction for a gate.
-let MAX_CHARS = 1000000
+let BLOCK_ENDS = ["</p>", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>",
+  "</pre>", "</blockquote>", "</section>", "</article>", "</header>", "</footer>", "<br>", "<br/>", "<br />"]
 
-// Searching and slicing run over the same string. The previous spelling searched a
-// `string.to_lower` copy and cut the original, which is wrong whenever case folding
-// is not length preserving — and a fetched body can carry replacement characters,
-// because the HTTP client decodes invalid UTF-8 lossily where `fs.read_text`
-// refuses the file outright. Normalising first removes the divergence.
-//
-// A pure-regex version of this file was tried and reverted: `(?s)<script.*?>` over a
-// 200 KB page overflowed the stack, and the tag pass trapped on wasm. Bounded index
-// walking is the version that survives real pages.
 local fn drop_blocks(src: String, open_tag: String, close_tag: String) -> String =
   match string.index_of(src, open_tag) {
     none => src,
@@ -37,7 +26,7 @@ local fn drop_blocks(src: String, open_tag: String, close_tag: String) -> String
   }
 
 // Everything between `<` and `>` goes, and the tag leaves a space behind so that
-// `<td>53</td><td>3</td>` cannot read as the figure "533".
+// `<td>53</td><td>3</td>` cannot read as "533".
 local fn strip_tags(src: String) -> String = {
   var parts: List[String] = []
   var depth = 0
@@ -53,22 +42,6 @@ local fn strip_tags(src: String) -> String = {
   }
   string.join(parts, "")
 }
-
-// Normalised first: tag names are ASCII, so folding case up front costs nothing and
-// gives every index below the same string it was found in.
-fn text_of(doc: String) -> String =
-  strip_tags(drop_blocks(drop_blocks(tokens.normalize(string.take(doc, MAX_CHARS)), "<script", "</script>"), "<style", "</style>"))
-
-// ---- for reading ------------------------------------------------------------------
-
-// `text_of` is text for matching: lowercased, commas taken out of figures. A person or a
-// model reading a page needs the page as it was written, so this keeps case and
-// punctuation, turns the ends of blocks into line breaks, decodes the common entities,
-// and closes up the blank space tags leave behind. Script and style bodies go here too.
-let READABLE_MAX_CHARS = 600000
-
-let BLOCK_ENDS = ["</p>", "</div>", "</li>", "</tr>", "</h1>", "</h2>", "</h3>", "</h4>", "</h5>", "</h6>",
-  "</pre>", "</blockquote>", "</section>", "</article>", "</header>", "</footer>", "<br>", "<br/>", "<br />"]
 
 local fn decode_entities(s: String) -> String =
   string.replace(string.replace(string.replace(string.replace(string.replace(string.replace(string.replace(s,
@@ -98,19 +71,6 @@ test "a page read for reading keeps its words as written, one block to a line" {
   assert_eq(readable(doc), "Almide 0.63\nReleased on Sept 22 .\nTom & Jerry <3")
 }
 
-test "tags go, and leave a boundary where they were" {
-  assert_eq(text_of("<td>53</td><td>3</td>"), " 53  3 ")
-}
-
-test "figures inside script and style cannot vouch" {
-  assert_eq(string.contains(text_of("<script>var x = 53.3</script>ok"), "53.3"), false)
-  assert_eq(string.contains(text_of("<style>.a{width:53.3px}</style>ok"), "53.3"), false)
-}
-
-test "document text is normalised like the claim" {
-  assert_eq(string.contains(text_of("<p>NT$5,148.1 Billion</p>"), "5148.1"), true)
-}
-
-test "plain text passes through, lowercased" {
-  assert_eq(text_of("Revenue 5,148.1"), "revenue 5148.1")
+test "tags leave a boundary where they were" {
+  assert_eq(readable("<td>53</td><td>3</td>"), "53 3")
 }

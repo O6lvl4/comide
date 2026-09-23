@@ -9,7 +9,6 @@
 gmc                                   # このディレクトリで会話する。/exit で終わる
 gmc run "fix the flaky tests"         # 頼みごとを 1 回だけ実行して終わる
 gmc --yes --root ../project           # シェルと検証コマンドを確認なしで実行する
-gmc emet claims.json                  # 主張の数値を、出典のページと照らし合わせる
 ```
 
 [golemide](https://github.com/O6lvl4/golemide) は実際に手を動かすゴーレムで、コードを読み、
