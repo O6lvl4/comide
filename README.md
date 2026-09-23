@@ -1,4 +1,7 @@
-<h1 align="center">comide</h1>
+<p align="center">
+  <img src="docs/images/banner.jpg" alt="comide — A coding agent in the terminal. A small low-poly artisan of black stone with glowing amber seams, a tool belt and a tiny golem on its shoulder, writing in the air with a glowing stylus.">
+</p>
+
 <p align="center">A coding agent in the terminal, in the line of Claude Code, Codex and Aider,<br>that hands its code changes to golemide.</p>
 <p align="center"><a href="README_ja.md">日本語</a></p>
 

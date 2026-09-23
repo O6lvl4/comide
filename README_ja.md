@@ -1,4 +1,7 @@
-<h1 align="center">comide</h1>
+<p align="center">
+  <img src="docs/images/banner.jpg" alt="comide — A coding agent in the terminal. 琥珀色に光る継ぎ目を持つ黒い石のローポリの職人。道具ベルトを締め、肩に小さなゴーレムを乗せ、光るペンで宙に書いている">
+</p>
+
 <p align="center">Claude Code、Codex、Aider と同じ種類の、ターミナルのコーディングエージェント。<br>コードの変更は golemide に任せます。</p>
 <p align="center"><a href="README.md">English</a></p>
 
