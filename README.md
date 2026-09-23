@@ -1,33 +1,31 @@
-<h1 align="center">shemide</h1>
-<p align="center"><strong>The word that moves the golem.</strong></p>
+<h1 align="center">comide</h1>
 <p align="center">A coding agent in the terminal, in the line of Claude Code, Codex and Aider,<br>that hands its code changes to golemide.</p>
 <p align="center"><a href="README_ja.md">日本語</a></p>
 
 ```sh
-shemide                               # a conversation in this directory; /exit to leave
-shemide run "fix the flaky tests"     # one request, answered, then exit
-shemide --yes --root ../project       # run shell and verify commands without asking
+comide                                # a conversation in this directory; /exit to leave
+comide run "fix the flaky tests"      # one request, answered, then exit
+comide --yes --root ../project        # run shell and verify commands without asking
 ```
 
-In the story, a golem moves while a *shem*, a holy name written on paper, is in its
-mouth. [golemide](https://github.com/O6lvl4/golemide) is the golem that does the work:
-it reads the code, edits it and runs the tests until they pass. shemide (*SHEM-ide*)
-is the word that moves it.
+comide decides what to look at and what to change. Code changes go to
+[golemide](https://github.com/O6lvl4/golemide), which edits, runs the tests and retries
+until they pass.
 
 ## Setup
 
 1. **Almide** develop at `ce7cd7553` or later, until 0.63 is released.
-2. **golemide 0.2.0 or later** on `PATH`. shemide's edits and `solve` go through it,
+2. **golemide 0.2.0 or later** on `PATH`. comide's edits and `solve` go through it,
    and it says at startup when golemide is missing or too old.
    ```sh
    git clone https://github.com/O6lvl4/golemide && cd golemide
    almide build src/main.almd -o golemide && ln -s "$PWD/golemide" ~/.local/bin/golemide
    ```
-3. **shemide**
+3. **comide**
    ```sh
-   git clone https://github.com/O6lvl4/shemide && cd shemide
-   almide build src/main.almd -o shemide
-   ln -s "$PWD/bin/shemide" ~/.local/bin/shemide
+   git clone https://github.com/O6lvl4/comide && cd comide
+   almide build src/main.almd -o comide
+   ln -s "$PWD/bin/comide" ~/.local/bin/comide
    ```
 4. **Credentials**, shared with golemide: Cloudflare Workers AI's
    `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in `~/.config/golemide/.env`
@@ -70,7 +68,7 @@ docker run -d --name searxng --restart unless-stopped \
 
 In `~/.config/searxng/settings.yml`, set `limiter: false` under `server:` and
 `formats: [html, json]` under `search:`, then `docker restart searxng`.
-`$SHEMIDE_SEARXNG_URL` points at another instance.
+`$COMIDE_SEARXNG_URL` points at another instance.
 
 ## License
 

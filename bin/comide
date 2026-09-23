@@ -1,7 +1,7 @@
 #!/bin/sh
-# Launches shemide and puts the terminal back however it ends.
+# Launches comide and puts the terminal back however it ends.
 #
-# In a conversation shemide takes the terminal over key by key (src/term.almd) and restores
+# In a conversation comide takes the terminal over key by key (src/term.almd) and restores
 # it when it leaves. A panic does not leave: it ends the process where it stands, and the
 # terminal would stay without echo and without ^C. This wrapper saves the settings first
 # and restores them after, whatever the exit.
@@ -13,7 +13,7 @@ done
 here=$(cd "$(dirname "$self")" && pwd)
 saved=""
 if [ -t 0 ]; then saved=$(stty -g 2>/dev/null); fi
-"$here/../shemide" "$@"
+"$here/../comide" "$@"
 code=$?
 if [ -n "$saved" ]; then
   stty "$saved" 2>/dev/null

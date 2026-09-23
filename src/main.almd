@@ -1,19 +1,17 @@
-// shemide — the word that moves the golem.
+// comide — a coding agent in the terminal.
 //
-// A coding conversation in the terminal (agent.almd) that hands code changes to
-// golemide. In the story a golem moves while a shem, a word written on paper, is in
-// its mouth; shemide is that word for golemide.
+// A coding conversation (agent.almd) that hands its code changes to golemide.
 
 import process
 import self.agent
 
 let USAGE = """
-shemide                              a coding conversation in this directory
-shemide run PROMPT [--root DIR] ...  one request, answered, then exit
-shemide --help                       every option
+comide                              a coding conversation in this directory
+comide run PROMPT [--root DIR] ...  one request, answered, then exit
+comide --help                       every option
 """
 
-// `shemide` alone is the conversation, the way `claude` is: the thing typed most should be
+// `comide` alone is the conversation, the way `claude` is: the thing typed most should be
 // the shortest. `run PROMPT` is `-p PROMPT` spelled as a verb. Anything else that is
 // not an option is a mistake, said as one.
 local fn chat_args(args: List[String]) -> List[String]? = {
@@ -35,13 +33,13 @@ effect fn main() -> Unit = {
   }
 }
 
-test "shemide alone is the conversation; run is one request; a bare word is a mistake" {
-  assert_eq(chat_args(["shemide"]), some([]))
-  assert_eq(chat_args(["shemide", "run", "fix the flaky tests"]), some(["-p", "fix the flaky tests"]))
-  assert_eq(chat_args(["shemide", "run", "fix it", "--yes"]), some(["-p", "fix it", "--yes"]))
-  assert_eq(chat_args(["shemide", "-p", "fix it"]), some(["-p", "fix it"]))
-  assert_eq(chat_args(["shemide", "--root", "../x"]), some(["--root", "../x"]))
-  assert_eq(chat_args(["shemide", "--help"]), some(["--help"]))
-  assert_eq(chat_args(["shemide", "chat", "--yes"]), some(["--yes"]))
-  assert_eq(chat_args(["shemide", "claims.json"]), none)
+test "comide alone is the conversation; run is one request; a bare word is a mistake" {
+  assert_eq(chat_args(["comide"]), some([]))
+  assert_eq(chat_args(["comide", "run", "fix the flaky tests"]), some(["-p", "fix the flaky tests"]))
+  assert_eq(chat_args(["comide", "run", "fix it", "--yes"]), some(["-p", "fix it", "--yes"]))
+  assert_eq(chat_args(["comide", "-p", "fix it"]), some(["-p", "fix it"]))
+  assert_eq(chat_args(["comide", "--root", "../x"]), some(["--root", "../x"]))
+  assert_eq(chat_args(["comide", "--help"]), some(["--help"]))
+  assert_eq(chat_args(["comide", "chat", "--yes"]), some(["--yes"]))
+  assert_eq(chat_args(["comide", "claims.json"]), none)
 }

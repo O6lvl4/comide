@@ -3,7 +3,7 @@
 // A line-mode terminal hands a program nothing until Return, and draws what is typed
 // itself: arrows print ^[[D, there is no history, and nothing can be redrawn. So in a
 // conversation the terminal is put in a mode where every key arrives as it is pressed
-// and nothing is echoed, and shemide draws the input itself (editor.almd).
+// and nothing is echoed, and comide draws the input itself (editor.almd).
 //
 // Reads wait at most a tenth of a second (`min 0 time 1`): a key that has not come by
 // then reads as `none`. That is what lets the wait for a model's answer also watch for

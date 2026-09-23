@@ -84,7 +84,7 @@ fn banner(u: Ui, model: String, root: String) -> String = {
   let place = fit_path(root, inner - string.len(model) - 5)
   string.join([
     dim(u, "╭" + string.repeat("─", inner) + "╮"),
-    box_line(u, " ✻ shemide · a coding conversation", " " + yellow(u, "✻") + " " + bold(u, "shemide") + dim(u, " · a coding conversation")),
+    box_line(u, " ✻ comide · a coding conversation", " " + yellow(u, "✻") + " " + bold(u, "comide") + dim(u, " · a coding conversation")),
     box_line(u, " " + model + " · " + place, " " + cyan(u, model) + dim(u, " · " + place)),
     box_line(u, " /help for commands, /exit to leave", dim(u, " /help for commands, /exit to leave")),
     dim(u, "╰" + string.repeat("─", inner) + "╯"),
@@ -174,7 +174,7 @@ fn permission(u: Ui, question: String) -> String = string.join([
   "  " + dim(u, "⎿ ") + bold(u, question),
   "     " + dim(u, "1.") + " Yes",
   "     " + dim(u, "2.") + " Yes, and stop asking this session",
-  "     " + dim(u, "3.") + " No, and tell shemide what to do instead",
+  "     " + dim(u, "3.") + " No, and tell comide what to do instead",
   "  " + dim(u, "choice (1/2/3), or type what to do instead: "),
 ], "\n")
 
