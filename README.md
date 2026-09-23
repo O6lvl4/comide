@@ -79,21 +79,19 @@ either way, so the verdict does not depend on who did the reading.
   "pages":  [{"url": "https://a", "doc": "<html>…", "error": ""}] }
 ```
 
-**The wasm build does not work yet, and the blocker is upstream.** `page`,
-`tokens` and `claim` all render to verified wasm and pass their tests there, but
-`judge.verdict` walls the v1 renderer:
+**The wasm build needs Almide newer than 0.62.0.**
 
-```
-exported `pub fn verdict` is outside the MIR-lowering subset:
-heap-result `match` outside the executable subset cannot be faithfully
-returned in this brick (would move out an empty deferred heap value)
+```sh
+almide build src/worker.almd --target wasm -o emet-worker.wasm
+wasmtime emet-worker.wasm < examples/worker-in.json
 ```
 
-Ruled out with minimal repros: a list-carrying variant returned from a branch, a
-nested heap-result `match`, block-bodied match arms, and nested closure capture
-all lower fine. Returning `Option[Verdict]` — an *empty* option of a heap type —
-does wall, and removing it (`local type Early` instead) did not clear `verdict`
-itself. Worth filing against almide#1423 with this shape.
+Built with almide develop (`89b73a858`, 2026-09-23) and run under wasmtime, both
+inputs in `examples/` give output byte-identical to the native binary. With 0.62.0
+the build succeeds, but `examples/min-oom-wasm.json` traps at run time (out-of-bounds
+memory access; almide#2133, fixed on develop). The MIR-lowering wall that
+`judge.verdict` used to hit is gone on both versions. So far it has only run under
+wasmtime, not inside a Worker.
 
 ## Install
 
