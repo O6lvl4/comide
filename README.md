@@ -11,6 +11,8 @@ gmc --yes --root ../project           # run shell and verify commands without as
 gmc emet claims.json                  # the claim gate, below
 ```
 
+<img src="docs/images/golemancer.jpg" alt="Golemancer, a hooded low-poly figure of black stone with glowing amber eyes and seams, raising a hand wreathed in light" width="200" align="right">
+
 golemide is the golem that does the work: it reads the code, edits it and runs the
 tests until they pass. golemancer is the one who commands it. `gmc` is its short name;
 `golemancer` is the same program.
