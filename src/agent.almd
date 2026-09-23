@@ -380,8 +380,10 @@ type Place = { creds: model.Credentials, setup: tools.Setup, fresh: Session, tra
 
 effect fn chat(opts0: Options) -> Result[Int, String] = {
   let home = env.get("HOME") ?? ""
-  let _ = envfile.load([opts0.root, env.cwd() ?? ".", home + "/workspace/github.com/O6lvl4/_agent", home + "/workspace/github.com/Aid-On/famulus5", home + "/workspace/github.com/Aid-On/famulus4"])!
-  let creds = model.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env or the environment")!
+  let _ = envfile.load(envfile.dirs_for(opts0.root)!)!
+  let creds = model.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in ~/.config/golemide/.env, the project's .env, or the environment")!
+  let golemide_problem = tools.golemide_problem(opts0.golemide)!
+  if golemide_problem != "" then show(opts0, ui.note_line(opts0.ui, golemide_problem))! else ()
   let scratch = (string.strip_suffix(env.temp_dir(), "/") ?? env.temp_dir()) + "/golemancer-" + int.to_string(process.pid())
   fs.mkdir_p(scratch)!
   let has_ctxgate = match process.exec_status("bash", ["-c", "command -v ctxgate"]) { ok(st) => st.code == 0, err(_) => false }
