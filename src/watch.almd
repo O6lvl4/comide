@@ -1,0 +1,134 @@
+// What the loop keeps an eye on between model calls, so a turn does not end on the
+// model's word alone.
+//
+// Two things. Whether files changed since a command that checks the work last ran, and
+// whether that run failed: a model stops when the work looks done, not when it is, and
+// the agents that do well on the benchmarks (Codex, Claude Code, Gemini CLI, Aider) all
+// check before they let a turn end. And whether the same calls keep coming back with the
+// same arguments, which is a model going round in circles on its own results.
+
+import json
+import self.tools
+
+// `check` is the last command seen that says whether the work is done: a test or build
+// run through shell, or the verify command handed to solve. `dirty` is a file written
+// since it last ran; `failing` is that run failing; `changed` is anything written in
+// this turn at all.
+type Work = { check: String, dirty: Bool, failing: Bool, changed: Bool }
+
+fn fresh(check: String) -> Work = Work { check: check, dirty: false, failing: false, changed: false }
+
+fn arg(arguments: String, key: String) -> String =
+  match json.parse(arguments) {
+    ok(a) => json.get_string(a, key) ?? "",
+    err(_) => "",
+  }
+
+// After a call that ran (not one the person declined), with whether its result failed.
+fn after(w: Work, name: String, arguments: String, failed: Bool) -> Work =
+  if (name == "edit" or name == "write") and not failed then Work { check: w.check, dirty: true, failing: w.failing, changed: true }
+  else if name == "solve" then {
+    let verify = arg(arguments, "verify")
+    // golemide ran verify last, on what it left: the result is that run's.
+    Work { check: if verify == "" then w.check else verify, dirty: false, failing: failed, changed: true }
+  }
+  else if name == "shell" and verdict_of(arg(arguments, "command")) then
+    Work { check: arg(arguments, "command"), dirty: false, failing: failed, changed: w.changed }
+  else w
+
+// After comide ran the check itself.
+fn checked(w: Work, command: String, failed: Bool) -> Work = Work { check: command, dirty: false, failing: failed, changed: w.changed }
+
+// A test or build run whose exit status is the test's or the build's. Measured on the
+// first run with this file: `pytest test_stats.py -q; cat stats.py` came back exit 0,
+// cat's, with two tests failing. After `;` or `||` the status is some other command's;
+// after `&&` and `|` (shell runs with pipefail) it is still the check's.
+fn verdict_of(command: String) -> Bool =
+  tools.checks_work(command) and not string.contains(command, ";") and not string.contains(command, "||")
+
+// What to do when the model answers without calling anything.
+type Finish = | Done | RunCheck(String) | Remind(String)
+
+// Rounds are counted per turn, so a check that cannot pass does not hold the turn forever.
+let CHECK_ROUNDS = 2
+
+fn at_finish(w: Work, rounds: Int) -> Finish =
+  if rounds >= CHECK_ROUNDS or w.check == "" then Done
+  else if w.dirty then RunCheck(w.check)
+  else if w.failing and w.changed then Remind(w.check)
+  else Done
+
+fn check_failed_note(command: String, output: String) -> String =
+  "comide ran `" + command + "` after your last change, and it fails:\n\n" + output
+    + "\n\nThe work is not done. Fix it (solve can take it, with verify = " + json.stringify(value.str(command))
+    + "), or, if it cannot pass, say why."
+
+fn still_failing_note(command: String) -> String =
+  "The last run of `" + command + "` failed, and nothing has run it since. The work is not done: fix it (solve can take it), or, if it cannot pass, say why."
+
+// ---- going round in circles ----------------------------------------------------------------
+
+fn signature(name: String, arguments: String) -> String = name + " " + arguments
+
+// The last calls are one block of 1 to 4 calls, made three times over.
+fn repeating(sigs: List[String]) -> Bool = {
+  let n = list.len(sigs)
+  var found = false
+  for k in [1, 2, 3, 4] {
+    if not found and n >= 3 * k then {
+      let block = list.drop(sigs, n - k)
+      let before = list.take(list.drop(sigs, n - 2 * k), k)
+      let first = list.take(list.drop(sigs, n - 3 * k), k)
+      if block == before and block == first then { found = true } else ()
+    } else ()
+  }
+  found
+}
+
+let LOOP_NOTE = "You have now made the same call(s) three times with the same arguments, and the results will not change. Step back: say what you have learned and what is in the way, then take a different approach, or answer with what you have."
+
+test "an edit leaves the work unchecked until a test run" {
+  let w = after(fresh(""), "shell", "{\"command\":\"pytest -q\"}", true)
+  assert_eq(w.check, "pytest -q")
+  assert(w.failing)
+  let edited = after(w, "edit", "{\"path\":\"a.py\"}", false)
+  assert(edited.dirty)
+  assert_eq(at_finish(edited, 0), RunCheck("pytest -q"))
+  let rerun = after(edited, "shell", "{\"command\":\"pytest -q\"}", false)
+  assert_eq(at_finish(rerun, 0), Done)
+}
+
+test "a refused edit changes nothing, and reading is not checking" {
+  let w = after(fresh("cargo test"), "edit", "{}", true)
+  assert(not w.dirty)
+  assert_eq(after(w, "shell", "{\"command\":\"git status\"}", false), w)
+}
+
+test "solve's verify is the check, and its result stands" {
+  let w = after(fresh(""), "solve", "{\"task\":\"t\",\"verify\":\"go test ./...\"}", true)
+  assert_eq(at_finish(w, 0), Remind("go test ./..."))
+  assert_eq(at_finish(w, CHECK_ROUNDS), Done)
+  assert_eq(at_finish(after(fresh(""), "solve", "{\"task\":\"t\",\"verify\":\"go test ./...\"}", false), 0), Done)
+}
+
+test "a failing run the model only looked at is not held against it" {
+  let w = after(fresh(""), "shell", "{\"command\":\"npm test\"}", true)
+  assert_eq(at_finish(w, 0), Done)
+}
+
+test "a run whose status is another command's says nothing" {
+  let w = after(fresh(""), "shell", "{\"command\":\"pytest -q; cat stats.py\"}", false)
+  assert_eq(w.check, "")
+  assert_eq(after(fresh(""), "shell", "{\"command\":\"cd lib && cargo test 2>&1 | tail -30\"}", false).check, "cd lib && cargo test 2>&1 | tail -30")
+}
+
+test "no command known, nothing to run" {
+  assert_eq(at_finish(after(fresh(""), "write", "{}", false), 0), Done)
+}
+
+test "the same calls three times over are a loop; twice is not" {
+  assert(repeating(["a", "b", "b", "b"]))
+  assert(not repeating(["a", "b", "b"]))
+  assert(repeating(["x", "a", "b", "a", "b", "a", "b"]))
+  assert(not repeating(["a", "b", "a", "b", "a", "c"]))
+}

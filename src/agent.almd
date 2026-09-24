@@ -26,6 +26,7 @@ import self.envfile
 import self.ui
 import self.term
 import self.editor
+import self.watch
 
 // `live` is a conversation rather than one -p request: the answer streams and questions
 // can be asked. `tui` is a live conversation on a terminal that comide has taken over key by
@@ -37,7 +38,10 @@ fn with_model(o: Options, m: String) -> Options =
 
 fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options =
   Options { root: o.root, model: o.model, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: tui, ui: u }
-type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int }
+
+// `check` is the last command seen that says whether the work is done (watch.almd); it
+// outlives the turn, so "now also handle X" is checked the same way.
+type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String }
 
 fn system_prompt(root: String) -> String = """
 You are comide, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
@@ -48,6 +52,7 @@ Edit yourself only when solve does not fit: no command can check the change, or 
 
 How to work:
 - Look before you change anything. In a project you have not seen, start with map or tree. Read narrowly, by symbol, lines or grep, rather than whole large files.
+- When you need several things you can already name (files or symbols to read, outlines, searches), ask for them all in one reply. Every call in a reply runs before the next model call, and each model call is slow: one reply with five reads is much faster than five replies with one.
 - Look with tree, map, outline, search and read, never with shell (no ls, cat, grep or find): they need no permission, and shell does.
 - Change a file yourself with edit, copying old exactly from what read showed, without the line numbers. Use write for a new file or a complete rewrite.
 - Run tests and other commands with shell. The user may decline.
@@ -223,12 +228,16 @@ effect fn call_model(creds: model.Credentials, opts: Options, scratch: String, m
 
 // ---- the tools, shown ------------------------------------------------------------------
 
-// (tool messages, shell allowed from now on, what the tools spent on models of their own)
-effect fn run_calls(opts: Options, setup: tools.Setup, calls: List[model.ToolCall], allow0: Bool) -> (List[Value], Bool, Float) = {
+type Ran = { results: List[Value], allow: Bool, spent: Float, work: watch.Work }
+
+// The tool messages, whether shell is allowed from now on, what the tools spent on models
+// of their own, and what the calls did to the work (watch.almd).
+effect fn run_calls(opts: Options, setup: tools.Setup, calls: List[model.ToolCall], allow0: Bool, work0: watch.Work) -> Ran = {
   let u = opts.ui
   var results: List[Value] = []
   var allow = allow0
   var spent = 0.0
+  var work = work0
   for c in calls {
     show(opts, "\n" + ui.call_line(u, c.name, tools.call_label(c.name, c.arguments)))!
     let p = match tools.command_of(c.name, c.arguments) {
@@ -240,9 +249,27 @@ effect fn run_calls(opts: Options, setup: tools.Setup, calls: List[model.ToolCal
       else tools.failed(declined(opts, p.said), if p.said == "" then "not run" else "not run: " + p.said)
     show(opts, ui.result_line(u, r.brief, r.failed))!
     spent = spent + r.cost_usd
+    if p.run then { work = watch.after(work, c.name, c.arguments, r.failed) } else ()
     list.push(results, tool_message(c.id, r.text))
   }
-  (results, allow, spent)
+  Ran { results: results, allow: allow, spent: spent, work: work }
+}
+
+// The model said it was done with files changed since the check last ran: comide runs the
+// check itself, asking first as for any command. (the output, whether it failed, whether
+// it ran, shell allowed from now on)
+effect fn run_check(opts: Options, setup: tools.Setup, command: String, allow0: Bool) -> (String, Bool, Bool, Bool) = {
+  let u = opts.ui
+  show(opts, "\n" + ui.call_line(u, "shell", command + "  (comide checks the change)"))!
+  let p = permitted(opts, allow0, "Run this command to check the change?")!
+  if not p.run then {
+    show(opts, ui.result_line(u, "not run", true))!
+    ("", false, false, p.allow_from_now)
+  } else {
+    let r = tools.run(setup, "shell", json.stringify(value.object([("command", value.str(command))])))!
+    show(opts, ui.result_line(u, r.brief, r.failed))!
+    (r.text, r.failed, true, p.allow_from_now)
+  }
 }
 
 // ---- the conversation ------------------------------------------------------------------
@@ -251,9 +278,17 @@ effect fn run_calls(opts: Options, setup: tools.Setup, calls: List[model.ToolCal
 // old tool output the model has already acted on. Past a size, the older results are cut
 // to their opening lines; the most recent stay whole, and the model is told it can run
 // the tool again. The requests and the answers are never cut.
+//
+// It cuts in one go, oldest first, well below the size that set it off, and then leaves
+// the conversation alone until it grows that far again. The provider reuses the start of
+// a request it has seen (cached input is a fifth of the price or less), and any change
+// ends the reuse from there on: cutting one more result every step, as this did at
+// first, rewrote the middle of the conversation on every call.
 let COMPACT_ABOVE_CHARS = 200000
+let COMPACT_DOWN_TO_CHARS = 120000
 let KEEP_RECENT_TOOL_RESULTS = 6
 let OLD_RESULT_CHARS = 400
+let SHORTENED = "\n[… an older result, shortened. Run the tool again if you need it whole.]"
 
 fn content_of(m: Value) -> String = json.get_string(m, "content") ?? ""
 fn is_tool(m: Value) -> Bool = (json.get_string(m, "role") ?? "") == "tool"
@@ -265,13 +300,16 @@ fn compacted(messages: List[Value]) -> List[Value] = {
   else {
     var out: List[Value] = []
     var seen = 0
+    var over = size - COMPACT_DOWN_TO_CHARS
     for m in messages {
       if is_tool(m) then {
         seen = seen + 1
         let c = content_of(m)
-        if seen <= tools_total - KEEP_RECENT_TOOL_RESULTS and string.len(c) > OLD_RESULT_CHARS then
-          list.push(out, tool_message(json.get_string(m, "tool_call_id") ?? "", string.take(c, OLD_RESULT_CHARS) + "\n[… an older result, shortened. Run the tool again if you need it whole.]"))
-        else list.push(out, m)
+        if over > 0 and seen <= tools_total - KEEP_RECENT_TOOL_RESULTS and string.len(c) > OLD_RESULT_CHARS + string.len(SHORTENED) then {
+          let short = string.take(c, OLD_RESULT_CHARS) + SHORTENED
+          over = over - (string.len(c) - string.len(short))
+          list.push(out, tool_message(json.get_string(m, "tool_call_id") ?? "", short))
+        } else list.push(out, m)
       } else list.push(out, m)
     }
     out
@@ -305,6 +343,10 @@ effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: S
   var tcached = 0
   var tout = 0
   var interrupted = false
+  var work = watch.fresh(s.check)
+  var check_rounds = 0
+  var sigs: List[String] = []
+  var loop_warned = false
   while not done {
     messages = compacted(messages)
     if steps >= opts.max_steps then {
@@ -328,17 +370,54 @@ effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: S
         let calls = with_ids(r.calls, s.steps + steps)
         list.push(messages, assistant_message(r.content, calls))
         if list.is_empty(calls) then {
-          finish_answer(opts, r, h.printed)!
-          done = true
+          // An answer the turn goes on past is still shown in a conversation, where it
+          // has been streaming; under -p only the last answer goes to stdout.
+          match watch.at_finish(work, check_rounds) {
+            Done => {
+              finish_answer(opts, r, h.printed)!
+              done = true
+            },
+            RunCheck(command) => {
+              if opts.live then finish_answer(opts, r, h.printed)! else ()
+              check_rounds = check_rounds + 1
+              let (out, bad, ran, allow_now) = run_check(opts, setup, command, allow)!
+              allow = allow_now
+              if ran then { work = watch.checked(work, command, bad) } else ()
+              if ran and bad then list.push(messages, message("user", watch.check_failed_note(command, out)))
+              else {
+                if not opts.live then finish_answer(opts, r, h.printed)! else ()
+                done = true
+              }
+            },
+            Remind(command) => {
+              if opts.live then finish_answer(opts, r, h.printed)! else ()
+              check_rounds = check_rounds + 1
+              show(opts, "\n" + ui.note_line(u, "the last run of " + command + " failed; comide asks the model to go on"))!
+              list.push(messages, message("user", watch.still_failing_note(command)))
+            },
+          }
         } else {
           // Words said before the calls: streamed already in a conversation.
           if not opts.live and string.trim(r.content) != "" then eprintln("\n" + answer_lines(u, r.content, true))
           else if opts.live and string.trim(string.drop(r.content, h.printed)) != "" then println(answer_lines(u, string.drop(r.content, h.printed), h.printed == 0))
           else ()
-          let (results, allow_now, spent) = run_calls(opts, setup, calls, allow)!
-          allow = allow_now
-          cost = cost + spent
-          for m in results { list.push(messages, m) }
+          let ran = run_calls(opts, setup, calls, allow, work)!
+          allow = ran.allow
+          cost = cost + ran.spent
+          work = ran.work
+          for m in ran.results { list.push(messages, m) }
+          for c in calls { list.push(sigs, watch.signature(c.name, c.arguments)) }
+          if watch.repeating(sigs) then {
+            if loop_warned then {
+              show(opts, "\n" + ui.note_line(u, "stopped: the same calls kept coming back; say how to continue"))!
+              done = true
+            } else {
+              show(opts, "\n" + ui.note_line(u, "the same calls three times over; comide asks the model to step back"))!
+              list.push(messages, message("user", watch.LOOP_NOTE))
+              loop_warned = true
+              sigs = []
+            }
+          } else ()
         }
         steps = steps + 1
       },
@@ -348,7 +427,7 @@ effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: S
   // A turn stopped before the model said anything cost nothing and did nothing; a line
   // of zeros under it would only be noise.
   if not (interrupted and steps == 0) then show(opts, "\n" + ui.footer(u, steps, tin, tcached, tout, usd(cost), usd(s.cost + cost)))! else ()
-  Session { messages: messages, cost: s.cost + cost, allow_shell: allow, steps: s.steps + steps }
+  Session { messages: messages, cost: s.cost + cost, allow_shell: allow, steps: s.steps + steps, check: work.check }
 }
 
 // ---- slash commands --------------------------------------------------------------------
@@ -393,7 +472,7 @@ effect fn chat(opts0: Options) -> Result[Int, String] = {
   let searx = string.strip_suffix(env.get("COMIDE_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
   let setup = tools.Setup { root: opts0.root, golemide: opts0.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx }
   let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
-  let fresh = Session { messages: [message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0 }
+  let fresh = Session { messages: [message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
   let place = Place { creds: creds, setup: setup, fresh: fresh, transcript: scratch + "/transcript.json",
     shown_root: match string.strip_prefix(opts0.root, home) { some(rest) => "~" + rest, none => opts0.root },
@@ -464,7 +543,7 @@ effect fn talk(opts0: Options, place: Place) -> Result[Int, String] = {
             if c.name == "/exit" or c.name == "/quit" then { open = false }
             else if c.name == "/help" then println(ui.help(u) + (if opts.tui then "\n\n" + ui.dim(u, KEYS_HELP) else ""))
             else if c.name == "/clear" then {
-              s = Session { messages: place.fresh.messages, cost: s.cost, allow_shell: s.allow_shell, steps: s.steps }
+              s = Session { messages: place.fresh.messages, cost: s.cost, allow_shell: s.allow_shell, steps: s.steps, check: "" }
               println(ui.note_line(u, "the conversation is cleared; the project and the cost so far are kept"))
             }
             else if c.name == "/cost" then println(ui.note_line(u, "this session: " + usd(s.cost) + " over " + int.to_string(s.steps) + " model calls"))
@@ -473,7 +552,7 @@ effect fn talk(opts0: Options, place: Place) -> Result[Int, String] = {
               else { opts = with_model(opts, c.arg); println(ui.note_line(u, "model: " + c.arg)) }
             }
             else if c.name == "/yes" then {
-              s = Session { messages: s.messages, cost: s.cost, allow_shell: not s.allow_shell, steps: s.steps }
+              s = Session { messages: s.messages, cost: s.cost, allow_shell: not s.allow_shell, steps: s.steps, check: s.check }
               println(ui.note_line(u, if s.allow_shell then "shell and verify commands now run without asking" else "shell and verify commands are asked about again"))
             }
             else if c.name == "/transcript" then println(ui.note_line(u, place.transcript))
@@ -590,4 +669,19 @@ test "a relative root is taken from the working directory" {
   assert_eq(absolute(".", "/w/p"), "/w/p")
   assert_eq(absolute("sub/", "/w/p"), "/w/p/sub")
   assert_eq(absolute("/abs", "/w/p"), "/abs")
+}
+
+test "old results are cut in one go, and not again until the conversation grows back" {
+  var ms = [message("system", "s"), message("user", "u")]
+  var i = 0
+  while i < 30 { list.push(ms, tool_message("c" + int.to_string(i), string.repeat("x", 10000))); i = i + 1 }
+  let size = (m: List[Value]) => list.fold(m, 0, (acc, x) => acc + string.len(content_of(x)))
+  let once = compacted(ms)
+  assert(size(once) <= COMPACT_DOWN_TO_CHARS)
+  assert(size(once) > COMPACT_DOWN_TO_CHARS - 10000)
+  assert_eq(list.drop(once, list.len(once) - KEEP_RECENT_TOOL_RESULTS), list.drop(ms, list.len(ms) - KEEP_RECENT_TOOL_RESULTS))
+  var grown = once
+  var j = 0
+  while j < 5 { list.push(grown, tool_message("d" + int.to_string(j), string.repeat("y", 10000))); j = j + 1 }
+  assert_eq(compacted(grown), grown)
 }
