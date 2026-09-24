@@ -222,12 +222,27 @@ effect fn ask_once(creds: model.Credentials, opts: Options, scratch: String, mes
   await_reply(opts, c)
 }
 
+// The waits between tries, doubling to a minute: about four minutes in all. Measured
+// 2026-09-25: three tries 15 s apart spanned 45 s, and a DNS outage longer than that
+// ended the session before its first request, the exercise lost to the network.
+fn retry_wait_ms(tries: Int) -> Int = {
+  var ms = 5000
+  var n = 0
+  while n < tries { ms = ms * 2; n = n + 1 }
+  if ms > 60000 then 60000 else ms
+}
+
+let MODEL_TRIES = 7
+
 effect fn call_model(creds: model.Credentials, opts: Options, scratch: String, messages: List[Value], tries: Int) -> Result[Heard, String] =
   match ask_once(creds, opts, scratch, messages) {
     ok(h) => ok(h),
-    err(e) => if tries < 3 and retryable(e) then {
-      show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in 15s"))!
-      env.sleep_ms(15000)
+    err(e) => if tries + 1 < MODEL_TRIES and retryable(e) then {
+      // A little jitter, so parallel sessions hit by the same outage do not come back
+      // in step.
+      let wait = retry_wait_ms(tries) + env.millis() % 1000
+      show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in " + int.to_string(wait / 1000) + "s"))!
+      env.sleep_ms(wait)
       call_model(creds, opts, scratch, messages, tries + 1)
     } else err(e),
   }
@@ -699,4 +714,11 @@ test "old results are cut in one go, and not again until the conversation grows 
   var j = 0
   while j < 5 { list.push(grown, tool_message("d" + int.to_string(j), string.repeat("y", 10000))); j = j + 1 }
   assert_eq(compacted(grown), grown)
+}
+
+test "retries wait longer each time, up to a minute" {
+  assert_eq(list.map([0, 1, 2, 3, 4, 5], retry_wait_ms), [5000, 10000, 20000, 40000, 60000, 60000])
+  assert(retryable("transport: curl exit 6: curl: (6) Could not resolve host: api.cloudflare.com"))
+  assert(retryable("status 429: rate limited"))
+  assert(not retryable("status 400: bad request"))
 }
