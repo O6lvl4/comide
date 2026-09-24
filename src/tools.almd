@@ -18,6 +18,7 @@ import process
 import url
 import http
 import self.page
+import self.checks
 
 // `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
 type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String }
@@ -80,7 +81,7 @@ fn definitions() -> List[Value] = [
   tool("shell", "Run a shell command in the project root: tests, builds, git. Returns the exit status and output. Long output is shortened for you, so do not pipe it through head or tail. The user may decline to run it.",
     [prop("command", "string", "the command line"), prop("timeout_s", "integer", "seconds before it is stopped (default 300)")], ["command"]),
   tool("solve", "The default way to change code whenever a command can check the change (tests, a build). Hands the change to golemide, which reads the code, edits it, runs verify, and retries with the failure until verify exits 0. Call it before writing the implementation yourself. Returns the status, the files changed and the end of the last verify output.",
-    [prop("task", "string", "the change, stated precisely"), prop("verify", "string", "command whose exit status 0 means done, e.g. \"cargo test\""),
+    [prop("task", "string", "the change, stated precisely"), prop("verify", "string", "command whose exit status 0 means done, e.g. \"cargo test\"; the project context at the start lists what the project's files suggest, with any tests that are switched off"),
      prop("attempts", "integer", "edit/verify rounds before giving up (default 6)")], ["task", "verify"]),
   tool("web_search", "Search the web. Use it for what the project cannot tell you: library and API documentation, error messages, versions, recent changes. Returns titles, addresses and snippets; read the page with web_fetch before relying on it.",
     [prop("query", "string", "the search query"), prop("max_results", "integer", "how many results (default 8)")], ["query"]),
@@ -428,12 +429,22 @@ effect fn run(s: Setup, name: String, arguments: String) -> ToolResult =
 // its git state, both cheap, neither needing permission. Measured on the first
 // conversation without it: asked to run the tests of a Python project, the model's
 // first command was `npm test`.
+// What checks.almd reads: the names at the top of the project, its build files, and the
+// markers of switched-off tests under it.
+effect fn check_facts(s: Setup) -> checks.Facts = {
+  let files = checks.lines_of((run_program("ls", ["-1A", s.root], 30)!).1)
+  let read = (name: String) => if list.contains(files, name) then (fs.read_text(s.root + "/" + name) ?? "") else ""
+  checks.Facts { files: files, cmake: read("CMakeLists.txt")!, package_json: read("package.json")!, makefile: read("Makefile")!,
+    markers: checks.lines_of((run_program("bash", ["-c", checks.markers_command(s.root)], 30)!).1) }
+}
+
 effect fn project_context(s: Setup) -> String = {
   let (_, tree) = run_program("hew", ["tree", s.root, "--depth", "2"], 30)!
   let (git_code, git) = run_program("bash", ["-c", "cd " + shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
   let tree_part = string.take(relative(s, tree), 3000)
   let git_part = if git_code == 0 then "\n\ngit branch and uncommitted changes:\n" + git else "\n\nnot a git repository"
-  "Project layout:\n" + tree_part + git_part
+  let found = checks.described(checks.candidates(check_facts(s)!))
+  "Project layout:\n" + tree_part + git_part + (if found == "" then "" else "\n\n" + found)
 }
 
 // The call as the person sees it, `read(shop/cart.py:40-90)`: the argument that says

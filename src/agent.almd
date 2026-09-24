@@ -331,6 +331,14 @@ effect fn finish_answer(opts: Options, r: model.Reply, printed: Int) -> Unit =
     else ()
   }
 
+// With COMIDE_COST_FILE set, the session's cost so far is written there after every step.
+// A benchmark stops comide at a wall-clock cap, and a stopped comide prints no footer:
+// without this, the steps it paid for before the cap were recorded as nothing.
+effect fn record_cost(total: Float) -> Unit = {
+  let path = env.get("COMIDE_COST_FILE") ?? ""
+  if path != "" then { let _ = fs.write(path, usd(total) + "\n") } else ()
+}
+
 effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: Session, user: String) -> Session = {
   let u = opts.ui
   var messages = s.messages
@@ -420,6 +428,7 @@ effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: S
           } else ()
         }
         steps = steps + 1
+        record_cost(s.cost + cost)!
       },
     }
   }
