@@ -52,7 +52,8 @@ fn cmake_candidate(f: Facts) -> Candidate = {
     command: if with_ctest then configure + " && ctest --test-dir build --output-on-failure" else configure,
     from: "CMakeLists.txt",
     note: (if list.is_empty(switches) then "" else "the tests read " + string.join(switches, ", ") + ", which is off unless set; without it most of them are compiled out. ")
-      + (if runs_on_build then "the build itself runs the test program." else if with_ctest then "" else "if the build does not run the tests, run the test program it builds."),
+      + (if runs_on_build then "the build itself runs the test program, so this command is complete as it is: use it unchanged, and do not add a program to run after it (its name is set inside the CMakeLists, and a wrong guess fails every run)."
+         else if with_ctest then "" else "if the build does not run the tests, run the test program it builds."),
   }
 }
 
@@ -124,7 +125,7 @@ test "a CMake project whose tests hide behind a switch gets the switch" {
   assert_eq(list.len(cs), 1)
   let c = list.first(cs) ?? Candidate { command: "", from: "", note: "" }
   assert_eq(c.command, "cmake -S . -B build -DEXERCISM_RUN_ALL_TESTS=ON && cmake --build build")
-  assert(string.contains(c.note, "the build itself runs the test program"))
+  assert(string.contains(c.note, "use it unchanged"))
 }
 
 test "ctest when the CMakeLists registers tests" {
