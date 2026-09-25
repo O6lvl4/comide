@@ -502,7 +502,12 @@ effect fn chat(opts0: Options) -> Result[Int, String] = {
   fs.mkdir_p(scratch)!
   let has_ctxgate = match process.exec_status("bash", ["-c", "command -v ctxgate"]) { ok(st) => st.code == 0, err(_) => false }
   let searx = string.strip_suffix(env.get("COMIDE_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
-  let setup = tools.Setup { root: opts0.root, golemide: opts0.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx }
+  // The model solve runs on, golemide's defaults unless set; the strong one follows it,
+  // so a run on one provider stays on it.
+  let solve_model = string.trim(env.get("COMIDE_SOLVE_MODEL") ?? "")
+  let solve_strong = string.trim(env.get("COMIDE_SOLVE_STRONG_MODEL") ?? "")
+  let setup = tools.Setup { root: opts0.root, golemide: opts0.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx,
+    solve_model: solve_model, solve_strong: if solve_strong != "" then solve_strong else solve_model }
   let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
   let fresh = Session { messages: [message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
@@ -628,6 +633,9 @@ comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [-
   --yes            run shell and verify commands without asking
   --max-steps N    model calls per request before it stops to ask (default 40)
   --golemide PATH  the golemide binary (default: $COMIDE_GOLEMIDE, else golemide on PATH)
+
+solve runs on golemide's own models (cf:glm-5.3-flash, escalating to cf:glm-5.3);
+COMIDE_SOLVE_MODEL and COMIDE_SOLVE_STRONG_MODEL choose others, with the same names.
 
 In a conversation: /help /clear /cost /model /yes /transcript /exit
 """

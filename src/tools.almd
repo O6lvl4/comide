@@ -20,7 +20,9 @@ import http
 import self.page
 
 // `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
-type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String }
+// `solve_model` and `solve_strong` are golemide's --model and --strong-model, "" for
+// golemide's own defaults (COMIDE_SOLVE_MODEL, COMIDE_SOLVE_STRONG_MODEL).
+type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String }
 
 // What goes back to the model; the one line the person watching sees under the call;
 // whether that line is bad news; and what the tool spent on a model of its own (solve
@@ -230,6 +232,8 @@ fn solve_summary(doc: Value) -> String = {
 effect fn solve(s: Setup, a: Value) -> ToolResult = {
   let args = ["solve", str_arg(a, "task"), "--root", s.root, "--verify", str_arg(a, "verify"),
     "--attempts", int.to_string(int_arg(a, "attempts", 6)), "--json", "--quiet"]
+    + (if s.solve_model == "" then [] else ["--model", s.solve_model])
+    + (if s.solve_strong == "" then [] else ["--strong-model", s.solve_strong])
   let (code, out) = run_program(s.golemide, args, SOLVE_TIMEOUT_S)!
   // stdout is one JSON object; stderr, which run_program appends, is progress.
   let first_line = list.first(string.split(out, "\n")) ?? ""
@@ -469,7 +473,7 @@ fn command_of(name: String, arguments: String) -> String? =
   }
 
 test "paths resolve against the root, and results read relative to it" {
-  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888" }
+  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888", solve_model: "", solve_strong: "" }
   assert_eq(under_root(s, "src/a.py"), "/w/proj/src/a.py")
   assert_eq(under_root(s, "./src/a.py"), "/w/proj/src/a.py")
   assert_eq(under_root(s, ""), "/w/proj")
