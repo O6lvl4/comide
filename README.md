@@ -40,6 +40,7 @@ The conversation's model is `--model PROVIDER:MODEL` (or `/model`):
 |---|---|
 | `cf:glm-5.3` (default) | Cloudflare Workers AI |
 | `openai:gpt-5`, `openrouter:…`, `deepseek:…`, `zai:…`, `groq:…`, `ollama:…`, `lmstudio:…` | that OpenAI-compatible service, with `OPENAI_API_KEY` and so on |
+| `anthropic:claude-sonnet-4-5`, `gemini:gemini-2.5-pro` | Anthropic's Messages API or Gemini, with `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | `NAME:MODEL` | any other OpenAI-compatible service: `NAME_BASE_URL` and `NAME_API_KEY` |
 | `claude`, `claude:opus` | Claude Code's `claude -p` on your Claude login; comide runs the tools |
 

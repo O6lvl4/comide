@@ -40,6 +40,7 @@ comide --yes --root ../project        # シェルと検証コマンドを確認�
 |---|---|
 | `cf:glm-5.3`（既定） | Cloudflare Workers AI |
 | `openai:gpt-5`、`openrouter:…`、`deepseek:…`、`zai:…`、`groq:…`、`ollama:…`、`lmstudio:…` | その OpenAI 互換サービス。`OPENAI_API_KEY` などで認証 |
+| `anthropic:claude-sonnet-4-5`、`gemini:gemini-2.5-pro` | Anthropic の Messages API か Gemini。`ANTHROPIC_API_KEY`、または `GEMINI_API_KEY` / `GOOGLE_API_KEY` で認証 |
 | `NAME:MODEL` | それ以外の OpenAI 互換サービス。`NAME_BASE_URL` と `NAME_API_KEY` で指定 |
 | `claude`、`claude:opus` | Claude Code の `claude -p`（Claude のログインで動く）。ツールは comide が実行 |
 
