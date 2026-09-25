@@ -32,6 +32,16 @@ comide --yes --root ../project        # シェルと検証コマンドを確認�
    ```
 4. **認証情報**は golemide と共通です。Cloudflare Workers AI の `CLOUDFLARE_ACCOUNT_ID` と
    `CLOUDFLARE_API_TOKEN` を `~/.config/golemide/.env` に書きます（プロジェクトの `.env` や環境変数でも可）。
+   golemide の `solve` はこれで動きます。
+
+会話のモデルは `--model プロバイダ:モデル`（または `/model`）で選びます。
+
+| `--model` | 動く先 |
+|---|---|
+| `cf:glm-5.3`（既定） | Cloudflare Workers AI |
+| `openai:gpt-5`、`openrouter:…`、`deepseek:…`、`zai:…`、`groq:…`、`ollama:…`、`lmstudio:…` | その OpenAI 互換サービス。`OPENAI_API_KEY` などで認証 |
+| `NAME:MODEL` | それ以外の OpenAI 互換サービス。`NAME_BASE_URL` と `NAME_API_KEY` で指定 |
+| `claude`、`claude:opus` | Claude Code の `claude -p`（Claude のログインで動く）。ツールは comide が実行 |
 
 任意：読む・地図を作る・出力を要約するために [hew](https://github.com/O6lvl4/hew)、
 [gramide](https://github.com/O6lvl4/gramide)、[ctxgate](https://github.com/O6lvl4/ctxgate) を `PATH` に。

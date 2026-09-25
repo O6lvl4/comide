@@ -1,0 +1,162 @@
+// Claude Code's `claude -p` as comide's model, and nothing more.
+//
+// comide keeps the loop, the tools, the checks and the permissions; Claude only decides
+// the next step. Its own tools are off (--tools ""), no settings, hooks or MCP servers of
+// the person's are loaded (--setting-sources "", --strict-mcp-config), and the answer
+// comes back in one JSON shape (--json-schema): words for the person, or tool calls for
+// comide to run. Measured 2026-09-25 with claude 2.1.282: a tool call came back as
+// structured_output in 3 s, and a --resume with the result read the earlier turn from
+// the prompt cache. The actions are described as comide's, not as tools: listed under
+// "Tools", Claude called them as its own, got "No such tool available" for each, and
+// answered that nothing could be done.
+//
+// The session is continued with --resume, so each call sends only what is new since the
+// last one: the tool results and any note comide added. It starts over when there is no
+// session yet, when the conversation was cleared, or when the model changed.
+
+import json
+import fs
+
+type State = { id: String, sent: Int, model: String }
+
+// What one call amounts to, before model.almd turns it into a Reply.
+type Answer = { content: String, calls: List[(String, String)], session: String,
+  input_tokens: Int, cached_tokens: Int, output_tokens: Int, cost_usd: Float }
+
+let PROTOCOL = """
+How you act here: you are the model inside comide, a coding agent. You have no tools of your own in this session, and calling one fails. comide has the actions listed below and runs them for you: to use them, write them into the tool_calls field of your answer, each with its name and its arguments as an object. Several independent ones can go in one answer. comide runs them and sends their results back as the next message. To answer the user, write the answer in content and leave tool_calls empty.
+"""
+
+// The answer's shape. `arguments` is an object whose fields each tool's parameters name.
+let SCHEMA = "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"tool_calls\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"arguments\":{\"type\":\"object\"}},\"required\":[\"name\",\"arguments\"]}}},\"required\":[\"content\",\"tool_calls\"]}"
+
+fn str_of(v: Value, key: String) -> String = json.get_string(v, key) ?? ""
+
+fn tools_text(tools: List[Value]) -> String =
+  "Actions comide runs for you (write them into tool_calls; they are not tools you can call):\n" + string.join(list.map(tools, (t) => {
+    let f = value.field(t, "function") ?? value.object([])
+    "- " + str_of(f, "name") + ": " + str_of(f, "description") + "\n  parameters: "
+      + json.stringify(value.field(f, "parameters") ?? value.object([]))
+  }), "\n")
+
+fn system_text(messages: List[Value], tools: List[Value]) -> String = {
+  let first = list.first(messages) ?? value.object([])
+  let system = if str_of(first, "role") == "system" then str_of(first, "content") else ""
+  system + "\n" + PROTOCOL + "\n" + tools_text(tools)
+}
+
+// The name of the call a tool result answers, from the assistant message that made it.
+fn call_name(messages: List[Value], id: String) -> String = {
+  var name = "tool"
+  for m in messages {
+    for c in json.get_array(m, "tool_calls") ?? [] {
+      if str_of(c, "id") == id then { name = str_of(value.field(c, "function") ?? value.object([]), "name") } else ()
+    }
+  }
+  name
+}
+
+// Messages from `from` on, as the text of one prompt. A continued session has its own
+// answers already, so they are left out; a fresh one gets the conversation so far.
+fn render(messages: List[Value], from: Int, fresh: Bool) -> String = {
+  var parts: List[String] = []
+  var i = 0
+  for m in messages {
+    let role = str_of(m, "role")
+    if i >= from and role != "system" then {
+      if role == "user" then list.push(parts, (if fresh then "User: " else "") + str_of(m, "content"))
+      else if role == "tool" then list.push(parts, "Result of " + call_name(messages, str_of(m, "tool_call_id")) + ":\n" + str_of(m, "content"))
+      else if role == "assistant" and fresh then {
+        let calls = list.map(json.get_array(m, "tool_calls") ?? [], (c) => {
+          let f = value.field(c, "function") ?? value.object([])
+          str_of(f, "name") + " " + str_of(f, "arguments")
+        })
+        list.push(parts, "You said: " + str_of(m, "content") + (if list.is_empty(calls) then "" else "\nYou called: " + string.join(calls, "; ")))
+      } else ()
+    } else ()
+    i = i + 1
+  }
+  string.join(parts, "\n\n")
+}
+
+fn state_of(text: String) -> State? = match json.parse(text) {
+  ok(v) => if str_of(v, "id") == "" then none else some(State { id: str_of(v, "id"), sent: json.get_int(v, "sent") ?? 0, model: str_of(v, "model") }),
+  err(_) => none,
+}
+
+fn state_text(s: State) -> String =
+  json.stringify(value.object([("id", value.str(s.id)), ("sent", value.int(s.sent)), ("model", value.str(s.model))]))
+
+// The session to continue, if there is one that still matches the conversation.
+fn continuing(state: State?, message_count: Int, model: String) -> State? = match state {
+  some(s) => if s.model == model and s.sent <= message_count and s.sent > 0 then some(s) else none,
+  none => none,
+}
+
+fn sh_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
+
+// The command line, the prompt going on stdin from a file.
+fn command(model_id: String, resume: String, system_file: String) -> String = {
+  var args = ["claude", "-p", "--output-format", "json", "--json-schema", SCHEMA, "--tools", "", "--setting-sources", "", "--strict-mcp-config"]
+  if model_id != "" then { args = args + ["--model", model_id] } else ()
+  if resume != "" then { args = args + ["--resume", resume] } else { args = args + ["--system-prompt-file", system_file] }
+  string.join(list.map(args, sh_quote), " ")
+}
+
+fn num(v: Value, key: String) -> Int = json.get_int(v, key) ?? float.to_int(json.get_float(v, key) ?? 0.0)
+
+// claude -p --output-format json prints one object: the answer in structured_output, or
+// is_error with what went wrong in result.
+fn parse(out: String) -> Result[Answer, String] = match json.parse(string.trim(out)) {
+  err(e) => err("claude: unreadable output (" + e + "): " + string.take(string.trim(out), 300)),
+  ok(r) => if json.get_bool(r, "is_error") ?? false then err("claude: " + string.take(str_of(r, "result") + " " + str_of(r, "subtype"), 300))
+    else match value.field(r, "structured_output") {
+      err(_) => err("claude: no structured answer: " + string.take(str_of(r, "result"), 300)),
+      ok(so) => {
+        let usage = value.field(r, "usage") ?? value.object([])
+        let calls = list.map(json.get_array(so, "tool_calls") ?? [], (c) =>
+          (str_of(c, "name"), json.stringify(value.field(c, "arguments") ?? value.object([]))))
+        ok(Answer { content: str_of(so, "content"), calls: calls, session: str_of(r, "session_id"),
+          input_tokens: num(usage, "input_tokens") + num(usage, "cache_creation_input_tokens"),
+          cached_tokens: num(usage, "cache_read_input_tokens"), output_tokens: num(usage, "output_tokens"),
+          cost_usd: json.get_float(r, "total_cost_usd") ?? 0.0 })
+      },
+    },
+}
+
+test "a fresh session gets the conversation, a continued one only what is new" {
+  let call = value.object([("id", value.str("c1")), ("type", value.str("function")),
+    ("function", value.object([("name", value.str("read")), ("arguments", value.str("{\"path\":\"a.py\"}"))]))])
+  let ms = [
+    value.object([("role", value.str("system")), ("content", value.str("sys"))]),
+    value.object([("role", value.str("user")), ("content", value.str("fix a.py"))]),
+    value.object([("role", value.str("assistant")), ("content", value.str("")), ("tool_calls", value.array([call]))]),
+    value.object([("role", value.str("tool")), ("tool_call_id", value.str("c1")), ("content", value.str("1 x = 1"))]),
+  ]
+  assert_eq(render(ms, 3, false), "Result of read:\n1 x = 1")
+  let fresh = render(ms, 0, true)
+  assert(string.starts_with(fresh, "User: fix a.py\n\nYou said: \nYou called: read {\"path\":\"a.py\"}"))
+  assert(string.ends_with(fresh, "Result of read:\n1 x = 1"))
+}
+
+test "a session is continued only while it still matches" {
+  let s = some(State { id: "abc", sent: 4, model: "claude" })
+  assert_eq(continuing(s, 6, "claude"), s)
+  assert_eq(continuing(s, 2, "claude"), none)
+  assert_eq(continuing(s, 6, "claude:opus"), none)
+  assert_eq(state_of(state_text(State { id: "abc", sent: 4, model: "claude" })), s)
+}
+
+test "the answer comes out of structured_output, an error out of result" {
+  let out = "{\"type\":\"result\",\"is_error\":false,\"session_id\":\"s1\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":1000,\"cache_read_input_tokens\":500,\"output_tokens\":40},\"structured_output\":{\"content\":\"\",\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"a.py\"}}]}}"
+  match parse(out) {
+    ok(a) => {
+      assert_eq(a.calls, [("read", "{\"path\":\"a.py\"}")])
+      assert_eq(a.session, "s1")
+      assert_eq(a.input_tokens, 1002)
+      assert_eq(a.cached_tokens, 500)
+    },
+    err(e) => assert_eq(e, ""),
+  }
+  assert(result.is_err(parse("{\"is_error\":true,\"result\":\"Not logged in\"}")))
+}

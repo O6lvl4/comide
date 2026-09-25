@@ -217,8 +217,8 @@ effect fn await_reply(opts: Options, c: model.Call) -> Result[Heard, String] = {
   }
 }
 
-effect fn ask_once(creds: model.Credentials, opts: Options, scratch: String, messages: List[Value]) -> Result[Heard, String] = {
-  let c = model.start(creds, opts.model, messages, tools.definitions(), opts.max_tokens, opts.effort, scratch)!
+effect fn ask_once(opts: Options, scratch: String, messages: List[Value]) -> Result[Heard, String] = {
+  let c = model.start(opts.model, messages, tools.definitions(), opts.max_tokens, opts.effort, scratch)!
   await_reply(opts, c)
 }
 
@@ -234,8 +234,8 @@ fn retry_wait_ms(tries: Int) -> Int = {
 
 let MODEL_TRIES = 7
 
-effect fn call_model(creds: model.Credentials, opts: Options, scratch: String, messages: List[Value], tries: Int) -> Result[Heard, String] =
-  match ask_once(creds, opts, scratch, messages) {
+effect fn call_model(opts: Options, scratch: String, messages: List[Value], tries: Int) -> Result[Heard, String] =
+  match ask_once(opts, scratch, messages) {
     ok(h) => ok(h),
     err(e) => if tries + 1 < MODEL_TRIES and retryable(e) then {
       // A little jitter, so parallel sessions hit by the same outage do not come back
@@ -243,7 +243,7 @@ effect fn call_model(creds: model.Credentials, opts: Options, scratch: String, m
       let wait = retry_wait_ms(tries) + env.millis() % 1000
       show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in " + int.to_string(wait / 1000) + "s"))!
       env.sleep_ms(wait)
-      call_model(creds, opts, scratch, messages, tries + 1)
+      call_model(opts, scratch, messages, tries + 1)
     } else err(e),
   }
 
@@ -360,7 +360,7 @@ effect fn record_cost(total: Float) -> Unit = {
   if path != "" then { let _ = fs.write(path, usd(total) + "\n") } else ()
 }
 
-effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: Session, user: String) -> Session = {
+effect fn turn(opts: Options, setup: tools.Setup, s: Session, user: String) -> Session = {
   let u = opts.ui
   var messages = s.messages
   list.push(messages, message("user", user))
@@ -381,7 +381,7 @@ effect fn turn(creds: model.Credentials, opts: Options, setup: tools.Setup, s: S
     if steps >= opts.max_steps then {
       show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(steps) + " steps without a final answer; say how to continue"))!
       done = true
-    } else match call_model(creds, opts, setup.scratch, messages, 0) {
+    } else match call_model(opts, setup.scratch, messages, 0) {
       err(e) => {
         show(opts, "\n" + ui.result_line(u, "the model could not be reached: " + string.take(e, 300), true))!
         done = true
@@ -488,12 +488,14 @@ let KEYS_HELP = """
   esc or ctrl+c while comide works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
 """
 
-type Place = { creds: model.Credentials, setup: tools.Setup, fresh: Session, transcript: String, shown_root: String, history_file: String }
+type Place = { setup: tools.Setup, fresh: Session, transcript: String, shown_root: String, history_file: String }
 
 effect fn chat(opts0: Options) -> Result[Int, String] = {
   let home = env.get("HOME") ?? ""
   let _ = envfile.load(envfile.dirs_for(opts0.root)!)!
-  let creds = model.credentials_from_env()! |> option.to_result("no model credentials: put CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in ~/.config/golemide/.env, the project's .env, or the environment")!
+  // Checked before anything else happens, so a missing key is said once, not as a
+  // failed first request. The endpoint is looked up again on every call: /model can change it.
+  let _ = model.endpoint_of(opts0.model)!
   let golemide_problem = tools.golemide_problem(opts0.golemide)!
   if golemide_problem != "" then show(opts0, ui.note_line(opts0.ui, golemide_problem))! else ()
   let scratch = (string.strip_suffix(env.temp_dir(), "/") ?? env.temp_dir()) + "/comide-" + int.to_string(process.pid())
@@ -504,11 +506,11 @@ effect fn chat(opts0: Options) -> Result[Int, String] = {
   let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
   let fresh = Session { messages: [message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
-  let place = Place { creds: creds, setup: setup, fresh: fresh, transcript: scratch + "/transcript.json",
+  let place = Place { setup: setup, fresh: fresh, transcript: scratch + "/transcript.json",
     shown_root: match string.strip_prefix(opts0.root, home) { some(rest) => "~" + rest, none => opts0.root },
     history_file: home + "/.comide/history" }
   if not opts0.live then {
-    let _ = turn(creds, opts0, setup, fresh, opts0.prompt)!
+    let _ = turn(opts0, setup, fresh, opts0.prompt)!
     eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript))
     ok(0)
   } else {
@@ -578,8 +580,11 @@ effect fn talk(opts0: Options, place: Place) -> Result[Int, String] = {
             }
             else if c.name == "/cost" then println(ui.note_line(u, "this session: " + usd(s.cost) + " over " + int.to_string(s.steps) + " model calls"))
             else if c.name == "/model" then {
-              if c.arg == "" then println(ui.note_line(u, "model: " + opts.model + "   (/model cf:glm-5.3-flash to switch)"))
-              else { opts = with_model(opts, c.arg); println(ui.note_line(u, "model: " + c.arg)) }
+              if c.arg == "" then println(ui.note_line(u, "model: " + opts.model + "   (/model cf:glm-5.3-flash, /model claude, /model openai:gpt-5 to switch)"))
+              else match model.endpoint_of(c.arg) {
+                ok(_) => { opts = with_model(opts, c.arg); println(ui.note_line(u, "model: " + c.arg)) },
+                err(e) => println(ui.note_line(u, e + "; still " + opts.model)),
+              }
             }
             else if c.name == "/yes" then {
               s = Session { messages: s.messages, cost: s.cost, allow_shell: not s.allow_shell, steps: s.steps, check: s.check }
@@ -588,7 +593,7 @@ effect fn talk(opts0: Options, place: Place) -> Result[Int, String] = {
             else if c.name == "/transcript" then println(ui.note_line(u, place.transcript))
             else println(ui.note_line(u, "no command " + c.name + "; /help lists them"))
           },
-          none => if string.trim(text) == "" then () else { s = turn(place.creds, opts, place.setup, s, text)! },
+          none => if string.trim(text) == "" then () else { s = turn(opts, place.setup, s, text)! },
         }
       },
     }
@@ -613,8 +618,13 @@ comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [-
   run PROMPT       one request, answered, then exit; without it, a conversation
   -p PROMPT        the same as run
   --root DIR       the project (default: the working directory)
-  --model M        cf:glm-5.3 (default), cf:glm-5.3-flash, cf:deepseek-v4-flash-0731, ...
-  --effort E       reasoning effort: low (default), medium, high
+  --model M        which model thinks, as PROVIDER:MODEL (default cf:glm-5.3)
+                     cf:glm-5.3, cf:glm-5.3-flash, ...   Cloudflare Workers AI
+                     openai:gpt-5, openrouter:..., ollama:qwen3, ...
+                                     any OpenAI-compatible service: NAME_API_KEY, and
+                                     NAME_BASE_URL for one comide does not know
+                     claude, claude:opus  Claude Code's `claude -p`, on your Claude login
+  --effort E       reasoning effort, sent to Cloudflare only: low (default), medium, high
   --yes            run shell and verify commands without asking
   --max-steps N    model calls per request before it stops to ask (default 40)
   --golemide PATH  the golemide binary (default: $COMIDE_GOLEMIDE, else golemide on PATH)

@@ -32,7 +32,16 @@ until they pass.
    ```
 4. **Credentials**, shared with golemide: Cloudflare Workers AI's
    `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in `~/.config/golemide/.env`
-   (or the project's `.env`, or the environment).
+   (or the project's `.env`, or the environment). golemide's `solve` runs on them.
+
+The conversation's model is `--model PROVIDER:MODEL` (or `/model`):
+
+| `--model` | runs on |
+|---|---|
+| `cf:glm-5.3` (default) | Cloudflare Workers AI |
+| `openai:gpt-5`, `openrouter:…`, `deepseek:…`, `zai:…`, `groq:…`, `ollama:…`, `lmstudio:…` | that OpenAI-compatible service, with `OPENAI_API_KEY` and so on |
+| `NAME:MODEL` | any other OpenAI-compatible service: `NAME_BASE_URL` and `NAME_API_KEY` |
+| `claude`, `claude:opus` | Claude Code's `claude -p` on your Claude login; comide runs the tools |
 
 Optional: [hew](https://github.com/O6lvl4/hew), [gramide](https://github.com/O6lvl4/gramide)
 and [ctxgate](https://github.com/O6lvl4/ctxgate) on `PATH` for reading, mapping and
