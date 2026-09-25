@@ -43,6 +43,10 @@ comide --yes --root ../project        # シェルと検証コマンドを確認�
 | `NAME:MODEL` | それ以外の OpenAI 互換サービス。`NAME_BASE_URL` と `NAME_API_KEY` で指定 |
 | `claude`、`claude:opus` | Claude Code の `claude -p`（Claude のログインで動く）。ツールは comide が実行 |
 
+`solve` は golemide 自身のモデルで動きます。`COMIDE_SOLVE_MODEL`（と `COMIDE_SOLVE_STRONG_MODEL`）に
+同じ形で書けば、別のモデルにできます。`claude` のときは Claude Code のツール・設定・フック・MCP を
+切って動かしますが、全体設定の `CLAUDE.md` と自動メモリは読まれます。
+
 任意：読む・地図を作る・出力を要約するために [hew](https://github.com/O6lvl4/hew)、
 [gramide](https://github.com/O6lvl4/gramide)、[ctxgate](https://github.com/O6lvl4/ctxgate) を `PATH` に。
 `web_search` には手元の [SearXNG](#web-検索) が要ります。

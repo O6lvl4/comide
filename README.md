@@ -43,6 +43,11 @@ The conversation's model is `--model PROVIDER:MODEL` (or `/model`):
 | `NAME:MODEL` | any other OpenAI-compatible service: `NAME_BASE_URL` and `NAME_API_KEY` |
 | `claude`, `claude:opus` | Claude Code's `claude -p` on your Claude login; comide runs the tools |
 
+`solve` runs on golemide's own models unless `COMIDE_SOLVE_MODEL` (and
+`COMIDE_SOLVE_STRONG_MODEL`) name others, in the same form. With `claude`, comide turns
+off Claude Code's tools, settings, hooks and MCP servers; your global `CLAUDE.md` and
+memory are still read.
+
 Optional: [hew](https://github.com/O6lvl4/hew), [gramide](https://github.com/O6lvl4/gramide)
 and [ctxgate](https://github.com/O6lvl4/ctxgate) on `PATH` for reading, mapping and
 summarising; a local [SearXNG](#web-search) for `web_search`.
