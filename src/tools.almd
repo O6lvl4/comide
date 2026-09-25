@@ -158,7 +158,9 @@ effect fn golemide_edit(s: Setup, request: Value, create: Bool) -> ToolResult = 
     ok(r) => if json.get_bool(r, "ok") ?? false then {
       let matched = strings(r, "matched")
       let checked = str_arg(r, "checked_by")
-      let text = "Written: " + str_arg(r, "path") + " (" + int.to_string(json.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
+      let made = str_arg(r, "diff") == "" and list.any(matched, (m) => string.contains(m, "already made"))
+      let text = if made then "Nothing written: " + str_arg(r, "path") + " already has this change."
+        else "Written: " + str_arg(r, "path") + " (" + int.to_string(json.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
         + (if list.is_empty(matched) then "" else "\nnote: " + string.join(matched, "; "))
         + "\n" + str_arg(r, "diff")
       let diff = str_arg(r, "diff")
@@ -166,7 +168,8 @@ effect fn golemide_edit(s: Setup, request: Value, create: Bool) -> ToolResult = 
       let removed = list.len(list.filter(string.split(diff, "\n"), (l) => string.starts_with(l, "- ")))
       said(capped(s, text)!, "+" + int.to_string(added) + " -" + int.to_string(removed)
         + (if checked == "" then "" else " · checked by " + checked)
-        + (if list.is_empty(matched) then "" else " · found by a loosened match"))
+        + (if list.any(matched, (m) => string.contains(m, "already made")) then " · already made"
+           else if list.is_empty(matched) then "" else " · found by a loosened match"))
     } else failed(capped(s, "Not written: " + str_arg(r, "error"))!, "refused: " + first_line_of(str_arg(r, "error"), 90)),
   }
 }
