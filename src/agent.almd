@@ -153,8 +153,11 @@ fn declined(opts: Options, said: String) -> String =
 
 // ---- one model call, watched -----------------------------------------------------------
 
+// almai.core.retryable, read from the words core.error_text gives it: a rate limit, an
+// overloaded or failing provider (5xx, 529), 408/409/425, or the network.
 fn retryable(e: String) -> Bool =
-  string.contains(e, "status 429") or string.contains(e, "status 50") or string.starts_with(e, "transport")
+  list.any(["status 429", "status 50", "status 529", "status 408", "status 409", "status 425"], (s) => string.contains(e, s))
+    or string.starts_with(e, "transport")
 
 // The whole lines of the answer not yet on screen, the first of a message marked as
 // the assistant's. Lines, not chunks: **bold** split across two chunks would be printed
@@ -738,5 +741,6 @@ test "retries wait longer each time, up to a minute" {
   assert_eq(list.map([0, 1, 2, 3, 4, 5], retry_wait_ms), [5000, 10000, 20000, 40000, 60000, 60000])
   assert(retryable("transport: curl exit 6: curl: (6) Could not resolve host: api.cloudflare.com"))
   assert(retryable("status 429: rate limited"))
+  assert(retryable("status 529: {\"type\":\"overloaded_error\"}"))
   assert(not retryable("status 400: bad request"))
 }

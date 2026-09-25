@@ -12,6 +12,7 @@
 //     scratch directory, so each call sends only what is new
 
 import almai.live as live
+import almai.core as core
 
 // `arguments` is the JSON text the model wrote, parsed only when the tool runs, so a
 // malformed one can be answered as a tool error the model reads, not a crash.
@@ -32,11 +33,14 @@ effect fn endpoint_of(model: String) -> Result[Unit, String] = {
 fn effort_for(model: String, effort: String) -> String =
   if (live.split_model(model)).0 == "cf" then effort else ""
 
-effect fn start(model: String, messages: List[Value], tools: List[Value], max_tokens: Int, effort: String, scratch: String) -> Result[Call, String] = {
-  let p = live.start(live.Request { model: model, messages: messages, tools: tools, max_tokens: max_tokens,
-    effort: effort_for(model, effort), session: scratch + "/claude-session.json" }, LIMITS)!
-  ok(Call { pending: p })
-}
+// Failures go back as almai.core's words for them ("status 429: ...", "transport: ..."),
+// which the loop's retry reads.
+effect fn start(model: String, messages: List[Value], tools: List[Value], max_tokens: Int, effort: String, scratch: String) -> Result[Call, String] =
+  match live.start(live.Request { model: model, messages: messages, tools: tools, max_tokens: max_tokens,
+    effort: effort_for(model, effort), session: scratch + "/claude-session.json" }, LIMITS) {
+    ok(p) => ok(Call { pending: p }),
+    err(e) => err(core.error_text(e)),
+  }
 
 effect fn is_done(c: Call) -> Bool = live.is_done(c.pending)!
 
@@ -44,11 +48,13 @@ effect fn text_so_far(c: Call) -> String = live.text_so_far(c.pending)!
 
 effect fn abandon(c: Call) -> Unit = live.cancel(c.pending)!
 
-effect fn settle(c: Call) -> Result[Reply, String] = {
-  let r = live.finish(c.pending)!
-  ok(Reply { content: r.content, reasoning: r.reasoning, calls: list.map(r.calls, (t) => ToolCall { id: t.id, name: t.name, arguments: t.arguments }),
-    finish: r.finish, cost_usd: r.cost_usd, input_tokens: r.input_tokens, cached_tokens: r.cached_tokens, output_tokens: r.output_tokens, ms: r.ms })
-}
+effect fn settle(c: Call) -> Result[Reply, String] =
+  match live.finish(c.pending) {
+    err(e) => err(core.error_text(e)),
+    ok(r) => ok(Reply { content: r.content, reasoning: r.reasoning, calls: list.map(r.calls, (t) => ToolCall { id: t.id, name: t.name, arguments: t.arguments }),
+      finish: core.finish_name(r.finish), cost_usd: r.cost.usd, input_tokens: core.count(r.usage.input), cached_tokens: core.count(r.usage.cache_read),
+      output_tokens: core.count(r.usage.output), ms: r.ms }),
+  }
 
 test "reasoning effort goes to Cloudflare only" {
   assert_eq(effort_for("cf:glm-5.3", "low"), "low")
