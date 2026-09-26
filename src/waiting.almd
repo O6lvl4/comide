@@ -1,0 +1,88 @@
+// One model call, watched: a spinner while the model is quiet, each whole line of its
+// answer as soon as it is written, Esc to stop it, and the call tried again when the
+// failure is the provider's or the network's.
+
+import env
+import io
+import self.model
+import self.tools
+import self.ui
+import self.term
+import self.convo
+import self.options
+
+// `interrupted` is the person pressing Esc or Ctrl+C while the model was still answering;
+// the reply is then empty and nothing of it is recorded.
+type Heard = { reply: model.Reply, printed: Int, interrupted: Bool }
+
+fn no_reply() -> model.Reply = model.Reply { content: "", reasoning: "", calls: [], finish: "", cost_usd: 0.0, input_tokens: 0, cached_tokens: 0, output_tokens: 0, ms: 0 }
+
+// What the screen shows so far: how much of the answer is printed, and whether the
+// spinner is on the line.
+type Shown = { printed: Int, spinning: Bool }
+
+let CALL_MAX_MS = 930000
+
+// Waits for the request, and in a conversation shows it arriving.
+effect fn await_reply(opts: options.Options, c: model.Call) -> Result[Heard, String] = {
+  let t0 = env.millis()
+  var shown = Shown { printed: 0, spinning: false }
+  var frame = 0
+  var interrupted = false
+  while not model.is_done(c)! and env.millis() - t0 <= CALL_MAX_MS and not interrupted {
+    interrupted = pause(opts)!
+    if opts.live then { shown = progress(opts, c, shown, frame, t0)! }
+    frame = frame + 1
+  }
+  if shown.spinning then io.print(ui.clear_line(opts.ui))
+  if interrupted then { model.abandon(c)!; ok(Heard { reply: no_reply(), printed: shown.printed, interrupted: true }) }
+  else if not model.is_done(c)! then { model.abandon(c)!; err("request timeout: no complete answer within 930s") }
+  else match model.settle(c) {
+    err(e) => err(e),
+    ok(r) => ok(Heard { reply: r, printed: shown.printed, interrupted: false }),
+  }
+}
+
+// A tenth of a second's wait. On a taken-over terminal it is a key read with that
+// timeout, so Esc or Ctrl+C stops the request mid-answer: true when one was pressed.
+effect fn pause(opts: options.Options) -> Bool =
+  if opts.tui then {
+    let k = term.read_key()
+    k.kind == "esc" or (k.kind == "ctrl" and k.text == "c")
+  } else {
+    env.sleep_ms(100)
+    false
+  }
+
+// The whole new lines of the answer, or the spinner while there are none yet.
+effect fn progress(opts: options.Options, c: model.Call, shown: Shown, frame: Int, t0: Int) -> Shown = {
+  let u = opts.ui
+  let text = model.text_so_far(c)!
+  let upto = match string.last_index_of(text, "\n") { some(i) => i + 1, none => 0 }
+  if upto > shown.printed and string.trim(string.slice(text, shown.printed, upto)) != "" then {
+    if shown.spinning then io.print(ui.clear_line(u))
+    println((if shown.printed == 0 then "\n" else "") + convo.answer_lines(u, string.slice(text, shown.printed, upto), shown.printed == 0))
+    Shown { printed: upto, spinning: false }
+  } else if shown.printed == 0 and u.color then {
+    io.print(ui.waiting(u, frame / 3, (env.millis() - t0) / 1000, "Thinking", if opts.tui then "esc to interrupt" else ""))
+    Shown { printed: 0, spinning: true }
+  } else shown
+}
+
+effect fn ask_once(opts: options.Options, scratch: String, messages: List[Value]) -> Result[Heard, String] = {
+  let c = model.start(opts.model, messages, tools.definitions(), opts.max_tokens, opts.effort, scratch)!
+  await_reply(opts, c)
+}
+
+effect fn call_model(opts: options.Options, scratch: String, messages: List[Value], tries: Int) -> Result[Heard, String] =
+  match ask_once(opts, scratch, messages) {
+    ok(h) => ok(h),
+    err(e) => if tries + 1 < convo.MODEL_TRIES and convo.retryable(e) then {
+      // A little jitter, so parallel sessions hit by the same outage do not come back
+      // in step.
+      let wait = convo.retry_wait_ms(tries) + env.millis() % 1000
+      options.show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in " + int.to_string(wait / 1000) + "s"))!
+      env.sleep_ms(wait)
+      call_model(opts, scratch, messages, tries + 1)
+    } else err(e),
+  }

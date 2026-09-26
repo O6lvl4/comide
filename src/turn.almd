@@ -1,0 +1,175 @@
+// One request from the person, worked to an answer: send the conversation and the
+// tools, run whatever tools the model calls, send their results back, and stop when it
+// answers in words -- unless the work it says is done has a check that fails
+// (watch.almd), or the same calls keep coming back.
+
+import json
+import env
+import fs
+import self.model
+import self.tools
+import self.toolkit
+import self.ui
+import self.watch
+import self.convo
+import self.options
+import self.asking
+import self.waiting
+
+// A turn in progress. `tin`, `tcached` and `tout` are the tokens spent; `sigs` are the
+// calls made since the model was last told it was looping.
+type Turn = { messages: List[Value], cost: Float, allow: Bool, steps: Int, done: Bool, interrupted: Bool,
+  tin: Int, tcached: Int, tout: Int, work: watch.Work, check_rounds: Int, sigs: List[String], loop_warned: Bool }
+
+fn said(t: Turn, m: Value) -> Turn = { ...t, messages: t.messages + [m] }
+
+fn ended(t: Turn) -> Turn = { ...t, done: true }
+
+effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, user: String) -> options.Session = {
+  var t = Turn { messages: s.messages + [convo.message("user", user)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
+    tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false }
+  while not t.done { t = step(opts, setup, s, { ...t, messages: convo.compacted(t.messages) })! }
+  let _ = fs.write(setup.scratch + "/transcript.json", json.stringify(value.array(t.messages)))
+  // A turn stopped before the model said anything cost nothing and did nothing; a line
+  // of zeros under it would only be noise.
+  if not (t.interrupted and t.steps == 0) then
+    options.show(opts, "\n" + ui.footer(opts.ui, t.steps, t.tin, t.tcached, t.tout, convo.usd(t.cost), convo.usd(s.cost + t.cost)))!
+  options.Session { messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check }
+}
+
+// One model call and what follows from it.
+effect fn step(opts: options.Options, setup: toolkit.Setup, s: options.Session, t: Turn) -> Turn = {
+  let u = opts.ui
+  if t.steps >= opts.max_steps then {
+    options.show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(t.steps) + " steps without a final answer; say how to continue"))!
+    ended(t)
+  } else match waiting.call_model(opts, setup.scratch, t.messages, 0) {
+    err(e) => {
+      options.show(opts, "\n" + ui.result_line(u, "the model could not be reached: " + string.take(e, 300), true))!
+      ended(t)
+    },
+    ok(h) => if h.interrupted then {
+      options.show(opts, ui.result_line(u, "Interrupted · what should comide do instead?", true))!
+      { ...t, done: true, interrupted: true }
+    } else {
+      let r = h.reply
+      let calls = convo.with_ids(r.calls, s.steps + t.steps)
+      let spent = said({ ...t, cost: t.cost + r.cost_usd, tin: t.tin + r.input_tokens, tcached: t.tcached + r.cached_tokens,
+        tout: t.tout + r.output_tokens }, convo.assistant_message(r.content, calls))
+      let next = if list.is_empty(calls) then answered(opts, setup, spent, h)! else acted(opts, setup, spent, h, calls)!
+      record_cost(s.cost + next.cost)!
+      { ...next, steps: next.steps + 1 }
+    },
+  }
+}
+
+// The model answered in words. Whether that ends the turn is watch.almd's call: the work
+// may have a check to run, or one that failed last time. An answer the turn goes on past
+// is still shown in a conversation, where it has been streaming; under -p only the last
+// answer goes to stdout.
+effect fn answered(opts: options.Options, setup: toolkit.Setup, t: Turn, h: waiting.Heard) -> Turn =
+  match watch.at_finish(t.work, t.check_rounds) {
+    Done => {
+      finish_answer(opts, h.reply, h.printed)!
+      ended(t)
+    },
+    RunCheck(command) => {
+      if opts.live then finish_answer(opts, h.reply, h.printed)!
+      let (out, bad, ran, allow_now) = run_check(opts, setup, command, t.allow)!
+      let checked = { ...t, allow: allow_now, check_rounds: t.check_rounds + 1, work: if ran then watch.checked(t.work, command, bad) else t.work }
+      if ran and bad then said(checked, convo.message("user", watch.check_failed_note(command, out)))
+      else {
+        if not opts.live then finish_answer(opts, h.reply, h.printed)!
+        ended(checked)
+      }
+    },
+    Remind(command) => {
+      if opts.live then finish_answer(opts, h.reply, h.printed)!
+      options.show(opts, "\n" + ui.note_line(opts.ui, "the last run of " + command + " failed; comide asks the model to go on"))!
+      said({ ...t, check_rounds: t.check_rounds + 1 }, convo.message("user", watch.still_failing_note(command)))
+    },
+  }
+
+// The model called tools: the words it said first, then the calls run and their results
+// recorded, then a look at whether it is going round in circles.
+effect fn acted(opts: options.Options, setup: toolkit.Setup, t: Turn, h: waiting.Heard, calls: List[model.ToolCall]) -> Turn = {
+  let r = h.reply
+  let u = opts.ui
+  // Words said before the calls: streamed already in a conversation.
+  if not opts.live and string.trim(r.content) != "" then eprintln("\n" + convo.answer_lines(u, r.content, true))
+  else if opts.live and string.trim(string.drop(r.content, h.printed)) != "" then println(convo.answer_lines(u, string.drop(r.content, h.printed), h.printed == 0))
+  let ran = run_calls(opts, setup, calls, t.allow, t.work)!
+  looping(opts, { ...t, messages: t.messages + ran.results, allow: ran.allow, cost: t.cost + ran.spent, work: ran.work,
+    sigs: t.sigs + list.map(calls, (c) => watch.signature(c.name, c.arguments)) })!
+}
+
+// The same calls three times over: the model is told once, and stopped the second time.
+effect fn looping(opts: options.Options, t: Turn) -> Turn =
+  if not watch.repeating(t.sigs) then t
+  else if t.loop_warned then {
+    options.show(opts, "\n" + ui.note_line(opts.ui, "stopped: the same calls kept coming back; say how to continue"))!
+    ended(t)
+  } else {
+    options.show(opts, "\n" + ui.note_line(opts.ui, "the same calls three times over; comide asks the model to step back"))!
+    said({ ...t, loop_warned: true, sigs: ([]: List[String]) }, convo.message("user", watch.LOOP_NOTE))
+  }
+
+// ---- the tools, shown ------------------------------------------------------------------
+
+type Ran = { results: List[Value], allow: Bool, spent: Float, work: watch.Work }
+
+// The tool messages, whether shell is allowed from now on, what the tools spent on models
+// of their own, and what the calls did to the work (watch.almd).
+effect fn run_calls(opts: options.Options, setup: toolkit.Setup, calls: List[model.ToolCall], allow0: Bool, work0: watch.Work) -> Ran = {
+  var ran = Ran { results: [], allow: allow0, spent: 0.0, work: work0 }
+  for c in calls { ran = run_call(opts, setup, c, ran)! }
+  ran
+}
+
+effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCall, ran: Ran) -> Ran = {
+  let u = opts.ui
+  options.show(opts, "\n" + ui.call_line(u, c.name, tools.call_label(c.name, c.arguments)))!
+  let p = match tools.command_of(c.name, c.arguments) {
+    some(_) => asking.permitted(opts, ran.allow, "Run this command?")!,
+    none => asking.Permission { run: true, allow_from_now: ran.allow, said: "" },
+  }
+  let r = if p.run then tools.run(setup, c.name, c.arguments)!
+    else toolkit.failed(asking.declined(opts, p.said), if p.said == "" then "not run" else "not run: " + p.said)
+  options.show(opts, ui.result_line(u, r.brief, r.failed))!
+  Ran { results: ran.results + [convo.tool_message(c.id, r.text)], allow: p.allow_from_now, spent: ran.spent + r.cost_usd,
+    work: if p.run then watch.after(ran.work, c.name, c.arguments, r.failed) else ran.work }
+}
+
+// The model said it was done with files changed since the check last ran: comide runs the
+// check itself, asking first as for any command. (the output, whether it failed, whether
+// it ran, shell allowed from now on)
+effect fn run_check(opts: options.Options, setup: toolkit.Setup, command: String, allow0: Bool) -> (String, Bool, Bool, Bool) = {
+  let u = opts.ui
+  options.show(opts, "\n" + ui.call_line(u, "shell", command + "  (comide checks the change)"))!
+  let p = asking.permitted(opts, allow0, "Run this command to check the change?")!
+  if not p.run then {
+    options.show(opts, ui.result_line(u, "not run", true))!
+    ("", false, false, p.allow_from_now)
+  } else {
+    let r = tools.run(setup, "shell", json.stringify(value.object([("command", value.str(command))])))!
+    options.show(opts, ui.result_line(u, r.brief, r.failed))!
+    (r.text, r.failed, true, p.allow_from_now)
+  }
+}
+
+// What is left of an answer once the streamed lines are on screen.
+effect fn finish_answer(opts: options.Options, r: model.Reply, printed: Int) -> Unit =
+  if not opts.live then println(convo.final_text(r))
+  else {
+    let rest = string.drop(r.content, printed)
+    if string.trim(rest) != "" then println((if printed == 0 then "\n" else "") + convo.answer_lines(opts.ui, rest, printed == 0))
+    else if printed == 0 then println("\n" + convo.answer_lines(opts.ui, convo.final_text(r), true))
+  }
+
+// With COMIDE_COST_FILE set, the session's cost so far is written there after every step.
+// A benchmark stops comide at a wall-clock cap, and a stopped comide prints no footer:
+// without this, the steps it paid for before the cap were recorded as nothing.
+effect fn record_cost(total: Float) -> Unit = {
+  let path = env.get("COMIDE_COST_FILE") ?? ""
+  if path != "" then { let _ = fs.write(path, convo.usd(total) + "\n") }
+}

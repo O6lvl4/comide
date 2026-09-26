@@ -1,0 +1,75 @@
+// What every tool is made of: the setup it runs in, the result it gives back, the paths
+// resolved against the project root, and a ceiling on what a result may put into the
+// conversation. Past it, the whole output is kept in a file and the model is told where,
+// so it can read the part it needs with `read`.
+
+import json
+import fs
+import env
+import process
+
+// `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
+// `solve_model` and `solve_strong` are golemide's --model and --strong-model, "" for
+// golemide's own defaults (COMIDE_SOLVE_MODEL, COMIDE_SOLVE_STRONG_MODEL).
+type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String }
+
+// What goes back to the model; the one line the person watching sees under the call;
+// whether that line is bad news; and what the tool spent on a model of its own (solve
+// does), so the session's cost is the whole cost.
+type ToolResult = { text: String, brief: String, failed: Bool, cost_usd: Float }
+
+fn said(text: String, brief: String) -> ToolResult = ToolResult { text: text, brief: brief, failed: false, cost_usd: 0.0 }
+fn failed(text: String, brief: String) -> ToolResult = ToolResult { text: text, brief: brief, failed: true, cost_usd: 0.0 }
+
+fn count_lines(s: String) -> String = {
+  let n = if string.trim(s) == "" then 0 else list.len(string.split(string.trim_end(s), "\n"))
+  int.to_string(n) + (if n == 1 then " line" else " lines")
+}
+
+fn first_line_of(s: String, n: Int) -> String = {
+  let l = list.first(string.split(string.trim(s), "\n")) ?? ""
+  if string.len(l) > n then string.take(l, n) + "…" else l
+}
+
+let MAX_RESULT_CHARS = 16000
+let KEEP_EACH_END = 6000
+
+fn shell_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
+
+fn under_root(s: Setup, p: String) -> String =
+  if p == "" or p == "." then s.root else if string.starts_with(p, "/") then p else s.root + "/" + (string.strip_prefix(p, "./") ?? p)
+
+// Paths in results read relative to the root, as the model named them.
+fn relative(s: Setup, text: String) -> String = string.replace(text, s.root + "/", "")
+
+effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
+  match process.exec_status_timeout(prog, args, timeout_s * 1000) {
+    ok(st) => (st.code, string.trim_end(st.stdout + (if string.trim(st.stderr) == "" then "" else "\n" + st.stderr))),
+    err(e) => (-1, e),
+  }
+
+effect fn capped(s: Setup, text: String) -> String =
+  if string.len(text) <= MAX_RESULT_CHARS then text
+  else {
+    let path = s.scratch + "/output-" + int.to_string(env.millis()) + ".txt"
+    let _ = fs.write(path, text)
+    string.take(text, KEEP_EACH_END)
+      + "\n\n[… " + int.to_string(string.len(text) - 2 * KEEP_EACH_END) + " characters left out. The whole output is in "
+      + path + ": read it with lines or grep.]\n\n"
+      + string.drop(text, string.len(text) - KEEP_EACH_END)
+  }
+
+fn str_arg(a: Value, k: String) -> String = json.get_string(a, k) ?? ""
+fn strings(a: Value, k: String) -> List[String] =
+  list.filter_map(json.get_array(a, k) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
+fn int_arg(a: Value, k: String, d: Int) -> Int = json.get_int(a, k) ?? (int.parse(json.get_string(a, k) ?? "") ?? d)
+
+test "paths resolve against the root, and results read relative to it" {
+  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888", solve_model: "", solve_strong: "" }
+  assert_eq(under_root(s, "src/a.py"), "/w/proj/src/a.py")
+  assert_eq(under_root(s, "./src/a.py"), "/w/proj/src/a.py")
+  assert_eq(under_root(s, ""), "/w/proj")
+  assert_eq(relative(s, "# /w/proj/src/a.py  (3 lines)"), "# src/a.py  (3 lines)")
+  assert_eq(count_lines("a\nb\n"), "2 lines")
+  assert_eq(count_lines(""), "0 lines")
+}

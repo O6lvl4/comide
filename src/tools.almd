@@ -7,47 +7,15 @@
 //   shell                         ctxgate exec  long runner output summarised, exit kept
 //
 // None of them is reimplemented here. What this module adds is the schema the model
-// sees, the paths resolved against the project root, and a ceiling on what a result
-// may put into the conversation: past it, the whole output is kept in a file and the
-// model is told where, so it can read the part it needs with `read`.
+// sees and the dispatch; what every tool shares is toolkit.almd, golemide's part
+// solving.almd, and the web web.almd.
 
 import json
-import fs
-import env
-import process
-import url
-import http
-import self.page
+import self.toolkit
+import self.solving
+import self.web
 
-// `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
-// `solve_model` and `solve_strong` are golemide's --model and --strong-model, "" for
-// golemide's own defaults (COMIDE_SOLVE_MODEL, COMIDE_SOLVE_STRONG_MODEL).
-type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String }
-
-// What goes back to the model; the one line the person watching sees under the call;
-// whether that line is bad news; and what the tool spent on a model of its own (solve
-// does), so the session's cost is the whole cost.
-type ToolResult = { text: String, brief: String, failed: Bool, cost_usd: Float }
-
-fn said(text: String, brief: String) -> ToolResult = ToolResult { text: text, brief: brief, failed: false, cost_usd: 0.0 }
-fn failed(text: String, brief: String) -> ToolResult = ToolResult { text: text, brief: brief, failed: true, cost_usd: 0.0 }
-
-fn count_lines(s: String) -> String = {
-  let n = if string.trim(s) == "" then 0 else list.len(string.split(string.trim_end(s), "\n"))
-  int.to_string(n) + (if n == 1 then " line" else " lines")
-}
-
-fn first_line_of(s: String, n: Int) -> String = {
-  let l = list.first(string.split(string.trim(s), "\n")) ?? ""
-  if string.len(l) > n then string.take(l, n) + "…" else l
-}
-
-let MAX_RESULT_CHARS = 16000
-let KEEP_EACH_END = 6000
 let SHELL_TIMEOUT_S = 300
-let SOLVE_TIMEOUT_S = 1800
-let SEARCH_RESULTS = 8
-let SNIPPET_CHARS = 300
 
 // ---- the schema the model sees -------------------------------------------------------
 
@@ -92,353 +60,77 @@ fn definitions() -> List[Value] = [
 
 // ---- running them --------------------------------------------------------------------
 
-fn shell_quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
-
-fn under_root(s: Setup, p: String) -> String =
-  if p == "" or p == "." then s.root else if string.starts_with(p, "/") then p else s.root + "/" + (string.strip_prefix(p, "./") ?? p)
-
-// Paths in results read relative to the root, as the model named them.
-fn relative(s: Setup, text: String) -> String = string.replace(text, s.root + "/", "")
-
-effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
-  match process.exec_status_timeout(prog, args, timeout_s * 1000) {
-    ok(st) => (st.code, string.trim_end(st.stdout + (if string.trim(st.stderr) == "" then "" else "\n" + st.stderr))),
-    err(e) => (-1, e),
-  }
-
-effect fn capped(s: Setup, text: String) -> String =
-  if string.len(text) <= MAX_RESULT_CHARS then text
-  else {
-    let path = s.scratch + "/output-" + int.to_string(env.millis()) + ".txt"
-    let _ = fs.write(path, text)
-    string.take(text, KEEP_EACH_END)
-      + "\n\n[… " + int.to_string(string.len(text) - 2 * KEEP_EACH_END) + " characters left out. The whole output is in "
-      + path + ": read it with lines or grep.]\n\n"
-      + string.drop(text, string.len(text) - KEEP_EACH_END)
-  }
-
-fn str_arg(a: Value, k: String) -> String = json.get_string(a, k) ?? ""
-fn strings(a: Value, k: String) -> List[String] =
-  list.filter_map(json.get_array(a, k) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
-fn int_arg(a: Value, k: String, d: Int) -> Int = json.get_int(a, k) ?? (int.parse(json.get_string(a, k) ?? "") ?? d)
-
-effect fn read(s: Setup, a: Value) -> ToolResult = {
-  var args = [under_root(s, str_arg(a, "path"))]
-  if str_arg(a, "symbol") != "" then { args = args + ["--symbol", str_arg(a, "symbol")] } else ()
-  if str_arg(a, "lines") != "" then { args = args + ["--lines", str_arg(a, "lines")] } else ()
-  if str_arg(a, "grep") != "" then { args = args + ["--grep", str_arg(a, "grep"), "--around", int.to_string(int_arg(a, "around", 3))] } else ()
-  let (_, out) = run_program("hew", args, 60)!
-  said(capped(s, relative(s, out))!, count_lines(out))
+effect fn read(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  var args = [toolkit.under_root(s, toolkit.str_arg(a, "path"))]
+  if toolkit.str_arg(a, "symbol") != "" then { args = args + ["--symbol", toolkit.str_arg(a, "symbol")] }
+  if toolkit.str_arg(a, "lines") != "" then { args = args + ["--lines", toolkit.str_arg(a, "lines")] }
+  if toolkit.str_arg(a, "grep") != "" then { args = args + ["--grep", toolkit.str_arg(a, "grep"), "--around", int.to_string(toolkit.int_arg(a, "around", 3))] }
+  let (_, out) = toolkit.run_program("hew", args, 60)!
+  toolkit.said(toolkit.capped(s, toolkit.relative(s, out))!, toolkit.count_lines(out))
 }
 
-effect fn hew_listing(s: Setup, sub: String, a: Value) -> ToolResult = {
-  let target = under_root(s, str_arg(a, "path"))
-  let args = if sub == "tree" then ["tree", target, "--depth", int.to_string(int_arg(a, "depth", 3))]
-    else if sub == "search" then ["grep", str_arg(a, "pattern"), target]
+effect fn hew_listing(s: toolkit.Setup, sub: String, a: Value) -> toolkit.ToolResult = {
+  let target = toolkit.under_root(s, toolkit.str_arg(a, "path"))
+  let args = if sub == "tree" then ["tree", target, "--depth", int.to_string(toolkit.int_arg(a, "depth", 3))]
+    else if sub == "search" then ["grep", toolkit.str_arg(a, "pattern"), target]
     else ["outline", target]
-  let (_, out) = run_program("hew", args, 60)!
-  said(capped(s, relative(s, out))!, count_lines(out))
+  let (_, out) = toolkit.run_program("hew", args, 60)!
+  toolkit.said(toolkit.capped(s, toolkit.relative(s, out))!, toolkit.count_lines(out))
 }
 
-effect fn map(s: Setup, a: Value) -> ToolResult = {
-  let (_, out) = run_program("gramide", ["map", s.root, "--budget", "3000", "--task", str_arg(a, "task")], 120)!
-  said(capped(s, relative(s, out))!, count_lines(out))
+effect fn map(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let (_, out) = toolkit.run_program("gramide", ["map", s.root, "--budget", "3000", "--task", toolkit.str_arg(a, "task")], 120)!
+  toolkit.said(toolkit.capped(s, toolkit.relative(s, out))!, toolkit.count_lines(out))
 }
 
-// golemide edit reads its request on stdin; the request goes through a file so the
-// timeout-bounded runner, which has no stdin, can still be used.
-effect fn golemide_edit(s: Setup, request: Value, create: Bool) -> ToolResult = {
-  let req_path = s.scratch + "/edit-" + int.to_string(env.millis()) + ".json"
-  let _ = fs.write(req_path, json.stringify(request))
-  let script = "exec \"$0\" edit --root \"$1\"" + (if create then " --create" else "") + " < \"$2\""
-  let (code, out) = run_program("bash", ["-c", script, s.golemide, s.root, req_path], 60)!
-  let _ = fs.remove(req_path)
-  match json.parse(out) {
-    err(_) => failed("golemide edit failed (exit " + int.to_string(code) + "): " + string.take(out, 2000), "golemide edit failed (exit " + int.to_string(code) + ")"),
-    ok(r) => if json.get_bool(r, "ok") ?? false then {
-      let matched = strings(r, "matched")
-      let checked = str_arg(r, "checked_by")
-      let made = str_arg(r, "diff") == "" and list.any(matched, (m) => string.contains(m, "already made"))
-      let text = if made then "Nothing written: " + str_arg(r, "path") + " already has this change."
-        else "Written: " + str_arg(r, "path") + " (" + int.to_string(json.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
-        + (if list.is_empty(matched) then "" else "\nnote: " + string.join(matched, "; "))
-        + "\n" + str_arg(r, "diff")
-      let diff = str_arg(r, "diff")
-      let added = list.len(list.filter(string.split(diff, "\n"), (l) => string.starts_with(l, "+ ")))
-      let removed = list.len(list.filter(string.split(diff, "\n"), (l) => string.starts_with(l, "- ")))
-      said(capped(s, text)!, "+" + int.to_string(added) + " -" + int.to_string(removed)
-        + (if checked == "" then "" else " · checked by " + checked)
-        + (if list.any(matched, (m) => string.contains(m, "already made")) then " · already made"
-           else if list.is_empty(matched) then "" else " · found by a loosened match"))
-    } else failed(capped(s, "Not written: " + str_arg(r, "error"))!, "refused: " + first_line_of(str_arg(r, "error"), 90)),
-  }
-}
-
-effect fn edit(s: Setup, a: Value) -> ToolResult =
-  golemide_edit(s, value.object([("path", value.str(str_arg(a, "path"))),
-    ("replacements", value.array([value.object([("old", value.str(str_arg(a, "old"))), ("new", value.str(str_arg(a, "new")))])]))]), false)!
-
-effect fn write(s: Setup, a: Value) -> ToolResult =
-  golemide_edit(s, value.object([("path", value.str(str_arg(a, "path"))), ("source", value.str(str_arg(a, "content")))]), true)!
-
-effect fn shell(s: Setup, a: Value) -> ToolResult = {
-  let command = str_arg(a, "command")
-  let line = "cd " + shell_quote(s.root) + " && " + command
+effect fn shell(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let command = toolkit.str_arg(a, "command")
+  let line = "cd " + toolkit.shell_quote(s.root) + " && " + command
   // pipefail: measured on the first conversation, `npm test 2>&1 | tail -30` in a
   // project with no package.json came back exit 0, tail's status, not npm's.
   let bash = ["bash", "-o", "pipefail", "-c", line]
-  let (code, out) = if s.ctxgate then run_program("ctxgate", ["exec", "--"] + bash, int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
-    else run_program("bash", list.drop(bash, 1), int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
+  let (code, out) = if s.ctxgate then toolkit.run_program("ctxgate", ["exec", "--"] + bash, toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
+    else toolkit.run_program("bash", list.drop(bash, 1), toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
   let status = if code == -1 then "did not finish: " else "exit " + int.to_string(code) + "\n"
-  let brief = if code == -1 then "did not finish: " + first_line_of(out, 80) else "exit " + int.to_string(code) + " · " + count_lines(out)
-  let hint = if code != 0 and code != -1 and checks_work(command) then solve_hint(command) else ""
-  if code == 0 then said(capped(s, status + out)!, brief) else failed(capped(s, status + out)! + hint, brief)
+  let brief = if code == -1 then "did not finish: " + toolkit.first_line_of(out, 80) else "exit " + int.to_string(code) + " · " + toolkit.count_lines(out)
+  let hint = if code != 0 and code != -1 and solving.checks_work(command) then solving.solve_hint(command) else ""
+  if code == 0 then toolkit.said(toolkit.capped(s, status + out)!, brief) else toolkit.failed(toolkit.capped(s, status + out)! + hint, brief)
 }
 
-// Whether a command looks like one that says if the work is done: a test run or a build.
-fn checks_work(command: String) -> Bool = {
-  let c = string.to_lower(command)
-  list.any(["test", "pytest", "cargo", "go build", "go vet", "npm run", "jest", "vitest", "make", "gradle", "mvn", "ctest", "cmake --build", "tsc", "almide"], (w) => string.contains(c, w))
-}
-
-// Said to the model under a failing test or build. Measured 2026-09-24: on 64 polyglot
-// exercises whose prompt named the verify command, the model never called solve once and
-// did every edit itself on the conversation model, at 13 times golemide's cost for the
-// same 64/64. The rule was in the system prompt; the failing run is where it is needed.
-fn solve_hint(command: String) -> String =
-  "\n\n(This command failed. solve can make it pass: call solve with verify = " + json.stringify(value.str(command)) + " and the change stated as the task.)"
-
-fn solve_summary(doc: Value) -> String = {
-  let status = str_arg(doc, "status")
-  var lines = [status + " (exit " + int.to_string(json.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(json.get_int(doc, "attempts") ?? 0) + " attempt(s)"]
-  let changed = strings(doc, "changed")
-  if not list.is_empty(changed) then list.push(lines, "changed: " + string.join(changed, ", ")) else ()
-  for w in strings(doc, "warnings") { list.push(lines, "warning: " + w) }
-  let throttled = json.get_int(doc, "throttled") ?? 0
-  if throttled > 0 then list.push(lines, "rate limited " + int.to_string(throttled) + " time(s), "
-    + int.to_string((json.get_int(doc, "throttled_ms") ?? 0) / 1000) + "s spent waiting") else ()
-  if str_arg(doc, "message") != "" then list.push(lines, str_arg(doc, "message")) else ()
-  match list.last(json.get_array(doc, "attempt_log") ?? []) {
-    some(t) => if str_arg(t, "explanation") != "" then list.push(lines, "last change: " + str_arg(t, "explanation")) else (),
-    none => (),
-  }
-  if str_arg(doc, "diff") != "" then list.push(lines, "what it changed, from before its first write:\n" + str_arg(doc, "diff")) else ()
-  match value.field(doc, "last_verify") {
-    ok(v) => list.push(lines, "last verify, exit " + int.to_string(json.get_int(v, "exit") ?? -1) + ":\n" + str_arg(v, "output_tail")),
-    err(_) => (),
-  }
-  string.join(lines, "\n")
-}
-
-// No --model: golemide runs its repair loop on its own default (flash, escalating to
-// glm-5.3 when it stalls), whatever model the conversation is on.
-effect fn solve(s: Setup, a: Value) -> ToolResult = {
-  let args = ["solve", str_arg(a, "task"), "--root", s.root, "--verify", str_arg(a, "verify"),
-    "--attempts", int.to_string(int_arg(a, "attempts", 6)), "--json", "--quiet"]
-    + (if s.solve_model == "" then [] else ["--model", s.solve_model])
-    + (if s.solve_strong == "" then [] else ["--strong-model", s.solve_strong])
-  let (code, out) = run_program(s.golemide, args, SOLVE_TIMEOUT_S)!
-  // stdout is one JSON object; stderr, which run_program appends, is progress.
-  let first_line = list.first(string.split(out, "\n")) ?? ""
-  let parsed = json.parse(first_line)
-  let text = match parsed {
-    ok(doc) => solve_summary(doc),
-    err(_) => "golemide solve failed (exit " + int.to_string(code) + "):\n" + out,
-  }
-  let spent = match parsed { ok(doc) => json.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
-  let solved = match parsed { ok(doc) => json.get_bool(doc, "ok") ?? false, err(_) => false }
-  ToolResult { text: capped(s, text)!, brief: first_line_of(text, 90), failed: not solved, cost_usd: spent }
-}
-
-// ---- the web -------------------------------------------------------------------------
-
-fn search_url(base: String, query: String) -> String =
-  base + "/search?q=" + url.encode_component(query) + "&format=json"
-
-// The engines SearXNG asked that did not answer, each reported as [name, reason].
-fn silent_engines(d: Value) -> List[String] =
-  list.filter_map(json.get_array(d, "unresponsive_engines") ?? [], (e) => match value.as_array(e) {
-    ok(pair) => match list.first(pair) { some(n) => match value.as_string(n) { ok(name) => some(name), err(_) => none }, none => none },
-    err(_) => none,
-  })
-
-// Numbered, so the model can say which one it means; the address on its own line, so
-// it can be passed to web_fetch as it is.
-fn search_results(body: String, max: Int) -> (String, Int) =
-  match json.parse(body) {
-    err(_) => ("the search engine answered something that is not JSON: " + string.take(body, 200), 0),
-    ok(d) => {
-      var out: List[String] = []
-      var n = 0
-      for r in list.take(json.get_array(d, "results") ?? [], max) {
-        n = n + 1
-        let snippet = string.trim(str_arg(r, "content"))
-        list.push(out, int.to_string(n) + ". " + str_arg(r, "title") + "\n   " + str_arg(r, "url")
-          + (if snippet == "" then "" else "\n   " + string.take(snippet, SNIPPET_CHARS)))
-      }
-      let silent = silent_engines(d)
-      let note = if list.is_empty(silent) then "" else "\n(did not answer: " + string.join(silent, ", ") + ")"
-      ((if n == 0 then "no results" else string.join(out, "\n")) + note, n)
-    },
-  }
-
-let UA = "Mozilla/5.0 (compatible; comide/0.4; +https://github.com/O6lvl4/comide)"
-
-type Got = { status: Int, body: String, error: String }
-
-// The golemide this was built against: `edit` and `solve --json` arrived in 0.2.0.
-let GOLEMIDE_NEEDED = [0, 2, 0]
-
-fn version_parts(said: String) -> List[Int] =
-  list.filter_map(string.split(string.trim(list.last(string.split(string.trim(said), " ")) ?? ""), "."), (p) => match int.parse(p) { ok(n) => some(n), err(_) => none })
-
-fn at_least(have: List[Int], need: List[Int]) -> Bool = {
-  var i = 0
-  var decided = false
-  var ok_so_far = true
-  while not decided and i < list.len(need) {
-    let h = list.get(have, i) ?? 0
-    let n = list.get(need, i) ?? 0
-    if h != n then { decided = true; ok_so_far = h > n } else ()
-    i = i + 1
-  }
-  ok_so_far
-}
-
-// Why the edit, write and solve tools will not work, or "" when they will. Said once at
-// the start, rather than as a failed edit in the middle of a task.
-effect fn golemide_problem(bin: String) -> String = {
-  let (code, said_back) = run_program(bin, ["--version"], 10)!
-  let need = string.join(list.map(GOLEMIDE_NEEDED, (n) => int.to_string(n)), ".")
-  if code != 0 and string.contains(said_back, "unknown command") then
-    "golemide at " + bin + " is older than " + need + ": edit, write and solve need " + need + " or later"
-  else if code != 0 then
-    "golemide was not found (" + bin + "): edit, write and solve need golemide " + need + " or later on PATH, or --golemide"
-  else if not at_least(version_parts(said_back), GOLEMIDE_NEEDED) then
-    string.trim(said_back) + " is older than " + need + ": edit, write and solve need " + need + " or later"
-  else ""
-}
-
-// Where a redirect's `Location` points, against the page that sent it. Relative targets
-// are resolved against the host only, which covers the redirects seen in practice
-// (`/news/x` from a newsroom root); a path-relative target is left alone.
-fn resolve(from: String, target: String) -> String = {
-  let scheme = if string.starts_with(from, "http://") then "http://" else "https://"
-  if string.starts_with(target, "http://") or string.starts_with(target, "https://") then target
-  else if string.starts_with(target, "//") then string.drop_end(scheme, 2) + target
-  else if string.starts_with(target, "/") then {
-    let after = string.drop(from, string.len(scheme))
-    match string.index_of(after, "/") {
-      none => from + target,
-      some(i) => string.take(from, string.len(scheme) + i) + target,
-    }
-  } else from
-}
-
-let WEB_HOPS = 5
-let WEB_TIMEOUT_SECS = "20"
-
-// One GET, redirects followed here, one hop at a time, so that with `public_only` every
-// hop is held to `private_host` and not only the address the model gave: a public page
-// may redirect anywhere. The read timeout is the runtime's process-wide knob.
-effect fn get(address: String, accept: String, public_only: Bool) -> Got = {
-  env.set("ALMIDE_HTTP_TIMEOUT_SECS", WEB_TIMEOUT_SECS)
-  hop(address, accept, public_only, WEB_HOPS)!
-}
-
-effect fn hop(address: String, accept: String, public_only: Bool, left: Int) -> Got =
-  if left == 0 then Got { status: 0, body: "", error: "more than " + int.to_string(WEB_HOPS) + " redirects" }
-  else if public_only and private_host(host_of(address)) then
-    Got { status: 0, body: "", error: "redirected to " + host_of(address) + ", which is on this machine or a private network" }
-  else match http.request_response("GET", address, "", ["User-Agent": UA, "Accept": accept]) {
-    err(e) => Got { status: 0, body: "", error: first_line_of(e, 200) },
-    ok(r) => {
-      let code = http.status_code(r)
-      let target = if code >= 300 and code < 400 then http.get_header(r, "Location") else none
-      match target {
-        some(t) => hop(resolve(address, t), accept, public_only, left - 1)!,
-        none => Got { status: code, body: http.body(r), error: "" },
-      }
-    },
-  }
-
-effect fn web_search(s: Setup, a: Value) -> ToolResult = {
-  let g = get(search_url(s.searx, str_arg(a, "query")), "application/json", false)!
-  if g.error != "" then failed("the search engine did not answer: " + g.error + ". It is the SearXNG at " + s.searx
-      + "; if it runs in Docker, `docker start searxng` starts it.", "search unavailable: " + first_line_of(g.error, 70))
-  else if g.status != 200 then failed("SearXNG at " + s.searx + " answered HTTP " + int.to_string(g.status)
-      + " (403 means JSON is not enabled in its settings.yml: search.formats needs json)", "search unavailable: HTTP " + int.to_string(g.status))
-  else {
-    let (text, n) = search_results(g.body, int_arg(a, "max_results", SEARCH_RESULTS))
-    if n == 0 then failed(text, "no results") else said(text, int.to_string(n) + (if n == 1 then " result" else " results"))
-  }
-}
-
-// The host part of an address, lowercased, without user, port or brackets.
-fn host_of(address: String) -> String = {
-  let rest = string.strip_prefix(address, "https://") ?? (string.strip_prefix(address, "http://") ?? "")
-  let authority = list.first(string.split(list.first(string.split(list.first(string.split(rest, "/")) ?? "", "?")) ?? "", "#")) ?? ""
-  let hostport = list.last(string.split(authority, "@")) ?? ""
-  let bare = if string.starts_with(hostport, "[") then list.first(string.split(string.drop(hostport, 1), "]")) ?? "" else list.first(string.split(hostport, ":")) ?? ""
-  string.to_lower(bare)
-}
-
-// Pages are read without asking, so what a page could point the model at is limited to
-// the public web: not this machine, not the local network, not a bare intranet name.
-// A name that resolves to a private address is not caught here; this is a guard
-// against the obvious addresses, not a firewall.
-fn private_host(h: String) -> Bool = {
-  let second = int.parse(list.get(string.split(h, "."), 1) ?? "") ?? -1
-  h == "" or h == "localhost" or string.ends_with(h, ".localhost") or string.ends_with(h, ".local") or string.ends_with(h, ".internal")
-    or not string.contains(h, ".") or string.contains(h, ":")
-    or string.starts_with(h, "127.") or string.starts_with(h, "10.") or string.starts_with(h, "0.")
-    or string.starts_with(h, "192.168.") or string.starts_with(h, "169.254.")
-    or (string.starts_with(h, "172.") and second >= 16 and second <= 31)
-}
-
-effect fn web_fetch(s: Setup, a: Value) -> ToolResult = {
-  let address = str_arg(a, "url")
-  let host = host_of(address)
-  if not (string.starts_with(address, "http://") or string.starts_with(address, "https://")) then
-    failed("only http and https addresses can be read: " + address, "not an http(s) address")
-  else if private_host(host) then
-    failed("not read: " + host + " is on this machine or a private network, and pages are only read from the public web", "not read: private address")
-  else {
-    let g = get(address, "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8", true)!
-    if g.error != "" then failed("could not read " + address + ": " + g.error, "could not read: " + first_line_of(g.error, 70))
-    else if g.status < 200 or g.status >= 300 then failed("could not read " + address + ": HTTP " + int.to_string(g.status), "could not read: HTTP " + int.to_string(g.status))
-    else {
-      let text = page.readable(g.body)
-      if string.trim(text) == "" then failed("the page at " + address + " has no readable text (it may be built by scripts)", "no readable text")
-      else said(capped(s, "# " + address + "\n\n" + text)!, count_lines(text))
-    }
-  }
-}
-
-effect fn run(s: Setup, name: String, arguments: String) -> ToolResult =
+effect fn run(s: toolkit.Setup, name: String, arguments: String) -> toolkit.ToolResult =
   match json.parse(if string.trim(arguments) == "" then "{}" else arguments) {
-    err(e) => failed("the arguments were not valid JSON (" + e + "): " + string.take(arguments, 300), "the arguments were not valid JSON"),
-    ok(a) =>
-      if name == "read" then read(s, a)!
-      else if name == "outline" or name == "tree" or name == "search" then hew_listing(s, name, a)!
-      else if name == "map" then map(s, a)!
-      else if name == "edit" then edit(s, a)!
-      else if name == "write" then write(s, a)!
-      else if name == "shell" then shell(s, a)!
-      else if name == "solve" then solve(s, a)!
-      else if name == "web_search" then web_search(s, a)!
-      else if name == "web_fetch" then web_fetch(s, a)!
-      else failed("there is no tool called " + name, "no such tool"),
+    err(e) => toolkit.failed("the arguments were not valid JSON (" + e + "): " + string.take(arguments, 300), "the arguments were not valid JSON"),
+    ok(a) => match looked(s, name, a)! {
+      some(r) => r,
+      none => changed(s, name, a)!,
+    },
   }
+
+// The tools that only look: hew and gramide.
+effect fn looked(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult? =
+  if name == "read" then some(read(s, a)!)
+  else if name == "outline" or name == "tree" or name == "search" then some(hew_listing(s, name, a)!)
+  else if name == "map" then some(map(s, a)!)
+  else none
+
+// The tools that change something, run something, or reach outside.
+effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult =
+  if name == "edit" then solving.edit(s, a)!
+  else if name == "write" then solving.write(s, a)!
+  else if name == "shell" then shell(s, a)!
+  else if name == "solve" then solving.solve(s, a)!
+  else if name == "web_search" then web.web_search(s, a)!
+  else if name == "web_fetch" then web.web_fetch(s, a)!
+  else toolkit.failed("there is no tool called " + name, "no such tool")
 
 // What the model is told about the project before the first request: its layout and
 // its git state, both cheap, neither needing permission. Measured on the first
 // conversation without it: asked to run the tests of a Python project, the model's
 // first command was `npm test`.
-effect fn project_context(s: Setup) -> String = {
-  let (_, tree) = run_program("hew", ["tree", s.root, "--depth", "2"], 30)!
-  let (git_code, git) = run_program("bash", ["-c", "cd " + shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
-  let tree_part = string.take(relative(s, tree), 3000)
+effect fn project_context(s: toolkit.Setup) -> String = {
+  let (_, tree) = toolkit.run_program("hew", ["tree", s.root, "--depth", "2"], 30)!
+  let (git_code, git) = toolkit.run_program("bash", ["-c", "cd " + toolkit.shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
+  let tree_part = string.take(toolkit.relative(s, tree), 3000)
   let git_part = if git_code == 0 then "\n\ngit branch and uncommitted changes:\n" + git else "\n\nnot a git repository"
   "Project layout:\n" + tree_part + git_part
 }
@@ -449,56 +141,51 @@ fn call_label(name: String, arguments: String) -> String =
   match json.parse(arguments) {
     err(_) => "",
     ok(a) => {
-      let path = if str_arg(a, "path") == "" then "." else str_arg(a, "path")
-      let narrowed = if str_arg(a, "symbol") != "" then " " + str_arg(a, "symbol")
-        else if str_arg(a, "lines") != "" then ":" + str_arg(a, "lines")
-        else if str_arg(a, "grep") != "" then " /" + str_arg(a, "grep") + "/" else ""
-      let label = if name == "read" then path + narrowed
-        else if name == "search" then "/" + str_arg(a, "pattern") + "/" + (if str_arg(a, "path") == "" then "" else " in " + str_arg(a, "path"))
-        else if name == "map" then str_arg(a, "task")
-        else if name == "shell" then str_arg(a, "command")
-        else if name == "solve" then str_arg(a, "task") + " · verify: " + str_arg(a, "verify")
-        else if name == "web_search" then str_arg(a, "query")
-        else if name == "web_fetch" then str_arg(a, "url")
-        else path
+      let label = label_of(name, a)
       if string.len(label) > 100 then string.take(label, 100) + "…" else label
     },
   }
+
+// The tools one argument of which says what the call is about.
+let LABEL_ARGS = [("map", "task"), ("shell", "command"), ("web_search", "query"), ("web_fetch", "url")]
+
+fn label_of(name: String, a: Value) -> String = {
+  let arg = (k: String) => toolkit.str_arg(a, k)
+  let path = if arg("path") == "" then "." else arg("path")
+  if name == "read" then path + narrowed(a)
+  else if name == "search" then "/" + arg("pattern") + "/" + (if arg("path") == "" then "" else " in " + arg("path"))
+  else if name == "solve" then arg("task") + " · verify: " + arg("verify")
+  else match list.find(LABEL_ARGS, (row) => row.0 == name) {
+    some(row) => arg(row.1),
+    none => path,
+  }
+}
+
+// How a read is narrowed: ` symbol`, `:lines`, or ` /grep/`.
+fn narrowed(a: Value) -> String = {
+  let arg = (k: String) => toolkit.str_arg(a, k)
+  if arg("symbol") != "" then " " + arg("symbol")
+  else if arg("lines") != "" then ":" + arg("lines")
+  else if arg("grep") != "" then " /" + arg("grep") + "/"
+  else ""
+}
 
 // The part of a call that decides whether the person is asked first: a shell command,
 // or the verify command golemide will run, which is a shell command too.
 fn command_of(name: String, arguments: String) -> String? =
   match json.parse(arguments) {
-    ok(a) => if name == "shell" then some(str_arg(a, "command"))
-      else if name == "solve" then some(str_arg(a, "verify"))
+    ok(a) => if name == "shell" then some(toolkit.str_arg(a, "command"))
+      else if name == "solve" then some(toolkit.str_arg(a, "verify"))
       else none,
     err(_) => none,
   }
-
-test "paths resolve against the root, and results read relative to it" {
-  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888", solve_model: "", solve_strong: "" }
-  assert_eq(under_root(s, "src/a.py"), "/w/proj/src/a.py")
-  assert_eq(under_root(s, "./src/a.py"), "/w/proj/src/a.py")
-  assert_eq(under_root(s, ""), "/w/proj")
-  assert_eq(relative(s, "# /w/proj/src/a.py  (3 lines)"), "# src/a.py  (3 lines)")
-}
-
-test "a solve report keeps what the next decision needs" {
-  let doc = json.parse("{\"status\":\"not_solved\",\"exit\":1,\"attempts\":2,\"changed\":[\"a.py\"],\"warnings\":[],\"attempt_log\":[{\"explanation\":\"cap at hi\"}],\"diff\":\"--- a.py ---\\n- return x\\n+ return min(x, hi)\",\"last_verify\":{\"exit\":1,\"output_tail\":\"AssertionError\"}}") ?? value.object([])
-  let text = solve_summary(doc)
-  assert(string.starts_with(text, "not_solved (exit 1) after 2 attempt(s)"))
-  assert(string.contains(text, "changed: a.py"))
-  assert(string.contains(text, "last change: cap at hi"))
-  assert(string.contains(text, "AssertionError"))
-  assert(string.contains(text, "+ return min(x, hi)"))
-}
 
 test "a call is shown by what it is about" {
   assert_eq(call_label("read", "{\"path\":\"a.py\",\"lines\":\"3-9\"}"), "a.py:3-9")
   assert_eq(call_label("shell", "{\"command\":\"go test ./...\"}"), "go test ./...")
   assert_eq(call_label("tree", "{}"), ".")
-  assert_eq(count_lines("a\nb\n"), "2 lines")
-  assert_eq(count_lines(""), "0 lines")
+  assert_eq(toolkit.count_lines("a\nb\n"), "2 lines")
+  assert_eq(toolkit.count_lines(""), "0 lines")
 }
 
 test "only a shell command or a verify command asks first" {
@@ -507,49 +194,4 @@ test "only a shell command or a verify command asks first" {
   assert_eq(command_of("read", "{\"path\":\"a\"}"), none)
   assert_eq(command_of("web_fetch", "{\"url\":\"https://example.com\"}"), none)
   assert_eq(command_of("web_search", "{\"query\":\"almide\"}"), none)
-}
-
-test "search results are numbered, with the address on its own line and the silent engines named" {
-  let body = "{\"results\":[{\"title\":\"almide/almide\",\"url\":\"https://github.com/almide/almide\",\"content\":\"A statically-typed language\"},{\"title\":\"Zenn\",\"url\":\"https://zenn.dev/x\",\"content\":\"\"}],\"unresponsive_engines\":[[\"duckduckgo\",\"CAPTCHA\"]]}"
-  let (text, n) = search_results(body, 8)
-  assert_eq(n, 2)
-  assert(string.starts_with(text, "1. almide/almide\n   https://github.com/almide/almide\n   A statically-typed language\n2. Zenn"))
-  assert(string.contains(text, "(did not answer: duckduckgo)"))
-  assert_eq(search_results("{\"results\":[]}", 8).1, 0)
-  assert_eq(search_url("http://127.0.0.1:8888", "境界 test"), "http://127.0.0.1:8888/search?q=%E5%A2%83%E7%95%8C%20test&format=json")
-}
-
-test "redirect targets resolve against the page that sent them" {
-  assert_eq(resolve("https://ir.amd.com/news/x", "https://ir.amd.com/news/y"), "https://ir.amd.com/news/y")
-  assert_eq(resolve("https://news.samsung.com/global/old", "/global/new"), "https://news.samsung.com/global/new")
-  assert_eq(resolve("https://a.example/x", "//b.example/y"), "https://b.example/y")
-  assert_eq(resolve("http://a.example/x", "/y"), "http://a.example/y")
-  assert_eq(resolve("http://a.example/x", "//b.example/y"), "http://b.example/y")
-}
-
-test "a failing test or build run carries the hint to hand it to solve" {
-  assert(checks_work("cd /x && python3 -m pytest -q"))
-  assert(checks_work("cargo test --quiet"))
-  assert(not checks_work("git status"))
-  assert(string.contains(solve_hint("cargo test"), "verify = \"cargo test\""))
-}
-
-test "golemide versions are compared part by part" {
-  assert_eq(version_parts("golemide 0.2.0\n"), [0, 2, 0])
-  assert(at_least([0, 2, 0], [0, 2, 0]))
-  assert(at_least([0, 10, 0], [0, 2, 0]))
-  assert(at_least([1, 0, 0], [0, 2, 0]))
-  assert(not at_least([0, 1, 9], [0, 2, 0]))
-  assert(not at_least([], [0, 2, 0]))
-}
-
-test "pages on this machine or a private network are not read" {
-  assert_eq(host_of("https://tenki.jp/forecast/9/48/"), "tenki.jp")
-  assert_eq(host_of("http://user@Example.COM:8080/x?y#z"), "example.com")
-  assert_eq(host_of("http://[::1]:8888/"), "::1")
-  assert(not private_host("tenki.jp"))
-  assert(not private_host("172.32.0.1"))
-  for h in ["localhost", "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.20.1.1", "169.254.169.254", "::1", "intranet", "printer.local", "0.0.0.0"] {
-    assert(private_host(h))
-  }
 }

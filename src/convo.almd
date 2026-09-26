@@ -1,0 +1,182 @@
+// The conversation as data: the messages the model is sent, the ids that tie a tool
+// result to its call, the answer as it is shown, and the shortening that keeps a long
+// conversation affordable. Nothing here does anything; agent.almd and turn.almd do.
+
+import json
+import self.model
+import self.ui
+
+fn message(role: String, content: String) -> Value = value.object([("role", value.str(role)), ("content", value.str(content))])
+
+fn tool_message(id: String, content: String) -> Value =
+  value.object([("role", value.str("tool")), ("tool_call_id", value.str(id)), ("content", value.str(content))])
+
+// A tool result has to answer to the id of the call it belongs to. A provider that
+// leaves the id empty gets one made up here, before the assistant message is recorded.
+fn with_ids(calls: List[model.ToolCall], step: Int) -> List[model.ToolCall] = {
+  var out: List[model.ToolCall] = []
+  var i = 0
+  for c in calls {
+    list.push(out, model.ToolCall { id: if c.id == "" then "call_" + int.to_string(step) + "_" + int.to_string(i) else c.id, name: c.name,
+      arguments: if string.trim(c.arguments) == "" then "{}" else c.arguments })
+    i = i + 1
+  }
+  out
+}
+
+fn assistant_message(content: String, calls: List[model.ToolCall]) -> Value = {
+  var fields = [("role", value.str("assistant")), ("content", value.str(content))]
+  if not list.is_empty(calls) then list.push(fields, ("tool_calls", value.array(list.map(calls, (c) => value.object([
+    ("id", value.str(c.id)), ("type", value.str("function")),
+    ("function", value.object([("name", value.str(c.name)), ("arguments", value.str(c.arguments))])),
+  ])))))
+  value.object(fields)
+}
+
+fn usd(x: Float) -> String = {
+  let micros = float.to_int(x * 1000000.0 + 0.5)
+  "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
+}
+
+// The whole lines of the answer not yet on screen, the first of a message marked as
+// the assistant's. Lines, not chunks: **bold** split across two chunks would be printed
+// as asterisks.
+fn answer_lines(u: ui.Ui, chunk: String, first: Bool) -> String = {
+  let lines = string.split(string.trim_end(chunk), "\n")
+  var out: List[String] = []
+  var i = 0
+  for l in lines {
+    list.push(out, (if i == 0 and first then "⏺ " else "  ") + ui.render(u, l))
+    i = i + 1
+  }
+  string.join(out, "\n")
+}
+
+fn final_text(r: model.Reply) -> String =
+  if string.trim(r.content) != "" then string.trim(r.content)
+  else if r.finish == "length" then "(the answer was cut off before any text: try --effort low or a larger --max-tokens)"
+  else "(no answer)"
+
+// ---- trying again ----------------------------------------------------------------------
+
+// almai.core.retryable, read from the words core.error_text gives it: a rate limit, an
+// overloaded or failing provider (5xx, 529), 408/409/425, or the network.
+fn retryable(e: String) -> Bool =
+  list.any(["status 429", "status 50", "status 529", "status 408", "status 409", "status 425"], (s) => string.contains(e, s))
+    or string.starts_with(e, "transport")
+
+// The waits between tries, doubling to a minute: about four minutes in all. Measured
+// 2026-09-25: three tries 15 s apart spanned 45 s, and a DNS outage longer than that
+// ended the session before its first request, the exercise lost to the network.
+fn retry_wait_ms(tries: Int) -> Int = {
+  var ms = 5000
+  var n = 0
+  while n < tries { ms = ms * 2; n = n + 1 }
+  if ms > 60000 then 60000 else ms
+}
+
+let MODEL_TRIES = 7
+
+// ---- keeping it short ------------------------------------------------------------------
+
+// Every model call sends the whole conversation again, and in a long one most of it is
+// old tool output the model has already acted on. Past a size, the older results are cut
+// to their opening lines; the most recent stay whole, and the model is told it can run
+// the tool again. The requests and the answers are never cut.
+//
+// It cuts in one go, oldest first, well below the size that set it off, and then leaves
+// the conversation alone until it grows that far again. The provider reuses the start of
+// a request it has seen (cached input is a fifth of the price or less), and any change
+// ends the reuse from there on: cutting one more result every step, as this did at
+// first, rewrote the middle of the conversation on every call.
+let COMPACT_ABOVE_CHARS = 200000
+let COMPACT_DOWN_TO_CHARS = 120000
+let KEEP_RECENT_TOOL_RESULTS = 6
+let OLD_RESULT_CHARS = 400
+let SHORTENED = "\n[… an older result, shortened. Run the tool again if you need it whole.]"
+
+fn content_of(m: Value) -> String = json.get_string(m, "content") ?? ""
+fn is_tool(m: Value) -> Bool = (json.get_string(m, "role") ?? "") == "tool"
+
+fn compacted(messages: List[Value]) -> List[Value] = {
+  let size = list.fold(messages, 0, (acc, m) => acc + string.len(content_of(m)))
+  if size <= COMPACT_ABOVE_CHARS then messages
+  else {
+    let old = list.len(list.filter(messages, is_tool)) - KEEP_RECENT_TOOL_RESULTS
+    var out: List[Value] = []
+    var seen = 0
+    var over = size - COMPACT_DOWN_TO_CHARS
+    for m in messages {
+      if is_tool(m) then { seen = seen + 1 }
+      let short = if is_tool(m) and over > 0 and seen <= old then shortened(m) else none
+      match short {
+        some(s) => {
+          over = over - (string.len(content_of(m)) - string.len(content_of(s)))
+          list.push(out, s)
+        },
+        none => list.push(out, m),
+      }
+    }
+    out
+  }
+}
+
+// An old tool result cut to its opening, or none when it is short already.
+fn shortened(m: Value) -> Value? = {
+  let c = content_of(m)
+  if string.len(c) > OLD_RESULT_CHARS + string.len(SHORTENED) then some(tool_message(json.get_string(m, "tool_call_id") ?? "", string.take(c, OLD_RESULT_CHARS) + SHORTENED))
+  else none
+}
+
+test "every tool call carries an id its result can answer to" {
+  let calls = with_ids([model.ToolCall { id: "", name: "read", arguments: "" }, model.ToolCall { id: "x", name: "tree", arguments: "{}" }], 4)
+  assert_eq(list.map(calls, (c) => c.id), ["call_4_0", "x"])
+  assert_eq((list.first(calls) ?? model.ToolCall { id: "", name: "", arguments: "" }).arguments, "{}")
+  let m = json.stringify(assistant_message("", calls))
+  assert(string.contains(m, "\"tool_calls\""))
+  assert(string.contains(m, "\"call_4_0\""))
+}
+
+test "an answer is shown line by line, the first one marked" {
+  let u = ui.Ui { color: false, width: 72 }
+  assert_eq(answer_lines(u, "one\ntwo\n", true), "⏺ one\n  two")
+  assert_eq(answer_lines(u, "three\n", false), "  three")
+}
+
+test "a long conversation keeps its recent tool results whole and shortens the old" {
+  let big = string.repeat("x", 30000)
+  var ms = [message("system", "s"), message("user", "u")]
+  var i = 0
+  while i < 10 { ms = ms + [tool_message("c" + int.to_string(i), big)]; i = i + 1 }
+  let out = compacted(ms)
+  assert_eq(list.len(out), 12)
+  let sizes = list.map(list.filter(out, is_tool), (m) => string.len(content_of(m)))
+  assert(list.all(list.take(sizes, 4), (n) => n < 1000))
+  assert(list.all(list.drop(sizes, 4), (n) => n == 30000))
+  assert_eq(json.get_string(list.get(out, 2) ?? message("", ""), "tool_call_id"), some("c0"))
+  // A short conversation is sent as it is.
+  assert_eq(compacted([message("user", "hi")]), [message("user", "hi")])
+}
+
+test "old results are cut in one go, and not again until the conversation grows back" {
+  var ms = [message("system", "s"), message("user", "u")]
+  var i = 0
+  while i < 30 { list.push(ms, tool_message("c" + int.to_string(i), string.repeat("x", 10000))); i = i + 1 }
+  let size = (m: List[Value]) => list.fold(m, 0, (acc, x) => acc + string.len(content_of(x)))
+  let once = compacted(ms)
+  assert(size(once) <= COMPACT_DOWN_TO_CHARS)
+  assert(size(once) > COMPACT_DOWN_TO_CHARS - 10000)
+  assert_eq(list.drop(once, list.len(once) - KEEP_RECENT_TOOL_RESULTS), list.drop(ms, list.len(ms) - KEEP_RECENT_TOOL_RESULTS))
+  var grown = once
+  var j = 0
+  while j < 5 { list.push(grown, tool_message("d" + int.to_string(j), string.repeat("y", 10000))); j = j + 1 }
+  assert_eq(compacted(grown), grown)
+}
+
+test "retries wait longer each time, up to a minute" {
+  assert_eq(list.map([0, 1, 2, 3, 4, 5], retry_wait_ms), [5000, 10000, 20000, 40000, 60000, 60000])
+  assert(retryable("transport: curl exit 6: curl: (6) Could not resolve host: api.cloudflare.com"))
+  assert(retryable("status 429: rate limited"))
+  assert(retryable("status 529: {\"type\":\"overloaded_error\"}"))
+  assert(not retryable("status 400: bad request"))
+}

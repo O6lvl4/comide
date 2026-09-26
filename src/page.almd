@@ -37,7 +37,7 @@ local fn strip_tags(src: String) -> String = {
       depth = if depth > 0 then depth - 1 else 0
       list.push(parts, " ")
     } else {
-      if depth == 0 then list.push(parts, c) else ()
+      if depth == 0 then list.push(parts, c)
     }
   }
   string.join(parts, "")
@@ -59,7 +59,7 @@ fn readable(doc: String) -> String = {
   var blank = false
   for l in string.split(text, "\n") {
     let t = string.trim(string.join(list.filter(string.split(string.replace(l, "\t", " "), " "), (w) => w != ""), " "))
-    if t == "" then { if not blank and not list.is_empty(lines) then { list.push(lines, ""); blank = true } else () }
+    if t == "" then { if not blank and not list.is_empty(lines) then { list.push(lines, ""); blank = true } }
     else { list.push(lines, t); blank = false }
   }
   string.trim(string.join(lines, "\n"))

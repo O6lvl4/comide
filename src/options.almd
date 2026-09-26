@@ -1,0 +1,29 @@
+// What a comide session is run with, and what it carries from one request to the next.
+
+import io
+import self.ui
+
+// `live` is a conversation rather than one -p request: the answer streams and questions
+// can be asked. `tui` is a live conversation on a terminal that comide has taken over key by
+// key (term.almd): the input box, menus, and Esc to interrupt.
+type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui }
+
+fn with_model(o: Options, m: String) -> Options =
+  Options { root: o.root, model: m, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: o.tui, ui: o.ui }
+
+fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options =
+  Options { root: o.root, model: o.model, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: tui, ui: u }
+
+// `check` is the last command seen that says whether the work is done (watch.almd); it
+// outlives the turn, so "now also handle X" is checked the same way.
+type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String }
+
+// `read_line_opt`, not `read_line`: the loop has to tell an empty line (a person
+// pressing return) from the end of input, and `read_line` answers "" for both.
+effect fn read_input() -> String? = match io.read_line_opt() {
+  some(l) => some(string.trim_end(l)),
+  none => none,
+}
+
+// Where the person watching sees progress: stdout in a conversation, stderr under -p.
+effect fn show(opts: Options, s: String) -> Unit = if opts.live then println(s) else eprintln(s)

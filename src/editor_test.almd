@@ -1,0 +1,41 @@
+// Tests of the input box's keys and menu (src/editor.almd).
+
+import self.editor
+import self.textbox
+import self.term
+
+test "keys: Enter sends, a trailing backslash continues, Ctrl+C clears then leaves" {
+  let cmds = [editor.Command { name: "/help", about: "" }, editor.Command { name: "/model", about: "" }]
+  let b0 = editor.Box { ed: textbox.of("fix it"), above: 0, history_at: 0, draft: "", armed: false }
+  assert_eq(editor.on_key(b0, term.key("enter"), [], cmds).1, some(editor.Prompted { kind: "send", text: "fix it" }))
+  let cont = editor.on_key(editor.Box { ed: textbox.of("line one\\"), above: 0, history_at: 0, draft: "", armed: false }, term.key("enter"), [], cmds)
+  assert_eq(textbox.text(cont.0.ed), "line one\n")
+  assert_eq(cont.1, none)
+  let cleared = editor.on_key(b0, term.Key { kind: "ctrl", text: "c" }, [], cmds)
+  assert_eq(textbox.text(cleared.0.ed), "")
+  let armed = editor.on_key(cleared.0, term.Key { kind: "ctrl", text: "c" }, [], cmds)
+  assert(armed.0.armed)
+  assert_eq(editor.on_key(armed.0, term.Key { kind: "ctrl", text: "c" }, [], cmds).1, some(editor.Prompted { kind: "leave", text: "" }))
+  let tabbed = editor.on_key(editor.Box { ed: textbox.of("/mo"), above: 0, history_at: 0, draft: "", armed: false }, term.key("tab"), [], cmds)
+  assert_eq(textbox.text(tabbed.0.ed), "/model ")
+}
+
+test "the menu moves with the arrows, wraps, and takes a digit or Esc" {
+  assert_eq(editor.menu_key(term.key("up"), 0, 3), (2, none))
+  assert_eq(editor.menu_key(term.key("down"), 2, 3), (0, none))
+  assert_eq(editor.menu_key(term.key("enter"), 1, 3), (1, some(1)))
+  assert_eq(editor.menu_key(term.Key { kind: "char", text: "3" }, 0, 3), (0, some(2)))
+  assert_eq(editor.menu_key(term.key("esc"), 1, 3), (1, some(-1)))
+  assert_eq(editor.menu_key(term.Key { kind: "char", text: "9" }, 1, 3), (1, none))
+}
+
+test "history comes back with ↑ and the unsent text with ↓" {
+  let h = ["first", "second"]
+  let b = editor.Box { ed: textbox.of("draft"), above: 0, history_at: 2, draft: "", armed: false }
+  let one = editor.on_key(b, term.key("up"), h, []).0
+  assert_eq(textbox.text(one.ed), "second")
+  let two = editor.on_key(one, term.key("up"), h, []).0
+  assert_eq(textbox.text(two.ed), "first")
+  let back = editor.on_key(editor.on_key(two, term.key("down"), h, []).0, term.key("down"), h, []).0
+  assert_eq(textbox.text(back.ed), "draft")
+}

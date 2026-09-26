@@ -49,10 +49,10 @@ fn fit_path(p: String, room: Int) -> String =
 // How many terminal columns a string takes. CJK, kana, Hangul and full-width forms take
 // two; a box drawn by counting characters came out ragged on the right as soon as a
 // path held Japanese.
-fn wide(cp: Int) -> Bool =
-  (cp >= 4352 and cp <= 4447) or (cp >= 11904 and cp <= 42191) or (cp >= 44032 and cp <= 55203)
-    or (cp >= 63744 and cp <= 64255) or (cp >= 65040 and cp <= 65103) or (cp >= 65280 and cp <= 65376)
-    or (cp >= 65504 and cp <= 65510) or (cp >= 127744 and cp <= 129791) or (cp >= 131072 and cp <= 262141)
+let WIDE_RANGES = [(4352, 4447), (11904, 42191), (44032, 55203), (63744, 64255), (65040, 65103), (65280, 65376),
+  (65504, 65510), (127744, 129791), (131072, 262141)]
+
+fn wide(cp: Int) -> Bool = list.any(WIDE_RANGES, (r) => cp >= r.0 and cp <= r.1)
 
 fn char_columns(c: String) -> Int = match string.codepoint(c) { some(cp) => if wide(cp) then 2 else 1, none => 1 }
 

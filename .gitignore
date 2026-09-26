@@ -1,2 +1,3 @@
 /comide
 *.tmp
+.DS_Store

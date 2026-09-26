@@ -1,0 +1,162 @@
+// The text in the input box and where the cursor sits in it, as pure functions: typing,
+// moving by character, word and line, deleting, and breaking the text into rows for the
+// box. editor.almd draws it and feeds it keys.
+
+import self.ui
+
+type Ed = { chars: List[String], cursor: Int }
+
+fn empty() -> Ed = Ed { chars: [], cursor: 0 }
+fn of(s: String) -> Ed = Ed { chars: string.chars(s), cursor: list.len(string.chars(s)) }
+fn text(e: Ed) -> String = string.join(e.chars, "")
+
+// ---- editing ------------------------------------------------------------------------
+
+fn insert(e: Ed, s: String) -> Ed = {
+  let cs = string.chars(s)
+  Ed { chars: list.take(e.chars, e.cursor) + cs + list.drop(e.chars, e.cursor), cursor: e.cursor + list.len(cs) }
+}
+
+fn remove(e: Ed, from: Int, to: Int) -> Ed = {
+  let a = int.max(0, int.min(from, to))
+  let b = int.min(list.len(e.chars), int.max(from, to))
+  Ed { chars: list.take(e.chars, a) + list.drop(e.chars, b), cursor: a }
+}
+
+fn backspace(e: Ed) -> Ed = if e.cursor == 0 then e else remove(e, e.cursor - 1, e.cursor)
+fn delete(e: Ed) -> Ed = if e.cursor >= list.len(e.chars) then e else Ed { chars: remove(e, e.cursor, e.cursor + 1).chars, cursor: e.cursor }
+fn left(e: Ed) -> Ed = Ed { chars: e.chars, cursor: int.max(0, e.cursor - 1) }
+fn right(e: Ed) -> Ed = Ed { chars: e.chars, cursor: int.min(list.len(e.chars), e.cursor + 1) }
+fn at(e: Ed, i: Int) -> String = list.get(e.chars, i) ?? ""
+
+// Where the line the cursor is on starts, and where it ends.
+fn line_start(e: Ed) -> Int = {
+  var i = e.cursor
+  while i > 0 and at(e, i - 1) != "\n" { i = i - 1 }
+  i
+}
+
+fn line_end(e: Ed) -> Int = {
+  var i = e.cursor
+  while i < list.len(e.chars) and at(e, i) != "\n" { i = i + 1 }
+  i
+}
+
+fn home(e: Ed) -> Ed = Ed { chars: e.chars, cursor: line_start(e) }
+fn end(e: Ed) -> Ed = Ed { chars: e.chars, cursor: line_end(e) }
+fn kill_to_start(e: Ed) -> Ed = remove(e, line_start(e), e.cursor)
+fn kill_to_end(e: Ed) -> Ed = { let r = remove(e, e.cursor, line_end(e)); Ed { chars: r.chars, cursor: e.cursor } }
+
+fn is_space(c: String) -> Bool = c == " " or c == "\n" or c == "\t"
+
+fn word_back(e: Ed) -> Int = {
+  var i = e.cursor
+  while i > 0 and is_space(at(e, i - 1)) { i = i - 1 }
+  while i > 0 and not is_space(at(e, i - 1)) { i = i - 1 }
+  i
+}
+
+fn word_forward(e: Ed) -> Int = {
+  var i = e.cursor
+  let n = list.len(e.chars)
+  while i < n and is_space(at(e, i)) { i = i + 1 }
+  while i < n and not is_space(at(e, i)) { i = i + 1 }
+  i
+}
+
+fn word_left(e: Ed) -> Ed = Ed { chars: e.chars, cursor: word_back(e) }
+fn word_right(e: Ed) -> Ed = Ed { chars: e.chars, cursor: word_forward(e) }
+fn delete_word(e: Ed) -> Ed = remove(e, word_back(e), e.cursor)
+
+// The line above or below, at the same column or the end of a shorter line. `none` on
+// the first or last line: there the arrows go through history instead.
+fn up(e: Ed) -> Ed? = {
+  let s = line_start(e)
+  if s == 0 then none
+  else {
+    let col = e.cursor - s
+    let prev_end = s - 1
+    let prev_start = line_start(Ed { chars: e.chars, cursor: prev_end })
+    some(Ed { chars: e.chars, cursor: prev_start + int.min(col, prev_end - prev_start) })
+  }
+}
+
+fn down(e: Ed) -> Ed? = {
+  let t = line_end(e)
+  if t >= list.len(e.chars) then none
+  else {
+    let col = e.cursor - line_start(e)
+    let next_start = t + 1
+    let next_end = line_end(Ed { chars: e.chars, cursor: next_start })
+    some(Ed { chars: e.chars, cursor: next_start + int.min(col, next_end - next_start) })
+  }
+}
+
+// ---- where things go on the screen ---------------------------------------------------
+
+type Layout = { rows: List[String], row: Int, col: Int }
+
+// The text broken into rows `w` columns wide, and the cursor's row and column in them.
+// Newlines break a row; a character that would cross the edge starts the next one.
+fn layout(e: Ed, w: Int) -> Layout = {
+  var rows: List[String] = []
+  var cur = ""
+  var col = 0
+  var crow = 0
+  var ccol = 0
+  var i = 0
+  for c in e.chars {
+    if i == e.cursor then { crow = list.len(rows); ccol = col }
+    if c == "\n" then { list.push(rows, cur); cur = ""; col = 0 }
+    else {
+      let cw = ui.char_columns(c)
+      if col + cw > w then { list.push(rows, cur); cur = ""; col = 0 }
+      if i == e.cursor then { crow = list.len(rows); ccol = col }
+      cur = cur + c
+      col = col + cw
+    }
+    i = i + 1
+  }
+  if e.cursor >= list.len(e.chars) then {
+    if col >= w then { list.push(rows, cur); cur = ""; col = 0 }
+    crow = list.len(rows)
+    ccol = col
+  }
+  list.push(rows, cur)
+  Layout { rows: rows, row: crow, col: ccol }
+}
+
+test "typing, moving and deleting keep the cursor where a person expects it" {
+  let e = insert(insert(empty(), "hello"), " world")
+  assert_eq(text(e), "hello world")
+  assert_eq(e.cursor, 11)
+  assert_eq(text(delete_word(e)), "hello ")
+  let w = word_left(e)
+  assert_eq(w.cursor, 6)
+  assert_eq(text(insert(w, "big ")), "hello big world")
+  assert_eq(text(backspace(home(e))), "hello world")
+  assert_eq(text(kill_to_start(Ed { chars: e.chars, cursor: 5 })), " world")
+  assert_eq(text(kill_to_end(Ed { chars: e.chars, cursor: 5 })), "hello")
+  assert_eq(text(delete(Ed { chars: e.chars, cursor: 0 })), "ello world")
+}
+test "up and down move between lines of the text before they reach history" {
+  let e = of("first line\nsecond")
+  assert_eq(e.cursor, 17)
+  let u1 = up(e) ?? empty()
+  assert_eq(u1.cursor, 6)
+  assert_eq(up(u1), none)
+  assert_eq(down(u1) ?? empty(), Ed { chars: e.chars, cursor: 17 })
+  assert_eq(down(e), none)
+}
+test "the text wraps at the box edge, counting a Japanese character as two columns" {
+  let lay = layout(of("あいうえお"), 6)
+  assert_eq(lay.rows, ["あいう", "えお"])
+  assert_eq(lay.row, 1)
+  assert_eq(lay.col, 4)
+  let two = layout(Ed { chars: string.chars("ab\ncd"), cursor: 1 }, 10)
+  assert_eq(two.rows, ["ab", "cd"])
+  assert_eq((two.row, two.col), (0, 1))
+  // A full last row puts the cursor at the start of the next.
+  let full = layout(of("abcdef"), 6)
+  assert_eq((full.row, full.col), (1, 0))
+}

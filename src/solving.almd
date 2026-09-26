@@ -1,0 +1,168 @@
+// Handing the change to golemide: edit and write through its replacement ladder and
+// syntax gate, solve through its whole repair loop, and a check at the start that the
+// golemide found is new enough for both.
+
+import json
+import env
+import fs
+import self.toolkit
+
+let SOLVE_TIMEOUT_S = 1800
+
+// golemide edit reads its request on stdin; the request goes through a file so the
+// timeout-bounded runner, which has no stdin, can still be used.
+effect fn golemide_edit(s: toolkit.Setup, request: Value, create: Bool) -> toolkit.ToolResult = {
+  let req_path = s.scratch + "/edit-" + int.to_string(env.millis()) + ".json"
+  let _ = fs.write(req_path, json.stringify(request))
+  let script = "exec \"$0\" edit --root \"$1\"" + (if create then " --create" else "") + " < \"$2\""
+  let (code, out) = toolkit.run_program("bash", ["-c", script, s.golemide, s.root, req_path], 60)!
+  let _ = fs.remove(req_path)
+  match json.parse(out) {
+    err(_) => toolkit.failed("golemide edit failed (exit " + int.to_string(code) + "): " + string.take(out, 2000), "golemide edit failed (exit " + int.to_string(code) + ")"),
+    ok(r) => if json.get_bool(r, "ok") ?? false then written(s, r)!
+      else toolkit.failed(toolkit.capped(s, "Not written: " + toolkit.str_arg(r, "error"))!, "refused: " + toolkit.first_line_of(toolkit.str_arg(r, "error"), 90)),
+  }
+}
+
+// What golemide edit wrote: the diff for the model, and for the person the lines added
+// and removed, what checked the syntax, and how the text was found.
+effect fn written(s: toolkit.Setup, r: Value) -> toolkit.ToolResult = {
+  let matched = toolkit.strings(r, "matched")
+  let checked = toolkit.str_arg(r, "checked_by")
+  let diff = toolkit.str_arg(r, "diff")
+  let already = list.any(matched, (m) => string.contains(m, "already made"))
+  let text = if diff == "" and already then "Nothing written: " + toolkit.str_arg(r, "path") + " already has this change."
+    else "Written: " + toolkit.str_arg(r, "path") + " (" + int.to_string(json.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
+    + (if list.is_empty(matched) then "" else "\nnote: " + string.join(matched, "; "))
+    + "\n" + diff
+  let lines = string.split(diff, "\n")
+  let counted = "+" + int.to_string(list.len(list.filter(lines, (l) => string.starts_with(l, "+ "))))
+    + " -" + int.to_string(list.len(list.filter(lines, (l) => string.starts_with(l, "- "))))
+  toolkit.said(toolkit.capped(s, text)!, counted + (if checked == "" then "" else " · checked by " + checked)
+    + (if already then " · already made" else if list.is_empty(matched) then "" else " · found by a loosened match"))
+}
+
+effect fn edit(s: toolkit.Setup, a: Value) -> toolkit.ToolResult =
+  golemide_edit(s, value.object([("path", value.str(toolkit.str_arg(a, "path"))),
+    ("replacements", value.array([value.object([("old", value.str(toolkit.str_arg(a, "old"))), ("new", value.str(toolkit.str_arg(a, "new")))])]))]), false)!
+
+effect fn write(s: toolkit.Setup, a: Value) -> toolkit.ToolResult =
+  golemide_edit(s, value.object([("path", value.str(toolkit.str_arg(a, "path"))), ("source", value.str(toolkit.str_arg(a, "content")))]), true)!
+
+// Whether a command looks like one that says if the work is done: a test run or a build.
+fn checks_work(command: String) -> Bool = {
+  let c = string.to_lower(command)
+  list.any(["test", "pytest", "cargo", "go build", "go vet", "npm run", "jest", "vitest", "make", "gradle", "mvn", "ctest", "cmake --build", "tsc", "almide"], (w) => string.contains(c, w))
+}
+
+// Said to the model under a failing test or build. Measured 2026-09-24: on 64 polyglot
+// exercises whose prompt named the verify command, the model never called solve once and
+// did every edit itself on the conversation model, at 13 times golemide's cost for the
+// same 64/64. The rule was in the system prompt; the failing run is where it is needed.
+fn solve_hint(command: String) -> String =
+  "\n\n(This command failed. solve can make it pass: call solve with verify = " + json.stringify(value.str(command)) + " and the change stated as the task.)"
+
+fn solve_summary(doc: Value) -> String = string.join(outcome_lines(doc) + evidence_lines(doc), "\n")
+
+// How it ended: the status, the files changed, warnings, time lost to rate limits.
+fn outcome_lines(doc: Value) -> List[String] = {
+  let changed = toolkit.strings(doc, "changed")
+  let throttled = json.get_int(doc, "throttled") ?? 0
+  [toolkit.str_arg(doc, "status") + " (exit " + int.to_string(json.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(json.get_int(doc, "attempts") ?? 0) + " attempt(s)"]
+    + (if list.is_empty(changed) then [] else ["changed: " + string.join(changed, ", ")])
+    + list.map(toolkit.strings(doc, "warnings"), (w) => "warning: " + w)
+    + (if throttled > 0 then ["rate limited " + int.to_string(throttled) + " time(s), " + int.to_string((json.get_int(doc, "throttled_ms") ?? 0) / 1000) + "s spent waiting"] else [])
+    + (if toolkit.str_arg(doc, "message") != "" then [toolkit.str_arg(doc, "message")] else [])
+}
+
+// What the next decision needs: the last change's explanation, the diff, and the end of
+// the last verify output.
+fn evidence_lines(doc: Value) -> List[String] = {
+  let last = option.map(list.last(json.get_array(doc, "attempt_log") ?? []), (t) => toolkit.str_arg(t, "explanation")) ?? ""
+  (if last != "" then ["last change: " + last] else [])
+    + (if toolkit.str_arg(doc, "diff") != "" then ["what it changed, from before its first write:\n" + toolkit.str_arg(doc, "diff")] else [])
+    + match value.field(doc, "last_verify") {
+      ok(v) => ["last verify, exit " + int.to_string(json.get_int(v, "exit") ?? -1) + ":\n" + toolkit.str_arg(v, "output_tail")],
+      err(_) => [],
+    }
+}
+
+// No --model: golemide runs its repair loop on its own default (flash, escalating to
+// glm-5.3 when it stalls), whatever model the conversation is on.
+effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let args = ["solve", toolkit.str_arg(a, "task"), "--root", s.root, "--verify", toolkit.str_arg(a, "verify"),
+    "--attempts", int.to_string(toolkit.int_arg(a, "attempts", 6)), "--json", "--quiet"]
+    + (if s.solve_model == "" then [] else ["--model", s.solve_model])
+    + (if s.solve_strong == "" then [] else ["--strong-model", s.solve_strong])
+  let (code, out) = toolkit.run_program(s.golemide, args, SOLVE_TIMEOUT_S)!
+  // stdout is one JSON object; stderr, which run_program appends, is progress.
+  let first_line = list.first(string.split(out, "\n")) ?? ""
+  let parsed = json.parse(first_line)
+  let text = match parsed {
+    ok(doc) => solve_summary(doc),
+    err(_) => "golemide solve failed (exit " + int.to_string(code) + "):\n" + out,
+  }
+  let spent = match parsed { ok(doc) => json.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
+  let solved = match parsed { ok(doc) => json.get_bool(doc, "ok") ?? false, err(_) => false }
+  toolkit.ToolResult { text: toolkit.capped(s, text)!, brief: toolkit.first_line_of(text, 90), failed: not solved, cost_usd: spent }
+}
+
+// The golemide this was built against: `edit` and `solve --json` arrived in 0.2.0.
+let GOLEMIDE_NEEDED = [0, 2, 0]
+
+fn version_parts(said: String) -> List[Int] =
+  list.filter_map(string.split(string.trim(list.last(string.split(string.trim(said), " ")) ?? ""), "."), (p) => match int.parse(p) { ok(n) => some(n), err(_) => none })
+
+fn at_least(have: List[Int], need: List[Int]) -> Bool = {
+  var i = 0
+  var decided = false
+  var ok_so_far = true
+  while not decided and i < list.len(need) {
+    let h = list.get(have, i) ?? 0
+    let n = list.get(need, i) ?? 0
+    if h != n then { decided = true; ok_so_far = h > n }
+    i = i + 1
+  }
+  ok_so_far
+}
+
+// Why the edit, write and solve tools will not work, or "" when they will. Said once at
+// the start, rather than as a failed edit in the middle of a task.
+effect fn golemide_problem(bin: String) -> String = {
+  let (code, said_back) = toolkit.run_program(bin, ["--version"], 10)!
+  let need = string.join(list.map(GOLEMIDE_NEEDED, (n) => int.to_string(n)), ".")
+  if code != 0 and string.contains(said_back, "unknown command") then
+    "golemide at " + bin + " is older than " + need + ": edit, write and solve need " + need + " or later"
+  else if code != 0 then
+    "golemide was not found (" + bin + "): edit, write and solve need golemide " + need + " or later on PATH, or --golemide"
+  else if not at_least(version_parts(said_back), GOLEMIDE_NEEDED) then
+    string.trim(said_back) + " is older than " + need + ": edit, write and solve need " + need + " or later"
+  else ""
+}
+
+
+test "a solve report keeps what the next decision needs" {
+  let doc = json.parse("{\"status\":\"not_solved\",\"exit\":1,\"attempts\":2,\"changed\":[\"a.py\"],\"warnings\":[],\"attempt_log\":[{\"explanation\":\"cap at hi\"}],\"diff\":\"--- a.py ---\\n- return x\\n+ return min(x, hi)\",\"last_verify\":{\"exit\":1,\"output_tail\":\"AssertionError\"}}") ?? value.object([])
+  let text = solve_summary(doc)
+  assert(string.starts_with(text, "not_solved (exit 1) after 2 attempt(s)"))
+  assert(string.contains(text, "changed: a.py"))
+  assert(string.contains(text, "last change: cap at hi"))
+  assert(string.contains(text, "AssertionError"))
+  assert(string.contains(text, "+ return min(x, hi)"))
+}
+
+test "a failing test or build run carries the hint to hand it to solve" {
+  assert(checks_work("cd /x && python3 -m pytest -q"))
+  assert(checks_work("cargo test --quiet"))
+  assert(not checks_work("git status"))
+  assert(string.contains(solve_hint("cargo test"), "verify = \"cargo test\""))
+}
+
+test "golemide versions are compared part by part" {
+  assert_eq(version_parts("golemide 0.2.0\n"), [0, 2, 0])
+  assert(at_least([0, 2, 0], [0, 2, 0]))
+  assert(at_least([0, 10, 0], [0, 2, 0]))
+  assert(at_least([1, 0, 0], [0, 2, 0]))
+  assert(not at_least([0, 1, 9], [0, 2, 0]))
+  assert(not at_least([], [0, 2, 0]))
+}

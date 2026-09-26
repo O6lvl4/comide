@@ -1,0 +1,174 @@
+// The web tools: a search through SearXNG, and a page read as text. Pages are read
+// without asking, so only the public web is read (see private_host).
+
+import json
+import env
+import url
+import http
+import self.page
+import self.toolkit
+
+let SEARCH_RESULTS = 8
+let SNIPPET_CHARS = 300
+
+fn search_url(base: String, query: String) -> String =
+  base + "/search?q=" + url.encode_component(query) + "&format=json"
+
+// The engines SearXNG asked that did not answer, each reported as [name, reason].
+fn silent_engines(d: Value) -> List[String] =
+  list.filter_map(json.get_array(d, "unresponsive_engines") ?? [], (e) => match value.as_array(e) {
+    ok(pair) => match list.first(pair) { some(n) => match value.as_string(n) { ok(name) => some(name), err(_) => none }, none => none },
+    err(_) => none,
+  })
+
+// Numbered, so the model can say which one it means; the address on its own line, so
+// it can be passed to web_fetch as it is.
+fn search_results(body: String, max: Int) -> (String, Int) =
+  match json.parse(body) {
+    err(_) => ("the search engine answered something that is not JSON: " + string.take(body, 200), 0),
+    ok(d) => {
+      var out: List[String] = []
+      var n = 0
+      for r in list.take(json.get_array(d, "results") ?? [], max) {
+        n = n + 1
+        let snippet = string.trim(toolkit.str_arg(r, "content"))
+        list.push(out, int.to_string(n) + ". " + toolkit.str_arg(r, "title") + "\n   " + toolkit.str_arg(r, "url")
+          + (if snippet == "" then "" else "\n   " + string.take(snippet, SNIPPET_CHARS)))
+      }
+      let silent = silent_engines(d)
+      let note = if list.is_empty(silent) then "" else "\n(did not answer: " + string.join(silent, ", ") + ")"
+      ((if n == 0 then "no results" else string.join(out, "\n")) + note, n)
+    },
+  }
+
+let UA = "Mozilla/5.0 (compatible; comide/0.4; +https://github.com/O6lvl4/comide)"
+
+type Got = { status: Int, body: String, error: String }
+
+// Where a redirect's `Location` points, against the page that sent it. Relative targets
+// are resolved against the host only, which covers the redirects seen in practice
+// (`/news/x` from a newsroom root); a path-relative target is left alone.
+fn resolve(from: String, target: String) -> String = {
+  let scheme = if string.starts_with(from, "http://") then "http://" else "https://"
+  if string.starts_with(target, "http://") or string.starts_with(target, "https://") then target
+  else if string.starts_with(target, "//") then string.drop_end(scheme, 2) + target
+  else if string.starts_with(target, "/") then {
+    let after = string.drop(from, string.len(scheme))
+    match string.index_of(after, "/") {
+      none => from + target,
+      some(i) => string.take(from, string.len(scheme) + i) + target,
+    }
+  } else from
+}
+
+let WEB_HOPS = 5
+let WEB_TIMEOUT_SECS = "20"
+
+// One GET, redirects followed here, one hop at a time, so that with `public_only` every
+// hop is held to `private_host` and not only the address the model gave: a public page
+// may redirect anywhere. The read timeout is the runtime's process-wide knob.
+effect fn get(address: String, accept: String, public_only: Bool) -> Got = {
+  env.set("ALMIDE_HTTP_TIMEOUT_SECS", WEB_TIMEOUT_SECS)
+  hop(address, accept, public_only, WEB_HOPS)!
+}
+
+effect fn hop(address: String, accept: String, public_only: Bool, left: Int) -> Got =
+  if left == 0 then Got { status: 0, body: "", error: "more than " + int.to_string(WEB_HOPS) + " redirects" }
+  else if public_only and private_host(host_of(address)) then
+    Got { status: 0, body: "", error: "redirected to " + host_of(address) + ", which is on this machine or a private network" }
+  else match http.request_response("GET", address, "", ["User-Agent": UA, "Accept": accept]) {
+    err(e) => Got { status: 0, body: "", error: toolkit.first_line_of(e, 200) },
+    ok(r) => {
+      let code = http.status_code(r)
+      let target = if code >= 300 and code < 400 then http.get_header(r, "Location") else none
+      match target {
+        some(t) => hop(resolve(address, t), accept, public_only, left - 1)!,
+        none => Got { status: code, body: http.body(r), error: "" },
+      }
+    },
+  }
+
+effect fn web_search(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let g = get(search_url(s.searx, toolkit.str_arg(a, "query")), "application/json", false)!
+  if g.error != "" then toolkit.failed("the search engine did not answer: " + g.error + ". It is the SearXNG at " + s.searx
+      + "; if it runs in Docker, `docker start searxng` starts it.", "search unavailable: " + toolkit.first_line_of(g.error, 70))
+  else if g.status != 200 then toolkit.failed("SearXNG at " + s.searx + " answered HTTP " + int.to_string(g.status)
+      + " (403 means JSON is not enabled in its settings.yml: search.formats needs json)", "search unavailable: HTTP " + int.to_string(g.status))
+  else {
+    let (text, n) = search_results(g.body, toolkit.int_arg(a, "max_results", SEARCH_RESULTS))
+    if n == 0 then toolkit.failed(text, "no results") else toolkit.said(text, int.to_string(n) + (if n == 1 then " result" else " results"))
+  }
+}
+
+// The host part of an address, lowercased, without user, port or brackets.
+fn host_of(address: String) -> String = {
+  let rest = string.strip_prefix(address, "https://") ?? (string.strip_prefix(address, "http://") ?? "")
+  let authority = list.first(string.split(list.first(string.split(list.first(string.split(rest, "/")) ?? "", "?")) ?? "", "#")) ?? ""
+  let hostport = list.last(string.split(authority, "@")) ?? ""
+  let bare = if string.starts_with(hostport, "[") then list.first(string.split(string.drop(hostport, 1), "]")) ?? "" else list.first(string.split(hostport, ":")) ?? ""
+  string.to_lower(bare)
+}
+
+// Pages are read without asking, so what a page could point the model at is limited to
+// the public web: not this machine, not the local network, not a bare intranet name.
+// A name that resolves to a private address is not caught here; this is a guard
+// against the obvious addresses, not a firewall.
+let PRIVATE_NAMES = ["", "localhost"]
+let PRIVATE_SUFFIXES = [".localhost", ".local", ".internal"]
+let PRIVATE_PREFIXES = ["127.", "10.", "0.", "192.168.", "169.254."]
+
+fn private_host(h: String) -> Bool = {
+  let second = int.parse(list.get(string.split(h, "."), 1) ?? "") ?? -1
+  list.contains(PRIVATE_NAMES, h) or list.any(PRIVATE_SUFFIXES, (x) => string.ends_with(h, x)) or list.any(PRIVATE_PREFIXES, (x) => string.starts_with(h, x))
+    // a bare intranet name, an IPv6 address, 172.16.0.0/12
+    or not string.contains(h, ".") or string.contains(h, ":") or (string.starts_with(h, "172.") and second >= 16 and second <= 31)
+}
+
+effect fn web_fetch(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let address = toolkit.str_arg(a, "url")
+  let host = host_of(address)
+  if not (string.starts_with(address, "http://") or string.starts_with(address, "https://")) then
+    toolkit.failed("only http and https addresses can be read: " + address, "not an http(s) address")
+  else if private_host(host) then
+    toolkit.failed("not read: " + host + " is on this machine or a private network, and pages are only read from the public web", "not read: private address")
+  else {
+    let g = get(address, "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8", true)!
+    if g.error != "" then toolkit.failed("could not read " + address + ": " + g.error, "could not read: " + toolkit.first_line_of(g.error, 70))
+    else if g.status < 200 or g.status >= 300 then toolkit.failed("could not read " + address + ": HTTP " + int.to_string(g.status), "could not read: HTTP " + int.to_string(g.status))
+    else {
+      let text = page.readable(g.body)
+      if string.trim(text) == "" then toolkit.failed("the page at " + address + " has no readable text (it may be built by scripts)", "no readable text")
+      else toolkit.said(toolkit.capped(s, "# " + address + "\n\n" + text)!, toolkit.count_lines(text))
+    }
+  }
+}
+
+
+test "search results are numbered, with the address on its own line and the silent engines named" {
+  let body = "{\"results\":[{\"title\":\"almide/almide\",\"url\":\"https://github.com/almide/almide\",\"content\":\"A statically-typed language\"},{\"title\":\"Zenn\",\"url\":\"https://zenn.dev/x\",\"content\":\"\"}],\"unresponsive_engines\":[[\"duckduckgo\",\"CAPTCHA\"]]}"
+  let (text, n) = search_results(body, 8)
+  assert_eq(n, 2)
+  assert(string.starts_with(text, "1. almide/almide\n   https://github.com/almide/almide\n   A statically-typed language\n2. Zenn"))
+  assert(string.contains(text, "(did not answer: duckduckgo)"))
+  assert_eq(search_results("{\"results\":[]}", 8).1, 0)
+  assert_eq(search_url("http://127.0.0.1:8888", "境界 test"), "http://127.0.0.1:8888/search?q=%E5%A2%83%E7%95%8C%20test&format=json")
+}
+
+test "redirect targets resolve against the page that sent them" {
+  assert_eq(resolve("https://ir.amd.com/news/x", "https://ir.amd.com/news/y"), "https://ir.amd.com/news/y")
+  assert_eq(resolve("https://news.samsung.com/global/old", "/global/new"), "https://news.samsung.com/global/new")
+  assert_eq(resolve("https://a.example/x", "//b.example/y"), "https://b.example/y")
+  assert_eq(resolve("http://a.example/x", "/y"), "http://a.example/y")
+  assert_eq(resolve("http://a.example/x", "//b.example/y"), "http://b.example/y")
+}
+
+test "pages on this machine or a private network are not read" {
+  assert_eq(host_of("https://tenki.jp/forecast/9/48/"), "tenki.jp")
+  assert_eq(host_of("http://user@Example.COM:8080/x?y#z"), "example.com")
+  assert_eq(host_of("http://[::1]:8888/"), "::1")
+  assert(not private_host("tenki.jp"))
+  assert(not private_host("172.32.0.1"))
+  for h in ["localhost", "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.20.1.1", "169.254.169.254", "::1", "intranet", "printer.local", "0.0.0.0"] {
+    assert(private_host(h))
+  }
+}

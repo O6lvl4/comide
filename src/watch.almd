@@ -8,7 +8,7 @@
 // same arguments, which is a model going round in circles on its own results.
 
 import json
-import self.tools
+import self.solving
 
 // `check` is the last command seen that says whether the work is done: a test or build
 // run through shell, or the verify command handed to solve. `dirty` is a file written
@@ -44,7 +44,7 @@ fn checked(w: Work, command: String, failed: Bool) -> Work = Work { check: comma
 // cat's, with two tests failing. After `;` or `||` the status is some other command's;
 // after `&&` and `|` (shell runs with pipefail) it is still the check's.
 fn verdict_of(command: String) -> Bool =
-  tools.checks_work(command) and not string.contains(command, ";") and not string.contains(command, "||")
+  solving.checks_work(command) and not string.contains(command, ";") and not string.contains(command, "||")
 
 // What to do when the model answers without calling anything.
 type Finish = | Done | RunCheck(String) | Remind(String)
@@ -79,8 +79,8 @@ fn repeating(sigs: List[String]) -> Bool = {
       let block = list.drop(sigs, n - k)
       let before = list.take(list.drop(sigs, n - 2 * k), k)
       let first = list.take(list.drop(sigs, n - 3 * k), k)
-      if block == before and block == first then { found = true } else ()
-    } else ()
+      if block == before and block == first then { found = true }
+    }
   }
   found
 }

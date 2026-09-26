@@ -1,0 +1,66 @@
+// Asking first. A shell command, and the verify command golemide would run, which is a
+// shell command too, are put to the person before they run. Measured on the ZCode run:
+// an agent allowed to run anything installed Boost on the host to get a C++ exercise
+// through.
+
+import io
+import self.editor
+import self.ui
+import self.options
+
+type Permission = { run: Bool, allow_from_now: Bool, said: String }
+
+fn yes_once() -> Permission = Permission { run: true, allow_from_now: false, said: "" }
+fn yes_always() -> Permission = Permission { run: true, allow_from_now: true, said: "" }
+fn no(said: String) -> Permission = Permission { run: false, allow_from_now: false, said: said }
+
+// Anything typed at the question other than the choices is a no with a reason, and the
+// reason goes to the model. Measured on the first scripted conversation: the next
+// request, typed while the question was open, was read as the answer, counted as a no,
+// and lost.
+fn answer_of(raw: String) -> Permission = {
+  let a = string.to_lower(string.trim(raw))
+  if list.contains(["2", "a", "always"], a) then yes_always()
+  else if list.contains(["1", "y", "yes"], a) then yes_once()
+  else if list.contains(["", "3", "n", "no"], a) then no("")
+  else no(string.trim(raw))
+}
+
+effect fn permitted(opts: options.Options, allow: Bool, question: String) -> Permission =
+  if allow then yes_always()
+  else if not opts.live then no("")
+  else if opts.tui then chosen(opts, question)!
+  else {
+    io.print(ui.permission(opts.ui, question))
+    answer_of(options.read_input()! ?? "3")
+  }
+
+// The question as a menu, on a terminal comide has taken over.
+effect fn chosen(opts: options.Options, question: String) -> Permission = {
+  let pick = editor.choose(opts.ui, question, ["Yes", "Yes, and stop asking this session", "No, and tell comide what to do instead"])!
+  if pick == 0 then yes_once()
+  else if pick == 1 then yes_always()
+  else if pick == 2 then {
+    let p = editor.prompt(opts.ui, [], "what should comide do instead?  (esc to skip)", "", [])!
+    no(if p.kind == "send" then p.text else "")
+  }
+  else no("")
+}
+
+fn declined(opts: options.Options, said: String) -> String =
+  if not opts.live then "Not run: this session does not allow shell commands. The user can allow them by starting comide with --yes."
+  else if said != "" then "Not run. The user declined and said: " + said
+  else "Not run: the user declined this command. Do not retry it; answer with what you have, or ask."
+
+test "the choices at the question, and a sentence typed there instead" {
+  assert(answer_of("1").run)
+  assert(not answer_of("1").allow_from_now)
+  assert(answer_of("2").allow_from_now)
+  assert(answer_of("y").run)
+  assert(answer_of("A").allow_from_now)
+  assert(not answer_of("").run)
+  assert(not answer_of("3").run)
+  let said = answer_of("まだ実行しないで。何を実行するつもりか教えて")
+  assert(not said.run)
+  assert_eq(said.said, "まだ実行しないで。何を実行するつもりか教えて")
+}
