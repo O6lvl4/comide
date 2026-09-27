@@ -11,7 +11,9 @@ import process
 // `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
 // `solve_model` and `solve_strong` are golemide's --model and --strong-model, "" for
 // golemide's own defaults (COMIDE_SOLVE_MODEL, COMIDE_SOLVE_STRONG_MODEL).
-type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String }
+// `runner` is a program every tool's command goes through, "" for none (--runner,
+// COMIDE_RUNNER): see `run_in`.
+type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String, runner: String }
 
 // What goes back to the model; the one line the person watching sees under the call;
 // whether that line is bad news; and what the tool spent on a model of its own (solve
@@ -48,6 +50,16 @@ effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int,
     err(e) => (-1, e),
   }
 
+// A tool's command, through the runner when there is one: `runner KIND -- PROG ARGS…`.
+// The runner decides where and how it runs (onogoro confines each call with porta, and
+// gives it no keys), and says why when it refuses; that text is the tool's result like
+// any other output. KIND is what the call is for, so a runner can grant each differently:
+// `read` (looking at the project), `shell` (a command the model wrote), `solve` (golemide,
+// which edits and runs the verify command).
+effect fn run_in(s: Setup, kind: String, prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
+  if s.runner == "" then run_program(prog, args, timeout_s)!
+  else run_program(s.runner, [kind, "--", prog] + args, timeout_s)!
+
 effect fn capped(s: Setup, text: String) -> String =
   if string.len(text) <= MAX_RESULT_CHARS then text
   else {
@@ -65,7 +77,7 @@ fn strings(a: Value, k: String) -> List[String] =
 fn int_arg(a: Value, k: String, d: Int) -> Int = json.get_int(a, k) ?? (int.parse(json.get_string(a, k) ?? "") ?? d)
 
 test "paths resolve against the root, and results read relative to it" {
-  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888", solve_model: "", solve_strong: "" }
+  let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888", solve_model: "", solve_strong: "", runner: "" }
   assert_eq(under_root(s, "src/a.py"), "/w/proj/src/a.py")
   assert_eq(under_root(s, "./src/a.py"), "/w/proj/src/a.py")
   assert_eq(under_root(s, ""), "/w/proj")

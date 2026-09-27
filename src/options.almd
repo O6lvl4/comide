@@ -5,14 +5,13 @@ import self.ui
 
 // `live` is a conversation rather than one -p request: the answer streams and questions
 // can be asked. `tui` is a live conversation on a terminal that comide has taken over key by
-// key (term.almd): the input box, menus, and Esc to interrupt.
-type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui }
+// key (term.almd): the input box, menus, and Esc to interrupt. `runner` is the program
+// every tool's command goes through, "" for none (toolkit.run_in).
+type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui, runner: String }
 
-fn with_model(o: Options, m: String) -> Options =
-  Options { root: o.root, model: m, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: o.tui, ui: o.ui }
+fn with_model(o: Options, m: String) -> Options = { ...o, model: m }
 
-fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options =
-  Options { root: o.root, model: o.model, effort: o.effort, max_steps: o.max_steps, max_tokens: o.max_tokens, yes: o.yes, prompt: o.prompt, golemide: o.golemide, live: o.live, tui: tui, ui: u }
+fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options = { ...o, tui: tui, ui: u }
 
 // `check` is the last command seen that says whether the work is done (watch.almd); it
 // outlives the turn, so "now also handle X" is checked the same way.

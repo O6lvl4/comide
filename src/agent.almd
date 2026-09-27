@@ -100,7 +100,8 @@ effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
   let solve_model = string.trim(env.get("COMIDE_SOLVE_MODEL") ?? "")
   let solve_strong = string.trim(env.get("COMIDE_SOLVE_STRONG_MODEL") ?? "")
   ok(toolkit.Setup { root: opts.root, golemide: opts.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx,
-    solve_model: solve_model, solve_strong: if solve_strong != "" then solve_strong else solve_model })
+    solve_model: solve_model, solve_strong: if solve_strong != "" then solve_strong else solve_model,
+    runner: opts.runner })
 }
 
 effect fn chat(opts0: options.Options) -> Result[Int, String] = {
@@ -230,7 +231,7 @@ fn absolute(root: String, cwd: String) -> String = {
 }
 
 let CHAT_USAGE = """
-comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH]
+comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH] [--runner PROG]
 
   run PROMPT       one request, answered, then exit; without it, a conversation
   -p PROMPT        the same as run
@@ -245,6 +246,9 @@ comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [-
   --yes            run shell and verify commands without asking
   --max-steps N    model calls per request before it stops to ask (default 40)
   --golemide PATH  the golemide binary (default: $COMIDE_GOLEMIDE, else golemide on PATH)
+  --runner PROG    run every tool's command as `PROG KIND -- CMD ARGS...` (default:
+                   $COMIDE_RUNNER, else none); KIND is read, shell or solve. onogoro uses
+                   it to confine each call and keep the keys out of it
 
 solve runs on golemide's own models (cf:glm-5.3-flash, escalating to cf:glm-5.3);
 COMIDE_SOLVE_MODEL and COMIDE_SOLVE_STRONG_MODEL choose others, with the same names.
@@ -272,6 +276,7 @@ effect fn cli(args: List[String]) -> Int =
       live: prompt == "",
       tui: false,
       ui: ui.detect()!,
+      runner: opt(args, "--runner") ?? (env.get("COMIDE_RUNNER") ?? ""),
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }

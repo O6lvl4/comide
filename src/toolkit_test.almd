@@ -1,0 +1,28 @@
+// Tests of the runner seam (toolkit.run_in).
+
+import fs
+import self.toolkit
+
+fn setup(runner: String) -> toolkit.Setup =
+  toolkit.Setup { root: "/w", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "", solve_model: "", solve_strong: "", runner: runner }
+
+test "without a runner a tool's command runs as it is" {
+  let (code, out) = toolkit.run_in(setup(""), "shell", "sh", ["-c", "echo plain"], 10)!
+  assert_eq((code, out), (0, "plain"))
+}
+
+test "with a runner the command goes through it, with what it is for" {
+  let dir = fs.create_temp_dir("comide-runner")!
+  let runner = dir + "/runner"
+  // A runner that says what it was given, then runs the command.
+  fs.write(runner, "#!/bin/sh\necho \"kind=$1 sep=$2\"\nshift 2\nexec \"$@\"\n")!
+  let _ = toolkit.run_program("chmod", ["+x", runner], 10)!
+  let (code, out) = toolkit.run_in(setup(runner), "read", "sh", ["-c", "echo inside"], 10)!
+  assert_eq((code, out), (0, "kind=read sep=--\ninside"))
+  // A refusal is the runner's own exit and words, handed back like any output.
+  fs.write(runner, "#!/bin/sh\necho 'refused: write /etc/x needs -v /etc' >&2\nexit 126\n")!
+  let (refused, why) = toolkit.run_in(setup(runner), "shell", "sh", ["-c", "echo x > /etc/x"], 10)!
+  assert_eq(refused, 126)
+  assert(string.contains(why, "needs -v /etc"))
+  fs.remove_all(dir)!
+}

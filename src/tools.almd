@@ -65,7 +65,7 @@ effect fn read(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   if toolkit.str_arg(a, "symbol") != "" then { args = args + ["--symbol", toolkit.str_arg(a, "symbol")] }
   if toolkit.str_arg(a, "lines") != "" then { args = args + ["--lines", toolkit.str_arg(a, "lines")] }
   if toolkit.str_arg(a, "grep") != "" then { args = args + ["--grep", toolkit.str_arg(a, "grep"), "--around", int.to_string(toolkit.int_arg(a, "around", 3))] }
-  let (_, out) = toolkit.run_program("hew", args, 60)!
+  let (_, out) = toolkit.run_in(s, "read", "hew", args, 60)!
   toolkit.said(toolkit.capped(s, toolkit.relative(s, out))!, toolkit.count_lines(out))
 }
 
@@ -74,12 +74,12 @@ effect fn hew_listing(s: toolkit.Setup, sub: String, a: Value) -> toolkit.ToolRe
   let args = if sub == "tree" then ["tree", target, "--depth", int.to_string(toolkit.int_arg(a, "depth", 3))]
     else if sub == "search" then ["grep", toolkit.str_arg(a, "pattern"), target]
     else ["outline", target]
-  let (_, out) = toolkit.run_program("hew", args, 60)!
+  let (_, out) = toolkit.run_in(s, "read", "hew", args, 60)!
   toolkit.said(toolkit.capped(s, toolkit.relative(s, out))!, toolkit.count_lines(out))
 }
 
 effect fn map(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
-  let (_, out) = toolkit.run_program("gramide", ["map", s.root, "--budget", "3000", "--task", toolkit.str_arg(a, "task")], 120)!
+  let (_, out) = toolkit.run_in(s, "read", "gramide", ["map", s.root, "--budget", "3000", "--task", toolkit.str_arg(a, "task")], 120)!
   toolkit.said(toolkit.capped(s, toolkit.relative(s, out))!, toolkit.count_lines(out))
 }
 
@@ -89,8 +89,8 @@ effect fn shell(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   // pipefail: measured on the first conversation, `npm test 2>&1 | tail -30` in a
   // project with no package.json came back exit 0, tail's status, not npm's.
   let bash = ["bash", "-o", "pipefail", "-c", line]
-  let (code, out) = if s.ctxgate then toolkit.run_program("ctxgate", ["exec", "--"] + bash, toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
-    else toolkit.run_program("bash", list.drop(bash, 1), toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
+  let (code, out) = if s.ctxgate then toolkit.run_in(s, "shell", "ctxgate", ["exec", "--"] + bash, toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
+    else toolkit.run_in(s, "shell", "bash", list.drop(bash, 1), toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
   let status = if code == -1 then "did not finish: " else "exit " + int.to_string(code) + "\n"
   let brief = if code == -1 then "did not finish: " + toolkit.first_line_of(out, 80) else "exit " + int.to_string(code) + " · " + toolkit.count_lines(out)
   let hint = if code != 0 and code != -1 and solving.checks_work(command) then solving.solve_hint(command) else ""
@@ -128,8 +128,8 @@ effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResul
 // conversation without it: asked to run the tests of a Python project, the model's
 // first command was `npm test`.
 effect fn project_context(s: toolkit.Setup) -> String = {
-  let (_, tree) = toolkit.run_program("hew", ["tree", s.root, "--depth", "2"], 30)!
-  let (git_code, git) = toolkit.run_program("bash", ["-c", "cd " + toolkit.shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
+  let (_, tree) = toolkit.run_in(s, "read", "hew", ["tree", s.root, "--depth", "2"], 30)!
+  let (git_code, git) = toolkit.run_in(s, "read", "bash", ["-c", "cd " + toolkit.shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
   let tree_part = string.take(toolkit.relative(s, tree), 3000)
   let git_part = if git_code == 0 then "\n\ngit branch and uncommitted changes:\n" + git else "\n\nnot a git repository"
   "Project layout:\n" + tree_part + git_part

@@ -15,7 +15,7 @@ effect fn golemide_edit(s: toolkit.Setup, request: Value, create: Bool) -> toolk
   let req_path = s.scratch + "/edit-" + int.to_string(env.millis()) + ".json"
   let _ = fs.write(req_path, json.stringify(request))
   let script = "exec \"$0\" edit --root \"$1\"" + (if create then " --create" else "") + " < \"$2\""
-  let (code, out) = toolkit.run_program("bash", ["-c", script, s.golemide, s.root, req_path], 60)!
+  let (code, out) = toolkit.run_in(s, "solve", "bash", ["-c", script, s.golemide, s.root, req_path], 60)!
   let _ = fs.remove(req_path)
   match json.parse(out) {
     err(_) => toolkit.failed("golemide edit failed (exit " + int.to_string(code) + "): " + string.take(out, 2000), "golemide edit failed (exit " + int.to_string(code) + ")"),
@@ -94,7 +94,7 @@ effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
     "--attempts", int.to_string(toolkit.int_arg(a, "attempts", 6)), "--json", "--quiet"]
     + (if s.solve_model == "" then [] else ["--model", s.solve_model])
     + (if s.solve_strong == "" then [] else ["--strong-model", s.solve_strong])
-  let (code, out) = toolkit.run_program(s.golemide, args, SOLVE_TIMEOUT_S)!
+  let (code, out) = toolkit.run_in(s, "solve", s.golemide, args, SOLVE_TIMEOUT_S)!
   // stdout is one JSON object; stderr, which run_program appends, is progress.
   let first_line = list.first(string.split(out, "\n")) ?? ""
   let parsed = json.parse(first_line)
