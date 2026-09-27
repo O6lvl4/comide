@@ -45,7 +45,9 @@ The conversation's model is `--model PROVIDER:MODEL` (or `/model`):
 | `claude`, `claude:opus` | Claude Code's `claude -p` on your Claude login; comide runs the tools |
 
 `solve` runs on golemide's own models unless `COMIDE_SOLVE_MODEL` (and
-`COMIDE_SOLVE_STRONG_MODEL`) name others, in the same form. With `claude`, comide turns
+`COMIDE_SOLVE_STRONG_MODEL`) name others, in the same form; its line says which model did
+the work. A `solve` may take `COMIDE_SOLVE_TIMEOUT_S` seconds (default 300), and golemide
+0.4.0 or later stops in time to say how far it got. With `claude`, comide turns
 off Claude Code's tools, settings, hooks and MCP servers; your global `CLAUDE.md` and
 memory are still read.
 

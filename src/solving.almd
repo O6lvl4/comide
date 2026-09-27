@@ -7,7 +7,10 @@ import env
 import fs
 import self.toolkit
 
-let SOLVE_TIMEOUT_S = 1800
+// How much of a solve's time golemide is told to leave for its report: it stops starting
+// attempts that would run past `solve_timeout_s` minus this, so the model hears how the
+// run went and why it stopped instead of a killed process (O6lvl4/comide#3).
+let REPORT_MARGIN_S = 30
 
 // golemide edit reads its request on stdin; the request goes through a file so the
 // timeout-bounded runner, which has no stdin, can still be used.
@@ -64,15 +67,30 @@ fn solve_hint(command: String) -> String =
 
 fn solve_summary(doc: Value) -> String = string.join(outcome_lines(doc) + evidence_lines(doc), "\n")
 
-// How it ended: the status, the files changed, warnings, time lost to rate limits.
+// How it ended: the status, which models did the work, the files changed, warnings, time
+// lost to rate limits. The models and the wait are on the first line, the one the person
+// sees: solve's edits are made by golemide's model, not the conversation's, and a run
+// that was mostly waiting on a rate limit should not read as a slow model.
 fn outcome_lines(doc: Value) -> List[String] = {
   let changed = toolkit.strings(doc, "changed")
   let throttled = json.get_int(doc, "throttled") ?? 0
-  [toolkit.str_arg(doc, "status") + " (exit " + int.to_string(json.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(json.get_int(doc, "attempts") ?? 0) + " attempt(s)"]
+  let waited_s = (json.get_int(doc, "throttled_ms") ?? 0) / 1000
+  let models = list.unique(list.filter(list.map(json.get_array(doc, "attempt_log") ?? [], (t) => toolkit.str_arg(t, "model")), (m) => m != ""))
+  [toolkit.str_arg(doc, "status") + " (exit " + int.to_string(json.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(json.get_int(doc, "attempts") ?? 0) + " attempt(s)"
+    + (if list.is_empty(models) then "" else " · " + string.join(models, ", "))
+    + (if waited_s > 0 then " · " + int.to_string(waited_s) + "s rate-limited" else "")]
     + (if list.is_empty(changed) then [] else ["changed: " + string.join(changed, ", ")])
     + list.map(toolkit.strings(doc, "warnings"), (w) => "warning: " + w)
-    + (if throttled > 0 then ["rate limited " + int.to_string(throttled) + " time(s), " + int.to_string((json.get_int(doc, "throttled_ms") ?? 0) / 1000) + "s spent waiting"] else [])
+    + (if throttled > 0 then ["rate limited " + int.to_string(throttled) + " time(s), " + int.to_string(waited_s) + "s spent waiting"] else [])
     + (if toolkit.str_arg(doc, "message") != "" then [toolkit.str_arg(doc, "message")] else [])
+}
+
+test "the first line names the models that did the work and the time lost to rate limits" {
+  let doc = json.parse("{\"status\":\"not_solved\",\"exit\":1,\"attempts\":2,\"throttled\":3,\"throttled_ms\":41000,\"warnings\":[\"deadline: stopped after 2 attempt(s), 250s of 270s used; the next would not have fit\"],"
+    + "\"attempt_log\":[{\"model\":\"cf:glm-5.3-flash\"},{\"model\":\"cf:glm-5.3\"}]}") ?? value.null()
+  let lines = outcome_lines(doc)
+  assert_eq(list.first(lines) ?? "", "not_solved (exit 1) after 2 attempt(s) · cf:glm-5.3-flash, cf:glm-5.3 · 41s rate-limited")
+  assert(list.any(lines, (l) => string.starts_with(l, "warning: deadline:")))
 }
 
 // What the next decision needs: the last change's explanation, the diff, and the end of
@@ -94,7 +112,8 @@ effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
     "--attempts", int.to_string(toolkit.int_arg(a, "attempts", 6)), "--json", "--quiet"]
     + (if s.solve_model == "" then [] else ["--model", s.solve_model])
     + (if s.solve_strong == "" then [] else ["--strong-model", s.solve_strong])
-  let (code, out) = toolkit.run_in(s, "solve", s.golemide, args, SOLVE_TIMEOUT_S)!
+    + ["--deadline", int.to_string(int.max(s.solve_timeout_s - REPORT_MARGIN_S, REPORT_MARGIN_S))]
+  let (code, out) = toolkit.run_in(s, "solve", s.golemide, args, s.solve_timeout_s)!
   // stdout is one JSON object; stderr, which run_program appends, is progress.
   let first_line = list.first(string.split(out, "\n")) ?? ""
   let parsed = json.parse(first_line)
@@ -107,8 +126,10 @@ effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   toolkit.ToolResult { text: toolkit.capped(s, text)!, brief: toolkit.first_line_of(text, 90), failed: not solved, cost_usd: spent }
 }
 
-// The golemide this was built against: `edit` and `solve --json` arrived in 0.2.0.
-let GOLEMIDE_NEEDED = [0, 2, 0]
+// The golemide this was built against: `edit` and `solve --json` arrived in 0.2.0, and
+// `solve --deadline` with each attempt's model in 0.4.0. An older one reads --deadline's
+// value as part of the task.
+let GOLEMIDE_NEEDED = [0, 4, 0]
 
 fn version_parts(said: String) -> List[Int] =
   list.filter_map(string.split(string.trim(list.last(string.split(string.trim(said), " ")) ?? ""), "."), (p) => match int.parse(p) { ok(n) => some(n), err(_) => none })
