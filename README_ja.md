@@ -17,7 +17,7 @@ comide --yes --root ../project        # シェルと検証コマンドを確認�
 
 ## セットアップ
 
-1. **Almide**：0.63 が出るまでは develop の `ce7cd7553` 以降。
+1. **Almide**：0.64.0 以降。
 2. **golemide 0.2.0 以降**を `PATH` に置く。comide の編集と `solve` は golemide を通ります。
    見つからないときや古いときは、起動時にそう表示します。
    ```sh
