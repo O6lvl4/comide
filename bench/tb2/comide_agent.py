@@ -37,6 +37,9 @@ CREDENTIALS = (
     "GOOGLE_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    # claude_bridge.py: the Claude subscription `claude` is logged in with, on the host.
+    "CLAUDECLI_BASE_URL",
+    "CLAUDECLI_API_KEY",
 )
 
 
