@@ -99,9 +99,10 @@ effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
   // so a run on one provider stays on it.
   let solve_model = string.trim(env.get("COMIDE_SOLVE_MODEL") ?? "")
   let solve_strong = string.trim(env.get("COMIDE_SOLVE_STRONG_MODEL") ?? "")
+  let solve_timeout_s = int.parse(string.trim(env.get("COMIDE_SOLVE_TIMEOUT_S") ?? "")) ?? 300
   ok(toolkit.Setup { root: opts.root, golemide: opts.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx,
     solve_model: solve_model, solve_strong: if solve_strong != "" then solve_strong else solve_model,
-    runner: opts.runner })
+    runner: opts.runner, solve_timeout_s: solve_timeout_s })
 }
 
 effect fn chat(opts0: options.Options) -> Result[Int, String] = {
@@ -252,6 +253,8 @@ comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [-
 
 solve runs on golemide's own models (cf:glm-5.3-flash, escalating to cf:glm-5.3);
 COMIDE_SOLVE_MODEL and COMIDE_SOLVE_STRONG_MODEL choose others, with the same names.
+A solve may take COMIDE_SOLVE_TIMEOUT_S seconds (default 300); golemide stops in time to
+say how far it got.
 
 In a conversation: /help /clear /cost /model /yes /transcript /exit
 """

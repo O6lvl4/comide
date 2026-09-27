@@ -13,7 +13,11 @@ import process
 // golemide's own defaults (COMIDE_SOLVE_MODEL, COMIDE_SOLVE_STRONG_MODEL).
 // `runner` is a program every tool's command goes through, "" for none (--runner,
 // COMIDE_RUNNER): see `run_in`.
-type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String, runner: String }
+// `solve_timeout_s` is how long one solve may hold the conversation (COMIDE_SOLVE_TIMEOUT_S).
+// It was 1800: a solve slowed by a rate limit then outlasted a 600 s task budget with the
+// model never getting a turn to try another way.
+type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String, runner: String,
+  solve_timeout_s: Int = 300 }
 
 // What goes back to the model; the one line the person watching sees under the call;
 // whether that line is bad news; and what the tool spent on a model of its own (solve
