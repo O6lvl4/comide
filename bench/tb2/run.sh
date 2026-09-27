@@ -10,7 +10,8 @@
 # what the bundle (bench/tb2/build-bundle.sh) was built for. That is the one way this
 # differs from the leaderboard's runs.
 #
-#   MODEL     comide's model, as Harbor's provider/model  (default: cf/glm-5.3-flash)
+#   MODEL     comide's model, as Harbor's provider/model  (default: cf/glm-5.3-flash;
+#             claudecli/sonnet uses this machine's claude login, via claude_bridge.py)
 #   CONFINE   app (porta) or none                         (default: app)
 #   TASKS     task names; empty = all
 #   N         tasks in parallel                           (default: 2)
@@ -40,6 +41,13 @@ JOBS_DIR="${JOBS_DIR:-${TMPDIR:-/tmp}/comide-tb2/jobs}"
 # Harbor passes them to the agent, and the agent to comide by name.
 envfile="${XDG_CONFIG_HOME:-$HOME/.config}/golemide/.env"
 if [ -f "$envfile" ]; then set -a; . "$envfile"; set +a; fi
+
+# MODEL=claudecli/<model> answers through claude_bridge.py on this machine, which the
+# task containers reach as host.docker.internal.
+if [[ "$MODEL" == claudecli/* ]]; then
+  export CLAUDECLI_BASE_URL="${CLAUDECLI_BASE_URL:-http://host.docker.internal:${BRIDGE_PORT:-8787}/v1}" CLAUDECLI_API_KEY="${CLAUDECLI_API_KEY:-local}"
+  curl -fsS "http://127.0.0.1:${BRIDGE_PORT:-8787}/v1/models" >/dev/null || { echo "no claude bridge on :${BRIDGE_PORT:-8787}: python3 bench/tb2/claude_bridge.py" >&2; exit 2; }
+fi
 
 include=()
 for t in ${TASKS:-}; do include+=(-i "$t"); done
