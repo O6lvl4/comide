@@ -22,6 +22,16 @@ RUN git init -q /tmp/almide && cd /tmp/almide \
  || { tail -30 /tmp/almide-build.log; exit 1; }
 RUN install -m 0755 /tmp/almide/target/release/almide /usr/local/bin/almide && rm -rf /tmp/almide && almide --version
 
+# gramide-cli alone is built on v0.64.0: develop resolves gramide's builtin `Map` to its
+# module named map and stops at E029 (almide/almide#2839). gramide needs none of the
+# HTTP fixes the rest is built on develop for.
+RUN git init -q /tmp/almide064 && cd /tmp/almide064 \
+ && git remote add origin https://github.com/almide/almide \
+ && git fetch -q --depth 1 origin "refs/tags/v0.64.0:refs/tags/v0.64.0" && git checkout -q v0.64.0 \
+ && cargo build --release --locked --bin almide > /tmp/almide064-build.log 2>&1 \
+ || { tail -30 /tmp/almide064-build.log; exit 1; }
+RUN install -m 0755 /tmp/almide064/target/release/almide /usr/local/bin/almide064 && rm -rf /tmp/almide064 && almide064 --version
+
 # porta built here, with this glibc. Its develop is rustls only (almide/porta#35), so the
 # binary needs no libssl. porta is built with the Almide above rather than its own pin
 # (0.63): the pin is about porta's integration suite and process.exit's range
@@ -38,8 +48,8 @@ RUN mkdir -p /bundle/bin && install -m 0755 /tmp/porta/porta /bundle/bin/porta &
 
 COPY src/ /src/
 RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide onogoro:onogoro; do \
-      dir="${t%%:*}"; bin="${t##*:}"; \
-      ( cd "/src/$dir" && almide build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
+      dir="${t%%:*}"; bin="${t##*:}"; compiler=almide; [ "$dir" = gramide-cli ] && compiler=almide064; \
+      ( cd "/src/$dir" && "$compiler" build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
       || { echo "== $dir failed"; tail -30 "/tmp/$bin.log"; exit 1; }; \
     done \
  && /bundle/bin/comide --help > /dev/null && /bundle/bin/golemide --version \
