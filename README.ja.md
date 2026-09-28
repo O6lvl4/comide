@@ -3,7 +3,10 @@
 </p>
 
 <p align="center">Claude Code、Codex、Aider と同じ種類の、ターミナルのコーディングエージェント。<br>コードの変更は golemide に任せます。</p>
-<p align="center"><a href="README.md">English</a></p>
+<p align="center">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/English-d0d7de?style=flat-square"></a>
+  <a href="README.ja.md"><img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-24292f?style=flat-square"></a>
+</p>
 
 ```sh
 comide                                # このディレクトリで会話する。/exit で終わる
