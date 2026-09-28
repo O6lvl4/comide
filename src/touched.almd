@@ -1,0 +1,91 @@
+// What a shell command changed in the project. The model is asked to change files with
+// edit and write, which check the syntax and show the change; measured on Terminal-Bench,
+// it went on writing with sed -i and redirects all the same (11 such commands in ten tasks,
+// 9 after the prompt said not to). So a command's writes are found after it runs, rather
+// than hoped away: the files in the project newer than a mark left before it, each checked
+// with gramide, both said in the command's result.
+
+import env
+import fs
+import regex
+import self.toolkit
+
+type Touched = { files: List[String], broken: List[String] }
+
+// How many changed paths are named; the rest are counted.
+let SHOWN = 20
+
+// Left in the scratch directory just before the command runs; `find -newer` measures
+// against it. Written by comide itself, outside any runner, so it needs no grant.
+effect fn mark(s: toolkit.Setup) -> Result[String, String] = {
+  let path = s.scratch + "/before-shell-" + int.to_string(env.millis())
+  fs.write(path, "")!
+  ok(path)
+}
+
+// The project's files newer than the mark, without what building and testing leave behind
+// (dependency, build and cache directories, and in a repository whatever it ignores), and
+// the syntax errors gramide finds in them. Runs as a look (`read`): it changes nothing.
+effect fn after(s: toolkit.Setup, marker: String) -> Result[Touched, String] = {
+  let (_, out) = toolkit.run_in(s, "read", "bash", ["-c", FIND, "touched", s.root, marker], 60)!
+  let _ = fs.remove(marker)
+  let files = list.filter(string.split(out, "\n"), (l) => string.trim(l) != "")
+  if list.is_empty(files) then ok(Touched { files: [], broken: [] })
+  else {
+    let (_, checked) = toolkit.run_in(s, "read", "bash", ["-c", CHECK, "touched", s.root] + files, 60)!
+    ok(Touched { files: files, broken: syntax_errors(checked) })
+  }
+}
+
+// $1 the project root, $2 the mark. No backslashes: this is an Almide string.
+let FIND = """
+cd "$1" 2>/dev/null || exit 0
+noise='.git node_modules target build dist __pycache__ .venv venv .pytest_cache .mypy_cache .tox .gradle .next coverage .cache'
+prune=''
+for d in $noise; do prune="$prune -name $d -o"; done
+files=$(find . '(' $prune -false ')' -prune -o -type f -newer "$2" -print 2>/dev/null | sed 's|^[.]/||' | head -200)
+[ -z "$files" ] && exit 0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  ignored=$(printf '%s\n' "$files" | git check-ignore --stdin 2>/dev/null)
+  printf '%s\n' "$files" | grep -vxF -e "$ignored"
+else
+  printf '%s\n' "$files"
+fi
+"""
+
+// $1 the project root, then the files. gramide says `path: ok`, `path:L:C: message`, or
+// that it has no grammar for the file; only the second is an error.
+let CHECK = """
+cd "$1" 2>/dev/null || exit 0
+shift
+command -v gramide >/dev/null 2>&1 || exit 0
+for f in "$@"; do gramide check "$f" 2>&1 | head -3; done
+"""
+
+fn syntax_errors(checked: String) -> List[String] =
+  list.filter(string.split(checked, "\n"), (l) => regex.is_match("^[^:]+:[0-9]+:[0-9]+: ", l))
+
+// What the command's result says about it, and the note beside its status line.
+fn report(t: Touched) -> (String, String) =
+  if list.is_empty(t.files) then ("", "")
+  else {
+    let named = string.join(list.take(t.files, SHOWN), ", ") + (if list.len(t.files) > SHOWN then ", and " + int.to_string(list.len(t.files) - SHOWN) + " more" else "")
+    let text = "\n\nThis command changed files in the project: " + named + ". Change the project's files with edit or write, which check the syntax and show the change."
+      + (if list.is_empty(t.broken) then "" else "\nThey no longer parse:\n" + string.join(t.broken, "\n"))
+    let brief = " · changed " + int.to_string(list.len(t.files)) + " file(s)"
+      + (if list.is_empty(t.broken) then "" else " · syntax error in " + (list.first(list.map(t.broken, (l) => list.first(string.split(l, ":")) ?? "")) ?? ""))
+    (text, brief)
+  }
+
+test "a command's writes are said, with the files that no longer parse" {
+  let (text, brief) = report(Touched { files: ["app.py", "notes.txt"], broken: ["app.py:3:5: unclosed delimiter"] })
+  assert(string.contains(text, "changed files in the project: app.py, notes.txt"))
+  assert(string.contains(text, "app.py:3:5: unclosed delimiter"))
+  assert_eq(brief, " · changed 2 file(s) · syntax error in app.py")
+  assert_eq(report(Touched { files: [], broken: [] }), ("", ""))
+}
+
+test "only gramide's located messages count as syntax errors" {
+  assert_eq(syntax_errors("a.py: ok\nb.txt: no registered grammar for this extension\nc.rs:2:1: unexpected end of file"),
+    ["c.rs:2:1: unexpected end of file"])
+}
