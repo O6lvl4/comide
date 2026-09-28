@@ -9,28 +9,32 @@
 FROM rust:1-bullseye
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-ARG ALMIDE_REF=v0.64.0
-ARG PORTA_VERSION=v0.6.16
+# Both from develop until they release what onogoro rests on: Almide's HTTP client
+# honouring HTTPS_PROXY and a proxy's CA (almide/almide#2833), and porta's credential
+# broker (almide/porta#42). A commit, not a branch, so the bundle can be named.
+ARG ALMIDE_REF=51b9d8e6d7594239f990c94283a57ae7e8549392
+ARG PORTA_REF=d51cccbf991f
 
 RUN git init -q /tmp/almide && cd /tmp/almide \
  && git remote add origin https://github.com/almide/almide \
- && git fetch -q --depth 1 origin "refs/tags/${ALMIDE_REF}:refs/tags/${ALMIDE_REF}" && git checkout -q "${ALMIDE_REF}" \
+ && git fetch -q --depth 1 origin "${ALMIDE_REF}" && git checkout -q FETCH_HEAD \
  && cargo build --release --locked --bin almide > /tmp/almide-build.log 2>&1 \
  || { tail -30 /tmp/almide-build.log; exit 1; }
 RUN install -m 0755 /tmp/almide/target/release/almide /usr/local/bin/almide && rm -rf /tmp/almide && almide --version
 
-# porta from its tag, built here (almide/porta#35). The released Linux binary needs glibc
-# 2.39 and libssl.so.3, so it does not start on bookworm or python:*-slim: its reqwest asks
-# for rustls without turning off the default native-tls. Built here with default-features
-# = false it is rustls only, and links this glibc. The better fix, a static musl build as
-# Codex ships, waits on almide/almide#2772.
-RUN git clone -q --depth 1 --branch "${PORTA_VERSION}" https://github.com/almide/porta /tmp/porta && cd /tmp/porta \
- && sed -i 's/^reqwest = { version = \("[^"]*"\), features/reqwest = { version = \1, default-features = false, features/' almide.toml \
- && grep '^reqwest' almide.toml \
+# porta built here, with this glibc. Its develop is rustls only (almide/porta#35), so the
+# binary needs no libssl. porta is built with the Almide above rather than its own pin
+# (0.63): the pin is about porta's integration suite and process.exit's range
+# (almide/almide#2780), which this build does not run.
+RUN git init -q /tmp/porta && cd /tmp/porta \
+ && git remote add origin https://github.com/almide/porta \
+ && git fetch -q origin develop && git checkout -q "${PORTA_REF}" \
+ && grep '^reqwest.*default-features = false' almide.toml \
  && almide build --release src/main.almd -o porta > /tmp/porta-build.log 2>&1 \
  || { tail -30 /tmp/porta-build.log; exit 1; }
 RUN mkdir -p /bundle/bin && install -m 0755 /tmp/porta/porta /bundle/bin/porta && rm -rf /tmp/porta \
- && ! ldd /bundle/bin/porta | grep -q ssl && /bundle/bin/porta --version
+ && ! ldd /bundle/bin/porta | grep -q ssl && /bundle/bin/porta --version \
+ && /bundle/bin/porta run --help | grep -q -- --credential
 
 COPY src/ /src/
 RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide onogoro:onogoro; do \
