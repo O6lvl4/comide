@@ -12,7 +12,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Both from develop until they release what onogoro rests on: Almide's HTTP client
 # honouring HTTPS_PROXY and a proxy's CA (almide/almide#2833), and porta's credential
 # broker (almide/porta#42). A commit, not a branch, so the bundle can be named.
-ARG ALMIDE_REF=51b9d8e6d7594239f990c94283a57ae7e8549392
+ARG ALMIDE_REF=7b563f7ee30b7715fd1cf8b0631eee0f22c8c598
 ARG PORTA_REF=d51cccbf991f
 
 RUN git init -q /tmp/almide && cd /tmp/almide \
@@ -21,17 +21,6 @@ RUN git init -q /tmp/almide && cd /tmp/almide \
  && cargo build --release --locked --bin almide > /tmp/almide-build.log 2>&1 \
  || { tail -30 /tmp/almide-build.log; exit 1; }
 RUN install -m 0755 /tmp/almide/target/release/almide /usr/local/bin/almide && rm -rf /tmp/almide && almide --version
-
-# Only golemide, comide and onogoro are built on develop, which they need for its HTTP
-# fixes. The tools built on gramide (gramide-cli, hew, ctxgate) stay on v0.64.0: develop
-# resolves gramide's builtin `Map` to gramide's module named map and stops at E029
-# (almide/almide#2839).
-RUN git init -q /tmp/almide064 && cd /tmp/almide064 \
- && git remote add origin https://github.com/almide/almide \
- && git fetch -q --depth 1 origin "refs/tags/v0.64.0:refs/tags/v0.64.0" && git checkout -q v0.64.0 \
- && cargo build --release --locked --bin almide > /tmp/almide064-build.log 2>&1 \
- || { tail -30 /tmp/almide064-build.log; exit 1; }
-RUN install -m 0755 /tmp/almide064/target/release/almide /usr/local/bin/almide064 && rm -rf /tmp/almide064 && almide064 --version
 
 # porta built here, with this glibc. Its develop is rustls only (almide/porta#35), so the
 # binary needs no libssl. porta is built with the Almide above rather than its own pin
@@ -49,8 +38,8 @@ RUN mkdir -p /bundle/bin && install -m 0755 /tmp/porta/porta /bundle/bin/porta &
 
 COPY src/ /src/
 RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide onogoro:onogoro; do \
-      dir="${t%%:*}"; bin="${t##*:}"; compiler=almide064; case "$dir" in golemide|comide|onogoro) compiler=almide ;; esac; \
-      ( cd "/src/$dir" && "$compiler" build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
+      dir="${t%%:*}"; bin="${t##*:}"; \
+      ( cd "/src/$dir" && almide build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
       || { echo "== $dir failed"; tail -30 "/tmp/$bin.log"; exit 1; }; \
     done \
  && /bundle/bin/comide --help > /dev/null && /bundle/bin/golemide --version \
