@@ -9,9 +9,15 @@ The Linux bundle bench/tb2/build-bundle.sh made (COMIDE_TB2_BUNDLE) is copied in
 task container, and comide runs there headless (`comide -p INSTRUCTION --yes`) from the
 task's working directory. It runs inside porta unless COMIDE_TB2_CONFINE=none:
 
-    app   writes only to the working directory and /tmp; network open, because
-          the tasks are allowed the internet; credentials passed by name
-    none  comide runs as it is
+    app      all of comide inside one porta run: writes only to the working directory
+             and /tmp; network open, because the tasks are allowed the internet;
+             credentials passed by name
+    onogoro  comide outside, each tool call confined by porta through onogoro: no key
+             reaches a command, golemide gets the model keys by name, and porta's
+             refusals come back to the model. Commands may also write /usr, /var, /etc
+             and /opt (ONOGORO_WRITABLE): the container is thrown away after the task,
+             and its tasks expect pip and apt to install into the system
+    none     comide runs as it is
 
 Terminal-Bench containers run as root, so porta is given --allow-root. The model is
 comide's own spec (`cf:glm-5.3-flash`, `anthropic:…`, …): Harbor's `-m provider/model`
@@ -79,6 +85,11 @@ class Comide(BaseInstalledAgent):
             args += f" --max-steps {int(steps)}"
         if confine == "none":
             run = f"{INSTALL_DIR}/bin/comide {args}"
+        elif confine == "onogoro":
+            run = (
+                f"ONOGORO_COMIDE={INSTALL_DIR}/bin/comide ONOGORO_PORTA={INSTALL_DIR}/bin/porta"
+                f" ONOGORO_WRITABLE=/usr:/var:/etc:/opt {INSTALL_DIR}/bin/onogoro {args}"
+            )
         else:
             # `porta run CMD [porta's flags] -- [CMD's arguments]`. In a Docker container
             # porta has no user namespace and confines by Landlock alone; it says so on

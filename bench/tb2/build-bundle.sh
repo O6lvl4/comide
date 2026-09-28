@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the Linux bundle Terminal-Bench runs comide from (bench/tb2/Dockerfile) and
-# unpacks it to $OUT/bundle: bin/{comide,golemide,gramide,hew,ctxgate,porta}.
+# unpacks it to $OUT/bundle: bin/{comide,golemide,gramide,hew,ctxgate,porta,onogoro}.
 #
 #   bench/tb2/build-bundle.sh
 #   OUT=/tmp/tb2 PLATFORM=linux/amd64 bench/tb2/build-bundle.sh
@@ -23,7 +23,7 @@ ctx="$OUT/context"
 rm -rf "$ctx" && mkdir -p "$ctx/src"
 cp "$HERE/Dockerfile" "$ctx/"
 : > "$ctx/SOURCES"
-for repo in gramide-cli hew ctxgate golemide comide; do
+for repo in gramide-cli hew ctxgate golemide comide onogoro; do
   dir="$COMPANIONS_DIR/$repo"
   [ -d "$dir/.git" ] || { echo "not a clone: $dir" >&2; exit 2; }
   mkdir -p "$ctx/src/$repo"

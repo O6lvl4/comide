@@ -12,7 +12,8 @@
 #
 #   MODEL     comide's model, as Harbor's provider/model  (default: cf/glm-5.3-flash;
 #             claudecli/sonnet uses this machine's claude login, via claude_bridge.py)
-#   CONFINE   app (porta) or none                         (default: app)
+#   CONFINE   app (all of comide in porta), onogoro (each tool call in porta) or none
+#             (default: app)
 #   TASKS     task names; empty = all
 #   N         tasks in parallel                           (default: 2)
 #   MAX_STEPS comide's --max-steps                        (default: 200; the task's own
