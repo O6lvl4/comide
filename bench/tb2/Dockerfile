@@ -1,7 +1,7 @@
 # comide and everything it runs with, built once for Linux and packed as one directory
 # that a Terminal-Bench task container can take in: comide, golemide, and the tools comide
-# uses when they are there (gramide, hew, ctxgate), porta to confine the run, and onogoro to
-# confine it one tool call at a time (CONFINE=onogoro).
+# uses when they are there (gramide, hew, ctxgate), porta to confine the run, and aitrium to
+# confine it one tool call at a time (CONFINE=aitrium).
 #
 # Built on Debian bullseye (glibc 2.31), the oldest libc among the Terminal-Bench 2.0 task
 # images: a binary linked here runs on every one of them (bookworm, trixie, Ubuntu 24.04).
@@ -9,7 +9,7 @@
 FROM rust:1-bullseye
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# What onogoro rests on: Almide's HTTP client honouring HTTPS_PROXY and a proxy's CA
+# What aitrium rests on: Almide's HTTP client honouring HTTPS_PROXY and a proxy's CA
 # (almide/almide#2833, in v0.65.1-rc2 and later), and porta's credential broker
 # (almide/porta#42, on develop until porta releases it). Commits, not tags or branches,
 # so the bundle can be named. ALMIDE_REF is v0.65.1-rc3.
@@ -38,7 +38,7 @@ RUN mkdir -p /bundle/bin && install -m 0755 /tmp/porta/porta /bundle/bin/porta &
  && /bundle/bin/porta run --help | grep -q -- --credential
 
 COPY src/ /src/
-RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide onogoro:onogoro; do \
+RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide aitrium:aitrium; do \
       dir="${t%%:*}"; bin="${t##*:}"; \
       ( cd "/src/$dir" && almide build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
       || { echo "== $dir failed"; tail -30 "/tmp/$bin.log"; exit 1; }; \

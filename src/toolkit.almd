@@ -55,7 +55,7 @@ effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int,
   }
 
 // A tool's command, through the runner when there is one: `runner KIND -- PROG ARGS…`.
-// The runner decides where and how it runs (onogoro confines each call with porta, and
+// The runner decides where and how it runs (aitrium confines each call with porta, and
 // gives it no keys), and says why when it refuses; that text is the tool's result like
 // any other output. KIND is what the call is for, so a runner can grant each differently:
 // `read` (looking at the project), `shell` (a command the model wrote), `solve` (golemide,

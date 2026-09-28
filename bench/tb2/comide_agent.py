@@ -12,10 +12,10 @@ task's working directory. It runs inside porta unless COMIDE_TB2_CONFINE=none:
     app      all of comide inside one porta run: writes only to the working directory
              and /tmp; network open, because the tasks are allowed the internet;
              credentials passed by name
-    onogoro  comide outside, each tool call confined by porta through onogoro: no key
+    aitrium  comide outside, each tool call confined by porta through aitrium: no key
              reaches a command, golemide gets the model keys by name, and porta's
              refusals come back to the model. Commands may also write /usr, /var, /etc
-             and /opt (ONOGORO_WRITABLE): the container is thrown away after the task,
+             and /opt (AITRIUM_WRITABLE): the container is thrown away after the task,
              and its tasks expect pip and apt to install into the system
     none     comide runs as it is
 
@@ -85,10 +85,10 @@ class Comide(BaseInstalledAgent):
             args += f" --max-steps {int(steps)}"
         if confine == "none":
             run = f"{INSTALL_DIR}/bin/comide {args}"
-        elif confine == "onogoro":
+        elif confine == "aitrium":
             run = (
-                f"ONOGORO_COMIDE={INSTALL_DIR}/bin/comide ONOGORO_PORTA={INSTALL_DIR}/bin/porta"
-                f" ONOGORO_WRITABLE=/usr:/var:/etc:/opt {INSTALL_DIR}/bin/onogoro {args}"
+                f"AITRIUM_COMIDE={INSTALL_DIR}/bin/comide AITRIUM_PORTA={INSTALL_DIR}/bin/porta"
+                f" AITRIUM_WRITABLE=/usr:/var:/etc:/opt {INSTALL_DIR}/bin/aitrium {args}"
             )
         else:
             # `porta run CMD [porta's flags] -- [CMD's arguments]`. In a Docker container
