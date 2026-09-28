@@ -9,10 +9,11 @@
 FROM rust:1-bullseye
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-# Both from develop until they release what onogoro rests on: Almide's HTTP client
-# honouring HTTPS_PROXY and a proxy's CA (almide/almide#2833), and porta's credential
-# broker (almide/porta#42). A commit, not a branch, so the bundle can be named.
-ARG ALMIDE_REF=7b563f7ee30b7715fd1cf8b0631eee0f22c8c598
+# What onogoro rests on: Almide's HTTP client honouring HTTPS_PROXY and a proxy's CA
+# (almide/almide#2833, in v0.65.1-rc2 and later), and porta's credential broker
+# (almide/porta#42, on develop until porta releases it). Commits, not tags or branches,
+# so the bundle can be named. ALMIDE_REF is v0.65.1-rc3.
+ARG ALMIDE_REF=9d80eb004b82235fda52ecf0f4e5f5a43705a4ed
 ARG PORTA_REF=d51cccbf991f
 
 RUN git init -q /tmp/almide && cd /tmp/almide \
