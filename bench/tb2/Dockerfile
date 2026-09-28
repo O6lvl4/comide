@@ -22,9 +22,10 @@ RUN git init -q /tmp/almide && cd /tmp/almide \
  || { tail -30 /tmp/almide-build.log; exit 1; }
 RUN install -m 0755 /tmp/almide/target/release/almide /usr/local/bin/almide && rm -rf /tmp/almide && almide --version
 
-# gramide-cli alone is built on v0.64.0: develop resolves gramide's builtin `Map` to its
-# module named map and stops at E029 (almide/almide#2839). gramide needs none of the
-# HTTP fixes the rest is built on develop for.
+# Only golemide, comide and onogoro are built on develop, which they need for its HTTP
+# fixes. The tools built on gramide (gramide-cli, hew, ctxgate) stay on v0.64.0: develop
+# resolves gramide's builtin `Map` to gramide's module named map and stops at E029
+# (almide/almide#2839).
 RUN git init -q /tmp/almide064 && cd /tmp/almide064 \
  && git remote add origin https://github.com/almide/almide \
  && git fetch -q --depth 1 origin "refs/tags/v0.64.0:refs/tags/v0.64.0" && git checkout -q v0.64.0 \
@@ -48,7 +49,7 @@ RUN mkdir -p /bundle/bin && install -m 0755 /tmp/porta/porta /bundle/bin/porta &
 
 COPY src/ /src/
 RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide onogoro:onogoro; do \
-      dir="${t%%:*}"; bin="${t##*:}"; compiler=almide; [ "$dir" = gramide-cli ] && compiler=almide064; \
+      dir="${t%%:*}"; bin="${t##*:}"; compiler=almide064; case "$dir" in golemide|comide|onogoro) compiler=almide ;; esac; \
       ( cd "/src/$dir" && "$compiler" build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
       || { echo "== $dir failed"; tail -30 "/tmp/$bin.log"; exit 1; }; \
     done \
