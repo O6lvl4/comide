@@ -12,7 +12,7 @@
 #
 #   MODEL     comide's model, as Harbor's provider/model  (default: cf/glm-5.3, comide's own;
 #             claudecli/sonnet uses this machine's claude login, via claude_bridge.py)
-#   CONFINE   app (all of comide in porta), onogoro (each tool call in porta) or none
+#   CONFINE   app (all of comide in porta), aitrium (each tool call in porta) or none
 #             (default: app)
 #   TASKS     task names; empty = all
 #   N         tasks in parallel                           (default: 2)

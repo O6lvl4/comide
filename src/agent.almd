@@ -248,7 +248,7 @@ comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [-
   --max-steps N    model calls per request before it stops to ask (default 40)
   --golemide PATH  the golemide binary (default: $COMIDE_GOLEMIDE, else golemide on PATH)
   --runner PROG    run every tool's command as `PROG KIND -- CMD ARGS...` (default:
-                   $COMIDE_RUNNER, else none); KIND is read, shell or solve. onogoro uses
+                   $COMIDE_RUNNER, else none); KIND is read, shell or solve. aitrium uses
                    it to confine each call and keep the keys out of it
 
 solve runs on golemide's own models (cf:glm-5.3-flash, escalating to cf:glm-5.3);
