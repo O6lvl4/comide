@@ -1,7 +1,7 @@
 """comide as a Harbor agent, for Terminal-Bench 2.0.
 
     harbor run -p ~/workspace/github.com/harbor-framework/terminal-bench-2 \\
-      --agent-import-path comide_agent:Comide -m cf/glm-5.3-flash ...
+      --agent-import-path comide_agent:Comide -m cf/glm-5.3 ...
 
 (with bench/tb2 on PYTHONPATH; bench/tb2/run.sh does all of it.)
 
@@ -74,7 +74,7 @@ class Comide(BaseInstalledAgent):
         )
 
     def comide_model(self) -> str:
-        m = self.model_name or os.environ.get("COMIDE_TB2_MODEL", "cf/glm-5.3-flash")
+        m = self.model_name or os.environ.get("COMIDE_TB2_MODEL", "cf/glm-5.3")
         return m.replace("/", ":", 1) if ":" not in m else m
 
     def command(self, instruction: str) -> str:

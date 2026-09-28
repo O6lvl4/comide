@@ -10,7 +10,7 @@
 # what the bundle (bench/tb2/build-bundle.sh) was built for. That is the one way this
 # differs from the leaderboard's runs.
 #
-#   MODEL     comide's model, as Harbor's provider/model  (default: cf/glm-5.3-flash;
+#   MODEL     comide's model, as Harbor's provider/model  (default: cf/glm-5.3, comide's own;
 #             claudecli/sonnet uses this machine's claude login, via claude_bridge.py)
 #   CONFINE   app (all of comide in porta), onogoro (each tool call in porta) or none
 #             (default: app)
@@ -27,7 +27,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GH="$HOME/workspace/github.com/harbor-framework"
-MODEL="${MODEL:-cf/glm-5.3-flash}"
+MODEL="${MODEL:-cf/glm-5.3}"
 CONFINE="${CONFINE:-app}"
 N="${N:-2}"
 BUNDLE="${BUNDLE:-${TMPDIR:-/tmp}/comide-tb2/bundle}"
