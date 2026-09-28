@@ -4,8 +4,7 @@
 //   map                           gramide map   ranks files against a task
 //   edit, write                   golemide edit the replacement ladder and the syntax gate
 //   solve                         golemide solve --json   edit, verify, retry until it passes
-//   shell                         ctxgate exec  long runner output summarised, exit kept;
-//                                               what it changed in the project found and checked (touched.almd)
+//   shell                         ctxgate exec  long runner output summarised, exit kept
 //
 // None of them is reimplemented here. What this module adds is the schema the model
 // sees and the dispatch; what every tool shares is toolkit.almd, golemide's part
@@ -14,7 +13,6 @@
 import json
 import self.toolkit
 import self.solving
-import self.touched
 import self.web
 
 let SHELL_TIMEOUT_S = 300
@@ -91,14 +89,12 @@ effect fn shell(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   // pipefail: measured on the first conversation, `npm test 2>&1 | tail -30` in a
   // project with no package.json came back exit 0, tail's status, not npm's.
   let bash = ["bash", "-o", "pipefail", "-c", line]
-  let marker = touched.mark(s)!
   let (code, out) = if s.ctxgate then toolkit.run_in(s, "shell", "ctxgate", ["exec", "--"] + bash, toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
     else toolkit.run_in(s, "shell", "bash", list.drop(bash, 1), toolkit.int_arg(a, "timeout_s", SHELL_TIMEOUT_S))!
-  let (wrote, wrote_brief) = touched.report(touched.after(s, marker)!)
   let status = if code == -1 then "did not finish: " else "exit " + int.to_string(code) + "\n"
-  let brief = (if code == -1 then "did not finish: " + toolkit.first_line_of(out, 80) else "exit " + int.to_string(code) + " · " + toolkit.count_lines(out)) + wrote_brief
+  let brief = if code == -1 then "did not finish: " + toolkit.first_line_of(out, 80) else "exit " + int.to_string(code) + " · " + toolkit.count_lines(out)
   let hint = if code != 0 and code != -1 and solving.checks_work(command) then solving.solve_hint(command) else ""
-  if code == 0 then toolkit.said(toolkit.capped(s, status + out)! + wrote, brief) else toolkit.failed(toolkit.capped(s, status + out)! + hint + wrote, brief)
+  if code == 0 then toolkit.said(toolkit.capped(s, status + out)!, brief) else toolkit.failed(toolkit.capped(s, status + out)! + hint, brief)
 }
 
 effect fn run(s: toolkit.Setup, name: String, arguments: String) -> toolkit.ToolResult =
