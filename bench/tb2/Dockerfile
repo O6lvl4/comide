@@ -1,6 +1,7 @@
 # comide and everything it runs with, built once for Linux and packed as one directory
 # that a Terminal-Bench task container can take in: comide, golemide, and the tools comide
-# uses when they are there (gramide, hew, ctxgate), and porta to confine the run.
+# uses when they are there (gramide, hew, ctxgate), porta to confine the run, and onogoro to
+# confine it one tool call at a time (CONFINE=onogoro).
 #
 # Built on Debian bullseye (glibc 2.31), the oldest libc among the Terminal-Bench 2.0 task
 # images: a binary linked here runs on every one of them (bookworm, trixie, Ubuntu 24.04).
@@ -32,7 +33,7 @@ RUN mkdir -p /bundle/bin && install -m 0755 /tmp/porta/porta /bundle/bin/porta &
  && ! ldd /bundle/bin/porta | grep -q ssl && /bundle/bin/porta --version
 
 COPY src/ /src/
-RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide; do \
+RUN for t in gramide-cli:gramide hew:hew ctxgate:ctxgate golemide:golemide comide:comide onogoro:onogoro; do \
       dir="${t%%:*}"; bin="${t##*:}"; \
       ( cd "/src/$dir" && almide build --release src/main.almd -o "$bin" > "/tmp/$bin.log" 2>&1 && install -m 0755 "$bin" "/bundle/bin/$bin" ) \
       || { echo "== $dir failed"; tail -30 "/tmp/$bin.log"; exit 1; }; \
