@@ -3,7 +3,10 @@
 </p>
 
 <p align="center">A coding agent in the terminal, in the line of Claude Code, Codex and Aider,<br>that hands its code changes to golemide.</p>
-<p align="center"><a href="README_ja.md">日本語</a></p>
+<p align="center">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/English-24292f?style=flat-square"></a>
+  <a href="README.ja.md"><img alt="日本語" src="https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-d0d7de?style=flat-square"></a>
+</p>
 
 ```sh
 comide                                # a conversation in this directory; /exit to leave
