@@ -91,9 +91,9 @@ type Place = { setup: toolkit.Setup, fresh: options.Session, transcript: String,
 // What the tools work with: the project, golemide, a scratch directory of this process's
 // own, and the helpers found on this machine.
 effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
-  let scratch = (string.strip_suffix(env.temp_dir(), "/") ?? env.temp_dir()) + "/comide-" + int.to_string(process.pid())
+  let scratch = (string.strip_suffix(fs.temp_dir(), "/") ?? fs.temp_dir()) + "/comide-" + int.to_string(process.pid())
   fs.mkdir_p(scratch)!
-  let has_ctxgate = match process.exec_status("bash", ["-c", "command -v ctxgate"]) { ok(st) => st.code == 0, err(_) => false }
+  let has_ctxgate = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v ctxgate"] }) { ok(st) => st.code == 0, err(_) => false }
   let searx = string.strip_suffix(env.get("COMIDE_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
   // The model solve runs on, golemide's defaults unless set; the strong one follows it,
   // so a run on one provider stays on it.

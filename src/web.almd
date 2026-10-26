@@ -16,7 +16,7 @@ fn search_url(base: String, query: String) -> String =
 
 // The engines SearXNG asked that did not answer, each reported as [name, reason].
 fn silent_engines(d: Value) -> List[String] =
-  list.filter_map(json.get_array(d, "unresponsive_engines") ?? [], (e) => match value.as_array(e) {
+  list.filter_map(value.get_array(d, "unresponsive_engines") ?? [], (e) => match value.as_array(e) {
     ok(pair) => match list.first(pair) { some(n) => match value.as_string(n) { ok(name) => some(name), err(_) => none }, none => none },
     err(_) => none,
   })
@@ -29,15 +29,15 @@ fn search_results(body: String, max: Int) -> (String, Int) =
     ok(d) => {
       var out: List[String] = []
       var n = 0
-      for r in list.take(json.get_array(d, "results") ?? [], max) {
+      for r in list.take(value.get_array(d, "results") ?? [], max) {
         n = n + 1
         let snippet = string.trim(toolkit.str_arg(r, "content"))
         list.push(out, int.to_string(n) + ". " + toolkit.str_arg(r, "title") + "\n   " + toolkit.str_arg(r, "url")
           + (if snippet == "" then "" else "\n   " + string.take(snippet, SNIPPET_CHARS)))
       }
       let silent = silent_engines(d)
-      let note = if list.is_empty(silent) then "" else "\n(did not answer: " + string.join(silent, ", ") + ")"
-      ((if n == 0 then "no results" else string.join(out, "\n")) + note, n)
+      let note = if list.is_empty(silent) then "" else "\n(did not answer: " + list.join(silent, ", ") + ")"
+      ((if n == 0 then "no results" else list.join(out, "\n")) + note, n)
     },
   }
 
@@ -76,11 +76,11 @@ effect fn hop(address: String, accept: String, public_only: Bool, left: Int) -> 
   if left == 0 then Got { status: 0, body: "", error: "more than " + int.to_string(WEB_HOPS) + " redirects" }
   else if public_only and private_host(host_of(address)) then
     Got { status: 0, body: "", error: "redirected to " + host_of(address) + ", which is on this machine or a private network" }
-  else match http.request_response("GET", address, "", ["User-Agent": UA, "Accept": accept]) {
+  else match http.send(http.new_request("GET", address, "", [("User-Agent", UA), ("Accept", accept)])) {
     err(e) => Got { status: 0, body: "", error: toolkit.first_line_of(e, 200) },
     ok(r) => {
-      let code = http.status_code(r)
-      let target = if code >= 300 and code < 400 then http.get_header(r, "Location") else none
+      let code = http.status(r)
+      let target = if code >= 300 and code < 400 then http.header(r, "Location") else none
       match target {
         some(t) => hop(resolve(address, t), accept, public_only, left - 1)!,
         none => Got { status: code, body: http.body(r), error: "" },

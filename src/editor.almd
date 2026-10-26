@@ -60,7 +60,7 @@ fn frame(u: ui.Ui, e: Ed, placeholder: String, status: String, commands: List[Co
 effect fn draw(above: Int, f: Frame) -> Int = {
   let back = if above > 0 then "\u{1b}[" + int.to_string(above) + "A" else ""
   let up = list.len(f.lines) - 1 - f.line
-  io.print("\u{1b}[?25l" + back + "\r\u{1b}[J" + string.join(f.lines, "\n")
+  io.print("\u{1b}[?25l" + back + "\r\u{1b}[J" + list.join(f.lines, "\n")
     + (if up > 0 then "\u{1b}[" + int.to_string(up) + "A" else "") + "\r"
     + (if f.col > 0 then "\u{1b}[" + int.to_string(f.col) + "C" else "") + "\u{1b}[?25h")
   f.line
@@ -78,7 +78,7 @@ fn echo(u: ui.Ui, s: String) -> String = {
     list.push(out, (if i == 0 then ui.dim(u, "❯ ") else "  ") + ui.dim(u, l))
     i = i + 1
   }
-  string.join(out, "\n")
+  list.join(out, "\n")
 }
 
 // ---- history ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ effect fn load_history(path: String) -> List[String] =
   }
 
 effect fn remember(path: String, s: String) -> Unit = {
-  let _ = fs.append(path, json.stringify(value.str(s)) + "\n")
+  let _ = fs.append_text(path, json.stringify(value.string(s)) + "\n")
   ()
 }
 

@@ -17,9 +17,9 @@ fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options = { ...o, tui: tui,
 // outlives the turn, so "now also handle X" is checked the same way.
 type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String }
 
-// `read_line_opt`, not `read_line`: the loop has to tell an empty line (a person
-// pressing return) from the end of input, and `read_line` answers "" for both.
-effect fn read_input() -> String? = match io.read_line_opt() {
+// `read_line` answers `String?`: the loop has to tell an empty line (a person
+// pressing return, `some("")`) from the end of input (`none`).
+effect fn read_input() -> String? = match io.read_line() {
   some(l) => some(string.trim_end(l)),
   none => none,
 }

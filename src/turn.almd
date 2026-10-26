@@ -29,7 +29,7 @@ effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
   var t = Turn { messages: s.messages + [convo.message("user", user)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
     tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false }
   while not t.done { t = step(opts, setup, s, { ...t, messages: convo.compacted(t.messages) })! }
-  let _ = fs.write(setup.scratch + "/transcript.json", json.stringify(value.array(t.messages)))
+  let _ = fs.write_text(setup.scratch + "/transcript.json", json.stringify(value.array(t.messages)))
   // A turn stopped before the model said anything cost nothing and did nothing; a line
   // of zeros under it would only be noise.
   if not (t.interrupted and t.steps == 0) then
@@ -151,7 +151,7 @@ effect fn run_check(opts: options.Options, setup: toolkit.Setup, command: String
     options.show(opts, ui.result_line(u, "not run", true))!
     ("", false, false, p.allow_from_now)
   } else {
-    let r = tools.run(setup, "shell", json.stringify(value.object([("command", value.str(command))])))!
+    let r = tools.run(setup, "shell", json.stringify(value.object([("command", value.string(command))])))!
     options.show(opts, ui.result_line(u, r.brief, r.failed))!
     (r.text, r.failed, true, p.allow_from_now)
   }
@@ -171,5 +171,5 @@ effect fn finish_answer(opts: options.Options, r: model.Reply, printed: Int) -> 
 // without this, the steps it paid for before the cap were recorded as nothing.
 effect fn record_cost(total: Float) -> Unit = {
   let path = env.get("COMIDE_COST_FILE") ?? ""
-  if path != "" then { let _ = fs.write(path, convo.usd(total) + "\n") }
+  if path != "" then { let _ = fs.write_text(path, convo.usd(total) + "\n") }
 }

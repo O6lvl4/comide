@@ -49,7 +49,7 @@ fn under_root(s: Setup, p: String) -> String =
 fn relative(s: Setup, text: String) -> String = string.replace(text, s.root + "/", "")
 
 effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
-  match process.exec_status_timeout(prog, args, timeout_s * 1000) {
+  match process.output(process.ProcessCommand { cmd: prog, args: args, timeout_ms: timeout_s * 1000 }) {
     ok(st) => (st.code, string.trim_end(st.stdout + (if string.trim(st.stderr) == "" then "" else "\n" + st.stderr))),
     err(e) => (-1, e),
   }
@@ -67,18 +67,18 @@ effect fn run_in(s: Setup, kind: String, prog: String, args: List[String], timeo
 effect fn capped(s: Setup, text: String) -> String =
   if string.len(text) <= MAX_RESULT_CHARS then text
   else {
-    let path = s.scratch + "/output-" + int.to_string(env.millis()) + ".txt"
-    let _ = fs.write(path, text)
+    let path = s.scratch + "/output-" + int.to_string(datetime.now_ms()) + ".txt"
+    let _ = fs.write_text(path, text)
     string.take(text, KEEP_EACH_END)
       + "\n\n[… " + int.to_string(string.len(text) - 2 * KEEP_EACH_END) + " characters left out. The whole output is in "
       + path + ": read it with lines or grep.]\n\n"
       + string.drop(text, string.len(text) - KEEP_EACH_END)
   }
 
-fn str_arg(a: Value, k: String) -> String = json.get_string(a, k) ?? ""
+fn str_arg(a: Value, k: String) -> String = value.get_string(a, k) ?? ""
 fn strings(a: Value, k: String) -> List[String] =
-  list.filter_map(json.get_array(a, k) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
-fn int_arg(a: Value, k: String, d: Int) -> Int = json.get_int(a, k) ?? (int.parse(json.get_string(a, k) ?? "") ?? d)
+  list.filter_map(value.get_array(a, k) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
+fn int_arg(a: Value, k: String, d: Int) -> Int = value.get_int(a, k) ?? (int.parse(value.get_string(a, k) ?? "") ?? d)
 
 test "paths resolve against the root, and results read relative to it" {
   let s = Setup { root: "/w/proj", golemide: "golemide", scratch: "/tmp", ctxgate: false, searx: "http://127.0.0.1:8888", solve_model: "", solve_strong: "", runner: "" }

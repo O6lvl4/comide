@@ -4,6 +4,7 @@
 
 import process
 import self.agent
+import env
 
 let USAGE = """
 comide                              a coding conversation in this directory
@@ -23,10 +24,10 @@ local fn chat_args(args: List[String]) -> List[String]? = {
 }
 
 effect fn main() -> Unit = {
-  match chat_args(process.args()) {
+  match chat_args(["comide"] + env.args()) {
     some(rest) => process.exit(agent.cli(rest)!),
     none => {
-      eprintln("unknown command: " + (list.get(process.args(), 1) ?? ""))
+      eprintln("unknown command: " + (list.get(env.args(), 0) ?? ""))
       eprintln(USAGE)
       process.exit(2)
     },

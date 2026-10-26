@@ -20,14 +20,14 @@ let SHELL_TIMEOUT_S = 300
 // ---- the schema the model sees -------------------------------------------------------
 
 fn prop(name: String, kind: String, desc: String) -> (String, Value) =
-  (name, value.object([("type", value.str(kind)), ("description", value.str(desc))]))
+  (name, value.object([("type", value.string(kind)), ("description", value.string(desc))]))
 
 fn tool(name: String, desc: String, props: List[(String, Value)], required: List[String]) -> Value =
-  value.object([("type", value.str("function")), ("function", value.object([
-    ("name", value.str(name)),
-    ("description", value.str(desc)),
-    ("parameters", value.object([("type", value.str("object")), ("properties", value.object(props)),
-      ("required", value.array(list.map(required, (r) => value.str(r))))])),
+  value.object([("type", value.string("function")), ("function", value.object([
+    ("name", value.string(name)),
+    ("description", value.string(desc)),
+    ("parameters", value.object([("type", value.string("object")), ("properties", value.object(props)),
+      ("required", value.array(list.map(required, (r) => value.string(r))))])),
   ]))])
 
 fn definitions() -> List[Value] = [

@@ -20,7 +20,7 @@ fn fresh(check: String) -> Work = Work { check: check, dirty: false, failing: fa
 
 fn arg(arguments: String, key: String) -> String =
   match json.parse(arguments) {
-    ok(a) => json.get_string(a, key) ?? "",
+    ok(a) => value.get_string(a, key) ?? "",
     err(_) => "",
   }
 
@@ -60,7 +60,7 @@ fn at_finish(w: Work, rounds: Int) -> Finish =
 
 fn check_failed_note(command: String, output: String) -> String =
   "comide ran `" + command + "` after your last change, and it fails:\n\n" + output
-    + "\n\nThe work is not done. Fix it (solve can take it, with verify = " + json.stringify(value.str(command))
+    + "\n\nThe work is not done. Fix it (solve can take it, with verify = " + json.stringify(value.string(command))
     + "), or, if it cannot pass, say why."
 
 fn still_failing_note(command: String) -> String =

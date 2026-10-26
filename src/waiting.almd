@@ -25,11 +25,11 @@ let CALL_MAX_MS = 930000
 
 // Waits for the request, and in a conversation shows it arriving.
 effect fn await_reply(opts: options.Options, c: model.Call) -> Result[Heard, String] = {
-  let t0 = env.millis()
+  let t0 = datetime.now_ms()
   var shown = Shown { printed: 0, spinning: false }
   var frame = 0
   var interrupted = false
-  while not model.is_done(c)! and env.millis() - t0 <= CALL_MAX_MS and not interrupted {
+  while not model.is_done(c)! and datetime.now_ms() - t0 <= CALL_MAX_MS and not interrupted {
     interrupted = pause(opts)!
     if opts.live then { shown = progress(opts, c, shown, frame, t0)! }
     frame = frame + 1
@@ -64,7 +64,7 @@ effect fn progress(opts: options.Options, c: model.Call, shown: Shown, frame: In
     println((if shown.printed == 0 then "\n" else "") + convo.answer_lines(u, string.slice(text, shown.printed, upto), shown.printed == 0))
     Shown { printed: upto, spinning: false }
   } else if shown.printed == 0 and u.color then {
-    io.print(ui.waiting(u, frame / 3, (env.millis() - t0) / 1000, "Thinking", if opts.tui then "esc to interrupt" else ""))
+    io.print(ui.waiting(u, frame / 3, (datetime.now_ms() - t0) / 1000, "Thinking", if opts.tui then "esc to interrupt" else ""))
     Shown { printed: 0, spinning: true }
   } else shown
 }
@@ -80,7 +80,7 @@ effect fn call_model(opts: options.Options, scratch: String, messages: List[Valu
     err(e) => if tries + 1 < convo.MODEL_TRIES and convo.retryable(e) then {
       // A little jitter, so parallel sessions hit by the same outage do not come back
       // in step.
-      let wait = convo.retry_wait_ms(tries) + env.millis() % 1000
+      let wait = convo.retry_wait_ms(tries) + datetime.now_ms() % 1000
       options.show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in " + int.to_string(wait / 1000) + "s"))!
       env.sleep_ms(wait)
       call_model(opts, scratch, messages, tries + 1)

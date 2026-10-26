@@ -6,10 +6,10 @@ import json
 import self.model
 import self.ui
 
-fn message(role: String, content: String) -> Value = value.object([("role", value.str(role)), ("content", value.str(content))])
+fn message(role: String, content: String) -> Value = value.object([("role", value.string(role)), ("content", value.string(content))])
 
 fn tool_message(id: String, content: String) -> Value =
-  value.object([("role", value.str("tool")), ("tool_call_id", value.str(id)), ("content", value.str(content))])
+  value.object([("role", value.string("tool")), ("tool_call_id", value.string(id)), ("content", value.string(content))])
 
 // A tool result has to answer to the id of the call it belongs to. A provider that
 // leaves the id empty gets one made up here, before the assistant message is recorded.
@@ -25,16 +25,16 @@ fn with_ids(calls: List[model.ToolCall], step: Int) -> List[model.ToolCall] = {
 }
 
 fn assistant_message(content: String, calls: List[model.ToolCall]) -> Value = {
-  var fields = [("role", value.str("assistant")), ("content", value.str(content))]
+  var fields = [("role", value.string("assistant")), ("content", value.string(content))]
   if not list.is_empty(calls) then list.push(fields, ("tool_calls", value.array(list.map(calls, (c) => value.object([
-    ("id", value.str(c.id)), ("type", value.str("function")),
-    ("function", value.object([("name", value.str(c.name)), ("arguments", value.str(c.arguments))])),
+    ("id", value.string(c.id)), ("type", value.string("function")),
+    ("function", value.object([("name", value.string(c.name)), ("arguments", value.string(c.arguments))])),
   ])))))
   value.object(fields)
 }
 
 fn usd(x: Float) -> String = {
-  let micros = float.to_int(x * 1000000.0 + 0.5)
+  let micros = int.from_saturating(x * 1000000.0 + 0.5)
   "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
 }
 
@@ -49,7 +49,7 @@ fn answer_lines(u: ui.Ui, chunk: String, first: Bool) -> String = {
     list.push(out, (if i == 0 and first then "⏺ " else "  ") + ui.render(u, l))
     i = i + 1
   }
-  string.join(out, "\n")
+  list.join(out, "\n")
 }
 
 fn final_text(r: model.Reply) -> String =
@@ -95,8 +95,8 @@ let KEEP_RECENT_TOOL_RESULTS = 6
 let OLD_RESULT_CHARS = 400
 let SHORTENED = "\n[… an older result, shortened. Run the tool again if you need it whole.]"
 
-fn content_of(m: Value) -> String = json.get_string(m, "content") ?? ""
-fn is_tool(m: Value) -> Bool = (json.get_string(m, "role") ?? "") == "tool"
+fn content_of(m: Value) -> String = value.get_string(m, "content") ?? ""
+fn is_tool(m: Value) -> Bool = (value.get_string(m, "role") ?? "") == "tool"
 
 fn compacted(messages: List[Value]) -> List[Value] = {
   let size = list.fold(messages, 0, (acc, m) => acc + string.len(content_of(m)))
@@ -124,7 +124,7 @@ fn compacted(messages: List[Value]) -> List[Value] = {
 // An old tool result cut to its opening, or none when it is short already.
 fn shortened(m: Value) -> Value? = {
   let c = content_of(m)
-  if string.len(c) > OLD_RESULT_CHARS + string.len(SHORTENED) then some(tool_message(json.get_string(m, "tool_call_id") ?? "", string.take(c, OLD_RESULT_CHARS) + SHORTENED))
+  if string.len(c) > OLD_RESULT_CHARS + string.len(SHORTENED) then some(tool_message(value.get_string(m, "tool_call_id") ?? "", string.take(c, OLD_RESULT_CHARS) + SHORTENED))
   else none
 }
 
@@ -153,7 +153,7 @@ test "a long conversation keeps its recent tool results whole and shortens the o
   let sizes = list.map(list.filter(out, is_tool), (m) => string.len(content_of(m)))
   assert(list.all(list.take(sizes, 4), (n) => n < 1000))
   assert(list.all(list.drop(sizes, 4), (n) => n == 30000))
-  assert_eq(json.get_string(list.get(out, 2) ?? message("", ""), "tool_call_id"), some("c0"))
+  assert_eq(value.get_string(list.get(out, 2) ?? message("", ""), "tool_call_id"), some("c0"))
   // A short conversation is sent as it is.
   assert_eq(compacted([message("user", "hi")]), [message("user", "hi")])
 }

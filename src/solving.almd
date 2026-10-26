@@ -15,14 +15,14 @@ let REPORT_MARGIN_S = 30
 // golemide edit reads its request on stdin; the request goes through a file so the
 // timeout-bounded runner, which has no stdin, can still be used.
 effect fn golemide_edit(s: toolkit.Setup, request: Value, create: Bool) -> toolkit.ToolResult = {
-  let req_path = s.scratch + "/edit-" + int.to_string(env.millis()) + ".json"
-  let _ = fs.write(req_path, json.stringify(request))
+  let req_path = s.scratch + "/edit-" + int.to_string(datetime.now_ms()) + ".json"
+  let _ = fs.write_text(req_path, json.stringify(request))
   let script = "exec \"$0\" edit --root \"$1\"" + (if create then " --create" else "") + " < \"$2\""
   let (code, out) = toolkit.run_in(s, "solve", "bash", ["-c", script, s.golemide, s.root, req_path], 60)!
   let _ = fs.remove(req_path)
   match json.parse(out) {
     err(_) => toolkit.failed("golemide edit failed (exit " + int.to_string(code) + "): " + string.take(out, 2000), "golemide edit failed (exit " + int.to_string(code) + ")"),
-    ok(r) => if json.get_bool(r, "ok") ?? false then written(s, r)!
+    ok(r) => if value.get_bool(r, "ok") ?? false then written(s, r)!
       else toolkit.failed(toolkit.capped(s, "Not written: " + toolkit.str_arg(r, "error"))!, "refused: " + toolkit.first_line_of(toolkit.str_arg(r, "error"), 90)),
   }
 }
@@ -35,8 +35,8 @@ effect fn written(s: toolkit.Setup, r: Value) -> toolkit.ToolResult = {
   let diff = toolkit.str_arg(r, "diff")
   let already = list.any(matched, (m) => string.contains(m, "already made"))
   let text = if diff == "" and already then "Nothing written: " + toolkit.str_arg(r, "path") + " already has this change."
-    else "Written: " + toolkit.str_arg(r, "path") + " (" + int.to_string(json.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
-    + (if list.is_empty(matched) then "" else "\nnote: " + string.join(matched, "; "))
+    else "Written: " + toolkit.str_arg(r, "path") + " (" + int.to_string(value.get_int(r, "bytes") ?? 0) + " bytes, syntax checked by " + checked + ")"
+    + (if list.is_empty(matched) then "" else "\nnote: " + list.join(matched, "; "))
     + "\n" + diff
   let lines = string.split(diff, "\n")
   let counted = "+" + int.to_string(list.len(list.filter(lines, (l) => string.starts_with(l, "+ "))))
@@ -46,11 +46,11 @@ effect fn written(s: toolkit.Setup, r: Value) -> toolkit.ToolResult = {
 }
 
 effect fn edit(s: toolkit.Setup, a: Value) -> toolkit.ToolResult =
-  golemide_edit(s, value.object([("path", value.str(toolkit.str_arg(a, "path"))),
-    ("replacements", value.array([value.object([("old", value.str(toolkit.str_arg(a, "old"))), ("new", value.str(toolkit.str_arg(a, "new")))])]))]), false)!
+  golemide_edit(s, value.object([("path", value.string(toolkit.str_arg(a, "path"))),
+    ("replacements", value.array([value.object([("old", value.string(toolkit.str_arg(a, "old"))), ("new", value.string(toolkit.str_arg(a, "new")))])]))]), false)!
 
 effect fn write(s: toolkit.Setup, a: Value) -> toolkit.ToolResult =
-  golemide_edit(s, value.object([("path", value.str(toolkit.str_arg(a, "path"))), ("source", value.str(toolkit.str_arg(a, "content")))]), true)!
+  golemide_edit(s, value.object([("path", value.string(toolkit.str_arg(a, "path"))), ("source", value.string(toolkit.str_arg(a, "content")))]), true)!
 
 // Whether a command looks like one that says if the work is done: a test run or a build.
 fn checks_work(command: String) -> Bool = {
@@ -63,9 +63,9 @@ fn checks_work(command: String) -> Bool = {
 // did every edit itself on the conversation model, at 13 times golemide's cost for the
 // same 64/64. The rule was in the system prompt; the failing run is where it is needed.
 fn solve_hint(command: String) -> String =
-  "\n\n(This command failed. solve can make it pass: call solve with verify = " + json.stringify(value.str(command)) + " and the change stated as the task.)"
+  "\n\n(This command failed. solve can make it pass: call solve with verify = " + json.stringify(value.string(command)) + " and the change stated as the task.)"
 
-fn solve_summary(doc: Value) -> String = string.join(outcome_lines(doc) + evidence_lines(doc), "\n")
+fn solve_summary(doc: Value) -> String = list.join(outcome_lines(doc) + evidence_lines(doc), "\n")
 
 // How it ended: the status, which models did the work, the files changed, warnings, time
 // lost to rate limits. The models and the wait are on the first line, the one the person
@@ -73,13 +73,13 @@ fn solve_summary(doc: Value) -> String = string.join(outcome_lines(doc) + eviden
 // that was mostly waiting on a rate limit should not read as a slow model.
 fn outcome_lines(doc: Value) -> List[String] = {
   let changed = toolkit.strings(doc, "changed")
-  let throttled = json.get_int(doc, "throttled") ?? 0
-  let waited_s = (json.get_int(doc, "throttled_ms") ?? 0) / 1000
-  let models = list.unique(list.filter(list.map(json.get_array(doc, "attempt_log") ?? [], (t) => toolkit.str_arg(t, "model")), (m) => m != ""))
-  [toolkit.str_arg(doc, "status") + " (exit " + int.to_string(json.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(json.get_int(doc, "attempts") ?? 0) + " attempt(s)"
-    + (if list.is_empty(models) then "" else " · " + string.join(models, ", "))
+  let throttled = value.get_int(doc, "throttled") ?? 0
+  let waited_s = (value.get_int(doc, "throttled_ms") ?? 0) / 1000
+  let models = list.unique(list.filter(list.map(value.get_array(doc, "attempt_log") ?? [], (t) => toolkit.str_arg(t, "model")), (m) => m != ""))
+  [toolkit.str_arg(doc, "status") + " (exit " + int.to_string(value.get_int(doc, "exit") ?? -1) + ") after " + int.to_string(value.get_int(doc, "attempts") ?? 0) + " attempt(s)"
+    + (if list.is_empty(models) then "" else " · " + list.join(models, ", "))
     + (if waited_s > 0 then " · " + int.to_string(waited_s) + "s rate-limited" else "")]
-    + (if list.is_empty(changed) then [] else ["changed: " + string.join(changed, ", ")])
+    + (if list.is_empty(changed) then [] else ["changed: " + list.join(changed, ", ")])
     + list.map(toolkit.strings(doc, "warnings"), (w) => "warning: " + w)
     + (if throttled > 0 then ["rate limited " + int.to_string(throttled) + " time(s), " + int.to_string(waited_s) + "s spent waiting"] else [])
     + (if toolkit.str_arg(doc, "message") != "" then [toolkit.str_arg(doc, "message")] else [])
@@ -96,12 +96,12 @@ test "the first line names the models that did the work and the time lost to rat
 // What the next decision needs: the last change's explanation, the diff, and the end of
 // the last verify output.
 fn evidence_lines(doc: Value) -> List[String] = {
-  let last = option.map(list.last(json.get_array(doc, "attempt_log") ?? []), (t) => toolkit.str_arg(t, "explanation")) ?? ""
+  let last = option.map(list.last(value.get_array(doc, "attempt_log") ?? []), (t) => toolkit.str_arg(t, "explanation")) ?? ""
   (if last != "" then ["last change: " + last] else [])
     + (if toolkit.str_arg(doc, "diff") != "" then ["what it changed, from before its first write:\n" + toolkit.str_arg(doc, "diff")] else [])
-    + match value.field(doc, "last_verify") {
-      ok(v) => ["last verify, exit " + int.to_string(json.get_int(v, "exit") ?? -1) + ":\n" + toolkit.str_arg(v, "output_tail")],
-      err(_) => [],
+    + match value.get(doc, "last_verify") {
+      some(v) => ["last verify, exit " + int.to_string(value.get_int(v, "exit") ?? -1) + ":\n" + toolkit.str_arg(v, "output_tail")],
+      none => [],
     }
 }
 
@@ -121,8 +121,8 @@ effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
     ok(doc) => solve_summary(doc),
     err(_) => "golemide solve failed (exit " + int.to_string(code) + "):\n" + out,
   }
-  let spent = match parsed { ok(doc) => json.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
-  let solved = match parsed { ok(doc) => json.get_bool(doc, "ok") ?? false, err(_) => false }
+  let spent = match parsed { ok(doc) => value.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
+  let solved = match parsed { ok(doc) => value.get_bool(doc, "ok") ?? false, err(_) => false }
   toolkit.ToolResult { text: toolkit.capped(s, text)!, brief: toolkit.first_line_of(text, 90), failed: not solved, cost_usd: spent }
 }
 
@@ -151,7 +151,7 @@ fn at_least(have: List[Int], need: List[Int]) -> Bool = {
 // the start, rather than as a failed edit in the middle of a task.
 effect fn golemide_problem(bin: String) -> String = {
   let (code, said_back) = toolkit.run_program(bin, ["--version"], 10)!
-  let need = string.join(list.map(GOLEMIDE_NEEDED, (n) => int.to_string(n)), ".")
+  let need = list.join(list.map(GOLEMIDE_NEEDED, (n) => int.to_string(n)), ".")
   if code != 0 and string.contains(said_back, "unknown command") then
     "golemide at " + bin + " is older than " + need + ": edit, write and solve need " + need + " or later"
   else if code != 0 then

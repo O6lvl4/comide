@@ -29,7 +29,7 @@ fn none_key() -> Key = key("none")
 // The arguments are this file's own constants and a `stty -g` string, which is letters,
 // digits, `:` and `=`; nothing here needs quoting.
 effect fn stty(args: List[String]) -> (Int, String) =
-  match process.exec_status("sh", ["-c", "stty " + string.join(args, " ") + " < /dev/tty"]) {
+  match process.output(process.ProcessCommand { cmd: "sh", args: ["-c", "stty " + list.join(args, " ") + " < /dev/tty"] }) {
     ok(st) => (st.code, string.trim(st.stdout)),
     err(e) => (-1, e),
   }
@@ -38,7 +38,7 @@ effect fn stty(args: List[String]) -> (Int, String) =
 // does use `exec_status_timeout`, because it is the call that passes stdin on, and
 // `test -t` only looks.
 effect fn is_tty() -> Bool =
-  match process.exec_status_timeout("sh", ["-c", "test -t 0"], 3000) {
+  match process.output(process.ProcessCommand { cmd: "sh", args: ["-c", "test -t 0"], timeout_ms: 3000 }) {
     ok(st) => st.code == 0,
     err(_) => false,
   }
@@ -80,7 +80,7 @@ fn control(b: Int) -> Key =
   if b == 13 or b == 10 then key("enter")
   else if b == 9 then key("tab")
   else if b == 127 or b == 8 then key("backspace")
-  else if b >= 1 and b <= 26 then Key { kind: "ctrl", text: string.from_bytes([b + 96]) }
+  else if b >= 1 and b <= 26 then Key { kind: "ctrl", text: bytes.to_string_lossy(bytes.from_list([b + 96])) }
   else none_key()
 
 // The key a CSI sequence (`ESC [` params final) stands for.
@@ -108,7 +108,7 @@ fn after_escape(b: Int) -> Key =
   else key("esc")
 
 // One byte, or -1 when nothing came within the read timeout.
-fn byte() -> Int = io.read_byte()
+fn byte() -> Int = io.read(io.stdin()!, 1)!
 
 // The rest of a pasted block, up to `ESC [ 2 0 1 ~`. Returns and carriage returns are
 // the terminal's line ends and become newlines.
@@ -126,7 +126,7 @@ fn read_paste() -> String = {
       if n >= 6 and list.drop(bytes, n - 6) == [27, 91, 50, 48, 49, 126] then { bytes = list.take(bytes, n - 6); going = false }
     }
   }
-  string.replace(string.replace(string.from_bytes(bytes), "\r\n", "\n"), "\r", "\n")
+  string.replace(string.replace(bytes.to_string_lossy(bytes.from_list(bytes)), "\r\n", "\n"), "\r", "\n")
 }
 
 fn read_csi() -> Key = {
@@ -136,10 +136,10 @@ fn read_csi() -> Key = {
   while going {
     let b = byte()
     if b < 0 then going = false
-    else if b >= 64 and b <= 126 then { final = string.from_bytes([b]); going = false }
+    else if b >= 64 and b <= 126 then { final = bytes.to_string_lossy(bytes.from_list([b])); going = false }
     else list.push(params, b)
   }
-  let k = csi(string.from_bytes(params), final)
+  let k = csi(bytes.to_string_lossy(bytes.from_list(params)), final)
   if k.kind == "paste_start" then Key { kind: "paste", text: read_paste() } else k
 }
 
@@ -159,7 +159,7 @@ fn read_escaped() -> Key = {
   else if n == 91 then read_csi()
   else if n == 79 then {
     let f = byte()
-    if f < 0 then key("esc") else csi("", string.from_bytes([f]))
+    if f < 0 then key("esc") else csi("", bytes.to_string_lossy(bytes.from_list([f])))
   }
   else after_escape(n)
 }
@@ -169,7 +169,7 @@ fn read_char(first: Int) -> Key = {
   var bytes = [first]
   var i = 1
   while i < utf8_len(first) { let c = byte(); if c >= 0 then list.push(bytes, c); i = i + 1 }
-  Key { kind: "char", text: string.from_bytes(bytes) }
+  Key { kind: "char", text: bytes.to_string_lossy(bytes.from_list(bytes)) }
 }
 
 test "control bytes and escape sequences name the keys they are" {

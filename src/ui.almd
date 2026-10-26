@@ -54,9 +54,9 @@ let WIDE_RANGES = [(4352, 4447), (11904, 42191), (44032, 55203), (63744, 64255),
 
 fn wide(cp: Int) -> Bool = list.any(WIDE_RANGES, (r) => cp >= r.0 and cp <= r.1)
 
-fn char_columns(c: String) -> Int = match string.codepoint(c) { some(cp) => if wide(cp) then 2 else 1, none => 1 }
+fn char_columns(c: String) -> Int = match string.to_codepoint(c) { some(cp) => if wide(cp) then 2 else 1, none => 1 }
 
-fn columns(s: String) -> Int = list.fold(string.chars(s), 0, (n, c) => n + char_columns(c))
+fn columns(s: String) -> Int = list.fold(string.to_list(s), 0, (n, c) => n + char_columns(c))
 
 // The start of `s` that fits in `room` columns, with an ellipsis when something was cut.
 // A line wider than the terminal wraps, and a wrapped line throws off every redraw that
@@ -67,7 +67,7 @@ fn fit(s: String, room: Int) -> String =
     var out = ""
     var used = 0
     var going = true
-    for c in string.chars(s) {
+    for c in string.to_list(s) {
       if going and used + char_columns(c) <= room - 1 then { out = out + c; used = used + char_columns(c) } else { going = false }
     }
     out + "…"
@@ -82,7 +82,7 @@ fn box_line(u: Ui, plain: String, styled: String) -> String =
 fn banner(u: Ui, model: String, root: String) -> String = {
   let inner = u.width - 2
   let place = fit_path(root, inner - string.len(model) - 5)
-  string.join([
+  list.join([
     dim(u, "╭" + string.repeat("─", inner) + "╮"),
     box_line(u, " ✻ comide · a coding conversation", " " + yellow(u, "✻") + " " + bold(u, "comide") + dim(u, " · a coding conversation")),
     box_line(u, " " + model + " · " + place, " " + cyan(u, model) + dim(u, " · " + place)),
@@ -170,7 +170,7 @@ fn code_spans(u: Ui, s: String) -> String = {
 
 // ---- asking to run something ----------------------------------------------------------
 
-fn permission(u: Ui, question: String) -> String = string.join([
+fn permission(u: Ui, question: String) -> String = list.join([
   "  " + dim(u, "⎿ ") + bold(u, question),
   "     " + dim(u, "1.") + " Yes",
   "     " + dim(u, "2.") + " Yes, and stop asking this session",
