@@ -108,7 +108,7 @@ effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: S
   var result: Prompted? = none
   b = Box { ed: b.ed, above: draw(0, frame(u, b.ed, placeholder, status, commands))!, history_at: b.history_at, draft: b.draft, armed: b.armed }
   while option.is_none(result) {
-    let k = term.read_key()
+    let k = term.read_key()!
     if k.kind != "none" then {
       let (next, done) = on_key(b, k, history, commands)
       match done {
@@ -237,8 +237,8 @@ effect fn choose(u: ui.Ui, question: String, options: List[String]) -> Int = {
 }
 
 effect fn next_key() -> term.Key = {
-  var k = term.read_key()
-  while k.kind == "none" { k = term.read_key() }
+  var k = term.read_key()!
+  while k.kind == "none" { k = term.read_key()! }
   k
 }
 

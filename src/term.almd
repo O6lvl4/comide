@@ -108,68 +108,71 @@ fn after_escape(b: Int) -> Key =
   else key("esc")
 
 // One byte, or -1 when nothing came within the read timeout.
-fn byte() -> Int = io.read(io.stdin()!, 1)!
+effect fn byte() -> Int = {
+  let b = io.read(io.stdin()!, 1)!
+  bytes.get_or(b, 0, -1)
+}
 
 // The rest of a pasted block, up to `ESC [ 2 0 1 ~`. Returns and carriage returns are
 // the terminal's line ends and become newlines.
-fn read_paste() -> String = {
-  var bytes: List[Int] = []
+effect fn read_paste() -> String = {
+  var buf: List[Int] = []
   var going = true
   var idle = 0
   while going {
-    let b = byte()
+    let b = byte()!
     if b < 0 then { idle = idle + 1; if idle > 20 then going = false }
     else {
       idle = 0
-      list.push(bytes, b)
-      let n = list.len(bytes)
-      if n >= 6 and list.drop(bytes, n - 6) == [27, 91, 50, 48, 49, 126] then { bytes = list.take(bytes, n - 6); going = false }
+      list.push(buf, b)
+      let n = list.len(buf)
+      if n >= 6 and list.drop(buf, n - 6) == [27, 91, 50, 48, 49, 126] then { buf = list.take(buf, n - 6); going = false }
     }
   }
-  string.replace(string.replace(bytes.to_string_lossy(bytes.from_list(bytes)), "\r\n", "\n"), "\r", "\n")
+  string.replace(string.replace(bytes.to_string_lossy(bytes.from_list(buf)), "\r\n", "\n"), "\r", "\n")
 }
 
-fn read_csi() -> Key = {
+effect fn read_csi() -> Key = {
   var params: List[Int] = []
   var final = ""
   var going = true
   while going {
-    let b = byte()
+    let b = byte()!
     if b < 0 then going = false
     else if b >= 64 and b <= 126 then { final = bytes.to_string_lossy(bytes.from_list([b])); going = false }
     else list.push(params, b)
   }
   let k = csi(bytes.to_string_lossy(bytes.from_list(params)), final)
-  if k.kind == "paste_start" then Key { kind: "paste", text: read_paste() } else k
+  if k.kind == "paste_start" then Key { kind: "paste", text: read_paste()! } else k
 }
 
 // The next key, or `none` when nothing was pressed within a tenth of a second.
-fn read_key() -> Key = {
-  let b = byte()
+effect fn read_key() -> Key = {
+  let b = byte()!
   if b < 0 then none_key()
-  else if b == 27 then read_escaped()
+  else if b == 27 then read_escaped()!
   else if b < 32 or b == 127 then control(b)
-  else read_char(b)
+  else read_char(b)!
 }
 
 // What follows an Esc: nothing (Esc itself), a CSI or SS3 sequence, or Alt with a key.
-fn read_escaped() -> Key = {
-  let n = byte()
+effect fn read_escaped() -> Key = {
+  let n = byte()!
   if n < 0 then key("esc")
-  else if n == 91 then read_csi()
+  else if n == 91 then read_csi()!
   else if n == 79 then {
-    let f = byte()
+    let f = byte()!
     if f < 0 then key("esc") else csi("", bytes.to_string_lossy(bytes.from_list([f])))
   }
   else after_escape(n)
 }
 
 // A character: its first byte says how many more UTF-8 bytes follow.
-fn read_char(first: Int) -> Key = {
-  var bytes = [first]
+effect fn read_char(first: Int) -> Key = {
+  var buf = [first]
   var i = 1
-  while i < utf8_len(first) { let c = byte(); if c >= 0 then list.push(bytes, c); i = i + 1 }
-  Key { kind: "char", text: bytes.to_string_lossy(bytes.from_list(bytes)) }
+  while i < utf8_len(first) { let c = byte()!; if c >= 0 then list.push(buf, c); i = i + 1 }
+  Key { kind: "char", text: bytes.to_string_lossy(bytes.from_list(buf)) }
 }
 
 test "control bytes and escape sequences name the keys they are" {

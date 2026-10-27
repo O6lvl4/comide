@@ -47,7 +47,7 @@ effect fn await_reply(opts: options.Options, c: model.Call) -> Result[Heard, Str
 // timeout, so Esc or Ctrl+C stops the request mid-answer: true when one was pressed.
 effect fn pause(opts: options.Options) -> Bool =
   if opts.tui then {
-    let k = term.read_key()
+    let k = term.read_key()!
     k.kind == "esc" or (k.kind == "ctrl" and k.text == "c")
   } else {
     env.sleep_ms(100)

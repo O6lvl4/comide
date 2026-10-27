@@ -68,7 +68,7 @@ let WEB_TIMEOUT_SECS = "20"
 // hop is held to `private_host` and not only the address the model gave: a public page
 // may redirect anywhere. The read timeout is the runtime's process-wide knob.
 effect fn get(address: String, accept: String, public_only: Bool) -> Got = {
-  env.set("ALMIDE_HTTP_TIMEOUT_SECS", WEB_TIMEOUT_SECS)
+  env.set("ALMIDE_HTTP_TIMEOUT_SECS", WEB_TIMEOUT_SECS)!
   hop(address, accept, public_only, WEB_HOPS)!
 }
 
