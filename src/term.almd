@@ -110,7 +110,7 @@ fn after_escape(b: Int) -> Key =
 // One byte, or -1 when nothing came within the read timeout.
 effect fn byte() -> Int = {
   let b = io.read(io.stdin()!, 1)!
-  bytes.get_or(b, 0, -1)
+  bytes.get(b, 0) ?? -1
 }
 
 // The rest of a pasted block, up to `ESC [ 2 0 1 ~`. Returns and carriage returns are
