@@ -14,6 +14,8 @@ import json
 import self.toolkit
 import self.solving
 import self.web
+import self.skills
+import fs
 
 let SHELL_TIMEOUT_S = 300
 
@@ -56,6 +58,8 @@ fn definitions() -> List[Value] = [
     [prop("query", "string", "the search query"), prop("max_results", "integer", "how many results (default 8)")], ["query"]),
   tool("web_fetch", "Read a web page on the public internet as text: a result from web_search, or an address the user gave. Long pages are shortened, and the whole text is kept in a file you can read with read (lines or grep).",
     [prop("url", "string", "the http or https address")], ["url"]),
+  tool("skill", "Open a skill by name: a procedure written down for one kind of task. The skills that exist are listed at the start of the conversation; when a request matches one, open it before doing the work and follow it.",
+    [prop("name", "string", "the skill's name, as listed")], ["name"]),
 ]
 
 // ---- running them --------------------------------------------------------------------
@@ -111,7 +115,20 @@ effect fn looked(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult
   if name == "read" then some(read(s, a)!)
   else if name == "outline" or name == "tree" or name == "search" then some(hew_listing(s, name, a)!)
   else if name == "map" then some(map(s, a)!)
+  else if name == "skill" then some(skill(s, a)!)
   else none
+
+// A skill's text, read now that it is wanted. Nothing is run: a skill is words.
+effect fn skill(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let name = toolkit.str_arg(a, "name")
+  match list.find(s.skills, (row) => row.0 == name) {
+    none => toolkit.failed("There is no skill called " + name + ". The skills are: " + (if list.is_empty(s.skills) then "(none)" else list.join(list.map(s.skills, (row) => row.0), ", ")), "no such skill"),
+    some(row) => match fs.read_text(row.1) {
+      err(e) => toolkit.failed("The skill " + name + " could not be read: " + e, "could not be read"),
+      ok(text) => toolkit.said(toolkit.capped(s, skills.opened(row.1, text))!, toolkit.count_lines(skills.body(text))),
+    },
+  }
+}
 
 // The tools that change something, run something, or reach outside.
 effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult =
@@ -147,7 +164,7 @@ fn call_label(name: String, arguments: String) -> String =
   }
 
 // The tools one argument of which says what the call is about.
-let LABEL_ARGS = [("map", "task"), ("shell", "command"), ("web_search", "query"), ("web_fetch", "url")]
+let LABEL_ARGS = [("skill", "name"), ("map", "task"),("shell", "command"), ("web_search", "query"), ("web_fetch", "url")]
 
 fn label_of(name: String, a: Value) -> String = {
   let arg = (k: String) => toolkit.str_arg(a, k)

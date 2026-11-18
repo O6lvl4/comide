@@ -1,0 +1,182 @@
+// Skills: procedures written down for particular kinds of task, each a directory with a
+// SKILL.md in it (the layout Claude Code and most agents after it share).
+//
+// Only the names and one line each go into the conversation at the start. A skill's text
+// is read when the model asks for it by name (the `skill` tool), so twenty skills cost
+// twenty lines, not twenty files, in every request.
+//
+// Where they are looked for, the first place that has a name winning it:
+//
+//   .claude/skills and .agents/skills in the project
+//   ~/.config/comide/skills
+//   ~/.claude/skills
+//   the directories in $COMIDE_SKILLS (separated by `:`)
+
+import fs
+import env
+
+type Skill = { name: String, about: String, file: String }
+
+let MAX_ABOUT_CHARS = 400
+let MAX_LISTED = 60
+
+// The `key: value` lines between the two `---` at the top of a file. A line that starts
+// with a space continues the value above it, which is how a long description is wrapped.
+fn front(text: String) -> List[(String, String)] = {
+  let lines = string.split(text, "\n")
+  var out: List[(String, String)] = []
+  if string.trim(list.first(lines) ?? "") != "---" then out
+  else {
+    var open = true
+    var key = ""
+    var val = ""
+    for l in list.drop(lines, 1) {
+      if open then {
+        if string.trim(l) == "---" then { open = false }
+        else if (string.starts_with(l, " ") or string.starts_with(l, "\t")) and key != "" then { val = string.trim(val + " " + string.trim(l)) }
+        else match string.split_once(l, ":") {
+          some((k, v)) => {
+            if key != "" then { list.push(out, (key, val)) }
+            key = string.trim(k)
+            val = unquoted(string.trim(v))
+          },
+          none => (),
+        }
+      }
+    }
+    if key != "" then { list.push(out, (key, val)) }
+    out
+  }
+}
+
+fn unquoted(v: String) -> String =
+  if v == ">" or v == "|" or v == ">-" or v == "|-" then ""
+  else if string.len(v) > 1 and ((string.starts_with(v, "\"") and string.ends_with(v, "\"")) or (string.starts_with(v, "'") and string.ends_with(v, "'")))
+  then string.slice(v, 1, string.len(v) - 1) else v
+
+fn field(fm: List[(String, String)], name: String) -> String =
+  match list.find(fm, (row) => row.0 == name) { some(row) => row.1, none => "" }
+
+// What follows the front matter, or the whole text when there is none.
+fn body(text: String) -> String = {
+  let lines = string.split(text, "\n")
+  if string.trim(list.first(lines) ?? "") != "---" then string.trim(text)
+  else {
+    var rest: List[String] = []
+    var open = true
+    for l in list.drop(lines, 1) {
+      if open then { if string.trim(l) == "---" then { open = false } }
+      else list.push(rest, l)
+    }
+    string.trim(list.join(rest, "\n"))
+  }
+}
+
+fn first_words(text: String) -> String = {
+  let lines = list.filter(string.split(text, "\n"), (l) => string.trim(l) != "" and not string.starts_with(string.trim(l), "#"))
+  string.trim(list.first(lines) ?? "")
+}
+
+fn short(s: String) -> String = if string.len(s) > MAX_ABOUT_CHARS then string.take(s, MAX_ABOUT_CHARS) + "…" else s
+
+// A skill from its file: named by its front matter, else by its directory; described by
+// its front matter, else by the first thing it says.
+fn skill_of(file: String, dir_name: String, text: String) -> Skill = {
+  let fm = front(text)
+  let named = field(fm, "name")
+  let about = field(fm, "description")
+  Skill { name: if named == "" then dir_name else named, about: short(if about == "" then first_words(body(text)) else about), file: file }
+}
+
+fn places(root: String, config: String, home: String, named: List[String]) -> List[String] =
+  [root + "/.claude/skills", root + "/.agents/skills", config + "/comide/skills", home + "/.claude/skills"] + named
+
+fn base(p: String) -> String = list.last(string.split(string.strip_suffix(p, "/") ?? p, "/")) ?? p
+
+effect fn found(dirs: List[String]) -> List[Skill] = {
+  var out: List[Skill] = []
+  var names: List[String] = []
+  for d in dirs {
+    if fs.is_dir(d) then {
+      for entry in list.sort(fs.list_dir(d) ?? []) {
+        let file = d + "/" + base(entry) + "/SKILL.md"
+        if fs.is_file(file) then {
+          match fs.read_text(file) {
+            err(_) => (),
+            ok(text) => {
+              let sk = skill_of(file, base(entry), text)
+              if not list.contains(names, sk.name) then { list.push(names, sk.name); list.push(out, sk) }
+            },
+          }
+        }
+      }
+    }
+  }
+  out
+}
+
+effect fn for_project(root: String) -> List[Skill] = {
+  let config = env.get("XDG_CONFIG_HOME") ?? ""
+  let home = env.get("HOME") ?? ""
+  let named = list.filter(list.map(string.split(env.get("COMIDE_SKILLS") ?? "", ":"), (p) => string.trim(p)), (p) => p != "")
+  found(places(root, if config == "" then home + "/.config" else config, home, named))!
+}
+
+// What the model is told at the start: the names and a line each. "" when there are none.
+fn section(all: List[Skill]) -> String =
+  if list.is_empty(all) then ""
+  else "Skills: procedures written down for particular kinds of task. When a request matches one, call the skill tool with its name first, and follow what it says.\n"
+    + list.join(list.map(list.take(all, MAX_LISTED), (s) => "- " + s.name + ": " + s.about), "\n")
+    + (if list.len(all) > MAX_LISTED then "\n(" + int.to_string(list.len(all) - MAX_LISTED) + " more are not listed)" else "")
+
+fn index(all: List[Skill]) -> List[(String, String)] = list.map(all, (s) => (s.name, s.file))
+
+// A skill's text as the model reads it, with where its other files are.
+fn opened(file: String, text: String) -> String = {
+  let dir = string.strip_suffix(file, "/SKILL.md") ?? file
+  body(text) + "\n\n(This skill's own files are in " + dir + "; read the ones it refers to with read.)"
+}
+
+test "the front matter gives the name and the description, wrapped or quoted" {
+  let text = "---\nname: deploy\ndescription: \"Ship the app.\"\n---\n\n# Deploy\n\nRun make deploy.\n"
+  assert_eq(skill_of("/s/deploy/SKILL.md", "deploy-dir", text), Skill { name: "deploy", about: "Ship the app.", file: "/s/deploy/SKILL.md" })
+  let wrapped = "---\nname: review\ndescription: >\n  Read the diff,\n  then say what is wrong.\n---\nBody."
+  assert_eq(skill_of("f", "d", wrapped).about, "Read the diff, then say what is wrong.")
+}
+
+test "without front matter the directory names it and its first words describe it" {
+  let s = skill_of("/s/notes/SKILL.md", "notes", "# Notes\n\nKeep a log of what changed.\n\nMore.")
+  assert_eq(s.name, "notes")
+  assert_eq(s.about, "Keep a log of what changed.")
+}
+
+test "the body is what follows the front matter" {
+  assert_eq(body("---\nname: a\n---\n\nDo this.\nThen that.\n"), "Do this.\nThen that.")
+  assert_eq(body("Just text."), "Just text.")
+}
+
+test "the start of the conversation gets a line per skill, not the skills" {
+  let all = [Skill { name: "deploy", about: "Ship the app.", file: "/s/deploy/SKILL.md" }]
+  assert(string.ends_with(section(all), "\n- deploy: Ship the app."))
+  assert_eq(section([]), "")
+  assert_eq(index(all), [("deploy", "/s/deploy/SKILL.md")])
+}
+
+test "skills are found a directory each, and the first place to name one keeps it" {
+  let dir = fs.create_temp_dir("comide-skills")!
+  fs.mkdir_p(dir + "/a/deploy")!
+  fs.mkdir_p(dir + "/a/empty")!
+  fs.mkdir_p(dir + "/b/deploy")!
+  fs.mkdir_p(dir + "/b/review")!
+  fs.write_text(dir + "/a/deploy/SKILL.md", "---\nname: deploy\ndescription: the project's\n---\nx")!
+  fs.write_text(dir + "/b/deploy/SKILL.md", "---\nname: deploy\ndescription: the person's\n---\ny")!
+  fs.write_text(dir + "/b/review/SKILL.md", "Read the diff.")!
+  let all = found([dir + "/a", dir + "/absent", dir + "/b"])!
+  assert_eq(list.map(all, (s) => s.name + "=" + s.about), ["deploy=the project's", "review=Read the diff."])
+  let _ = fs.remove_all(dir)
+}
+
+test "an opened skill says where its other files are" {
+  assert_eq(opened("/s/deploy/SKILL.md", "---\nname: deploy\n---\nRun make deploy."),
+    "Run make deploy.\n\n(This skill's own files are in /s/deploy; read the ones it refers to with read.)")
+}

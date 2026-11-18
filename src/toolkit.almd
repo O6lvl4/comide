@@ -15,11 +15,12 @@ import process
 // COMIDE_RUNNER): see `run_in`.
 // `solve_notes` is what the project says about how its code is written, passed to golemide
 // under every solve task (briefing.almd, COMIDE_SOLVE_INSTRUCTIONS); "" for nothing.
+// `skills` is each skill's name and its SKILL.md (skills.almd), for the skill tool to open.
 // `solve_timeout_s` is how long one solve may hold the conversation (COMIDE_SOLVE_TIMEOUT_S).
 // It was 1800: a solve slowed by a rate limit then outlasted a 600 s task budget with the
 // model never getting a turn to try another way.
 type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, searx: String, solve_model: String, solve_strong: String, runner: String,
-  solve_timeout_s: Int = 300, solve_notes: String = "" }
+  solve_timeout_s: Int = 300, solve_notes: String = "", skills: List[(String, String)] = [] }
 
 // What goes back to the model; the one line the person watching sees under the call;
 // whether that line is bad news; and what the tool spent on a model of its own (solve
