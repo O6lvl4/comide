@@ -121,7 +121,10 @@ effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
   ok(toolkit.Setup { root: opts.root, golemide: opts.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx,
     solve_model: solve_model, solve_strong: if solve_strong != "" then solve_strong else solve_model,
     runner: opts.runner, solve_timeout_s: solve_timeout_s, solve_notes: briefing.for_solve()!,
-    skills: skills.index(skills.for_project(opts.root)!), memory_file: memory.file_for(env.get("HOME") ?? "", opts.root) })
+    skills: skills.index(skills.for_project(opts.root)!), memory_file: memory.file_for(env.get("HOME") ?? "", opts.root),
+    depth: int.parse(string.trim(env.get("COMIDE_DEPTH") ?? "")) ?? 0,
+    self_bin: if string.trim(env.get("COMIDE_BIN") ?? "") == "" then "comide" else string.trim(env.get("COMIDE_BIN") ?? ""),
+    explore_model: if string.trim(env.get("COMIDE_EXPLORE_MODEL") ?? "") == "" then opts.model else string.trim(env.get("COMIDE_EXPLORE_MODEL") ?? "") })
 }
 
 effect fn chat(opts0: options.Options) -> Result[Int, String] = {

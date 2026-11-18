@@ -16,6 +16,7 @@ import self.solving
 import self.web
 import self.skills
 import self.memory
+import self.exploring
 import fs
 
 let SHELL_TIMEOUT_S = 300
@@ -61,6 +62,8 @@ fn definitions() -> List[Value] = [
     [prop("url", "string", "the http or https address")], ["url"]),
   tool("skill", "Open a skill by name: a procedure written down for one kind of task. The skills that exist are listed at the start of the conversation; when a request matches one, open it before doing the work and follow it.",
     [prop("name", "string", "the skill's name, as listed")], ["name"]),
+  tool("explore", "Hand a question about the code to a helper that looks on its own and comes back with the answer. Use it when answering would take many reads whose output you do not need to keep: where something is handled, how a feature works across files, what calls what. The helper sees none of this conversation, so put everything it needs in the task, and say what the answer should contain (paths, line numbers, names). It cannot change files or run commands. For one file or one symbol you can already name, read it yourself.",
+    [prop("task", "string", "the question, with everything the helper needs to know to answer it")], ["task"]),
   tool("remember", "Keep one fact for later sessions in this project: a correction the user made, a preference they stated, or where something is that took steps to find. One sentence that will still make sense on its own. Not what the code or its history already says, and not what only matters to this request.",
     [prop("note", "string", "the fact, in one sentence")], ["note"]),
 ]
@@ -120,6 +123,7 @@ effect fn looked(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult
   else if name == "map" then some(map(s, a)!)
   else if name == "skill" then some(skill(s, a)!)
   else if name == "remember" then some(remember(s, a)!)
+  else if name == "explore" then some(exploring.explore(s, a)!)
   else none
 
 // A note for later sessions, added to the project's file (memory.almd). It asks no
@@ -177,7 +181,7 @@ fn call_label(name: String, arguments: String) -> String =
   }
 
 // The tools one argument of which says what the call is about.
-let LABEL_ARGS = [("skill", "name"), ("remember", "note"),("map", "task"),("shell", "command"), ("web_search", "query"), ("web_fetch", "url")]
+let LABEL_ARGS = [("explore", "task"), ("skill", "name"),("remember", "note"),("map", "task"),("shell", "command"), ("web_search", "query"), ("web_fetch", "url")]
 
 fn label_of(name: String, a: Value) -> String = {
   let arg = (k: String) => toolkit.str_arg(a, k)
@@ -232,7 +236,7 @@ fn subject_of(name: String, arguments: String) -> (String, String) =
       else if name == "web_search" then (name, arg("query"))
       else if name == "skill" then (name, arg("name"))
       else if name == "remember" then (name, arg("note"))
-      else if name == "map" then (name, arg("task"))
+      else if name == "map" or name == "explore" then (name, arg("task"))
       else (name, if arg("path") == "" then "." else arg("path"))
     },
   }
