@@ -72,10 +72,19 @@ class Comide(BaseInstalledAgent):
         if not (bundle / "bin" / "comide").is_file():
             raise RuntimeError(f"COMIDE_TB2_BUNDLE has no bin/comide: {bundle}")
         await environment.upload_dir(bundle, INSTALL_DIR)
+        # What the model that talks is told beside the task (comide's COMIDE_INSTRUCTIONS),
+        # when the caller names files for it: copied in next to the bundle.
+        for i, path in enumerate(self.instruction_files()):
+            await environment.upload_file(path, f"{INSTALL_DIR}/instructions-{i}.md")
         await self.exec_as_root(
             environment,
             command=f"chmod -R a+rX {INSTALL_DIR} && chmod a+x {INSTALL_DIR}/bin/* && {INSTALL_DIR}/bin/comide --help > /dev/null",
         )
+
+    @staticmethod
+    def instruction_files() -> list[Path]:
+        named = os.environ.get("COMIDE_TB2_INSTRUCTIONS", "")
+        return [Path(p).expanduser() for p in named.split(":") if p.strip()]
 
     def comide_model(self) -> str:
         m = self.model_name or os.environ.get("COMIDE_TB2_MODEL", "cf/glm-5.3")
@@ -101,20 +110,22 @@ class Comide(BaseInstalledAgent):
             # $HOME is not granted: it is /root here, and where a task image has a
             # /root/.ssh, Landlock cannot keep it closed inside a grant of /root, so porta
             # refuses the run (break-filter-js-from-html).
-            passed = ",".join(CREDENTIALS + SOLVE_MODELS + ("COMIDE_COST_FILE", "TERM", "LANG"))
+            passed = ",".join(CREDENTIALS + SOLVE_MODELS + ("COMIDE_COST_FILE", "COMIDE_INSTRUCTIONS", "TERM", "LANG"))
             run = (
                 f"{INSTALL_DIR}/bin/porta run {INSTALL_DIR}/bin/comide --allow-root"
                 ' -v "$PWD" -v /tmp'
                 f" --env-pass {passed}"
                 f" -- {args}"
             )
+        files = ":".join(f"{INSTALL_DIR}/instructions-{i}.md" for i, _ in enumerate(self.instruction_files()))
+        told = f" COMIDE_INSTRUCTIONS={files}" if files else ""
         # golemide, hew, ctxgate and gramide are found on PATH, next to comide. The cost
         # goes to /tmp and is copied to /logs/agent after the run: on Docker Desktop,
         # /logs/agent is a host-shared mount that Landlock will not let porta write
         # (almide/porta#36). It is also copied every 20 s while comide runs, because a run
         # that reaches the task's timeout is killed before the copy after it.
         return (
-            f'export PATH="{INSTALL_DIR}/bin:$PATH" COMIDE_COST_FILE=/tmp/comide-cost.txt; '
+            f'export PATH="{INSTALL_DIR}/bin:$PATH" COMIDE_COST_FILE=/tmp/comide-cost.txt{told}; '
             "( while sleep 20; do cp /tmp/comide-cost.txt /logs/agent/cost.txt 2>/dev/null; done ) & "
             f"{run} > /logs/agent/comide.txt 2> /logs/agent/comide.stderr.txt; "
             # comide's own exit is recorded, not returned: the verifier decides the task,

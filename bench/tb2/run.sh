@@ -15,6 +15,8 @@
 #   COMIDE_SOLVE_MODEL, COMIDE_SOLVE_STRONG_MODEL
 #             golemide's models for solve, as comide's own PROVIDER:MODEL; passed into
 #             the task when set                           (default: golemide's own)
+#   INSTRUCTIONS  files the model that talks is told beside the task, colon separated;
+#             copied into the task and named in COMIDE_INSTRUCTIONS (default: none)
 #   CONFINE   app (all of comide in porta), aitrium (each tool call in porta) or none
 #             (default: app)
 #   TASKS     task names; empty = all
@@ -57,6 +59,7 @@ include=()
 for t in ${TASKS:-}; do include+=(-i "$t"); done
 
 export COMIDE_TB2_BUNDLE="$BUNDLE" COMIDE_TB2_CONFINE="$CONFINE"
+export COMIDE_TB2_INSTRUCTIONS="${INSTRUCTIONS:-}"
 export COMIDE_TB2_MAX_STEPS="${MAX_STEPS:-200}"
 export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 
