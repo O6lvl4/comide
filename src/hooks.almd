@@ -1,0 +1,130 @@
+// Hooks: the person's own commands, run at fixed points of a session.
+//
+// The names and the shape are the ones Claude Code set and other agents took up, so a
+// hook written for one reads the same here:
+//
+//   "hooks": {
+//     "PreToolUse":  [ { "matcher": "shell|edit", "hooks": [ { "type": "command", "command": "./check.sh" } ] } ],
+//     "PostToolUse": [ ... ],  "UserPromptSubmit": [ ... ],  "Stop": [ ... ],  "SessionStart": [ ... ]
+//   }
+//
+// A hook is a shell command, run in the project root. It gets one JSON object on stdin:
+// `hook_event_name`, `session_id`, `cwd`, and for a tool `tool_name`, `tool_input`,
+// `tool_response`, for a request `prompt`. Its exit status is its answer:
+//
+//   0      go on. What it printed is added for the model at SessionStart and
+//          UserPromptSubmit, and otherwise dropped.
+//   2      stop. What it wrote to stderr is the reason, and goes to the model: the tool
+//          is not run (PreToolUse), the result carries the objection (PostToolUse), the
+//          request is not sent (UserPromptSubmit), the work is not finished (Stop).
+//   other  the hook itself failed. The person is told; the session goes on.
+//
+// `matcher` is the tool names a hook is for, separated by `|`, with `*` for any run of
+// characters; left out, every tool. The tools are comide's (shell, edit, write, read,
+// solve, ...), not another agent's.
+//
+// A hook is not confined and does not go through the runner: it is the person's command,
+// not the model's. That is why a project's hooks are not used until the project is
+// trusted (settings.almd).
+
+import json
+import process
+import self.rules
+
+let TIMEOUT_S = 60
+
+type Hook = { command: String, timeout_s: Int }
+
+fn applies(matcher: String, tool: String) -> Bool =
+  string.trim(matcher) == "" or list.any(string.split(matcher, "|"), (m) => rules.glob(string.trim(m), tool))
+
+// The commands to run for an event, in the order written. `tool` is "" for the events
+// that are not about a tool, and then every entry applies.
+fn for_event(hooks: Value, event: String, tool: String) -> List[Hook] =
+  list.flat_map(value.get_array(hooks, event) ?? [], (entry) =>
+    if tool != "" and not applies(value.get_string(entry, "matcher") ?? "", tool) then []
+    else list.filter_map(value.get_array(entry, "hooks") ?? [], (h) => {
+      let command = string.trim(value.get_string(h, "command") ?? "")
+      if command == "" then none else some(Hook { command: command, timeout_s: value.get_int(h, "timeout") ?? TIMEOUT_S })
+    }))
+
+// What a hook reads on stdin.
+fn input(event: String, session: String, root: String, tool: String, tool_input: Value, tool_response: String, prompt: String) -> String = {
+  var fields = [("hook_event_name", value.string(event)), ("session_id", value.string(session)), ("cwd", value.string(root))]
+  if tool != "" then { list.push(fields, ("tool_name", value.string(tool))); list.push(fields, ("tool_input", tool_input)) }
+  if tool_response != "" then { list.push(fields, ("tool_response", value.string(tool_response))) }
+  if prompt != "" then { list.push(fields, ("prompt", value.string(prompt))) }
+  json.stringify(value.object(fields))
+}
+
+// What the hooks of one event came to: whether one said stop and why, what they printed,
+// and the failures the person should hear of.
+type Outcome = { stopped: Bool, reason: String, printed: String, failures: List[String] }
+
+fn quiet() -> Outcome = Outcome { stopped: false, reason: "", printed: "", failures: [] }
+
+// One hook's exit, added to what came before it.
+fn after(o: Outcome, h: Hook, code: Int, out: String, errs: String) -> Outcome =
+  if code == 0 then { ...o, printed: string.trim(o.printed + "\n" + string.trim(out)) }
+  else if code == 2 then { ...o, stopped: true, reason: if string.trim(errs) == "" then "the hook `" + h.command + "` said stop, and gave no reason" else string.trim(errs) }
+  else { ...o, failures: o.failures + ["the hook `" + h.command + "` failed (exit " + int.to_string(code) + "): " + string.take(string.trim(errs + " " + out), 200)] }
+
+// The hooks of an event, run in order until one says stop.
+effect fn run(hooks: Value, event: String, tool: String, root: String, stdin: String) -> Outcome = {
+  var o = quiet()
+  for h in for_event(hooks, event, tool) {
+    if not o.stopped then {
+      o = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", h.command], dir: root, stdin: stdin, timeout_ms: h.timeout_s * 1000 }) {
+        ok(st) => after(o, h, st.code, st.stdout, st.stderr),
+        err(e) => after(o, h, -1, "", e),
+      }
+    }
+  }
+  o
+}
+
+fn parsed(text: String) -> Value = json.parse(if string.trim(text) == "" then "{}" else text) ?? value.object([])
+
+fn any_for(hooks: Value, event: String) -> Bool = not list.is_empty(value.get_array(hooks, event) ?? [])
+
+test "a hook is for the tools its matcher names, and for all of them when it names none" {
+  let hooks = parsed("{\"PreToolUse\":[{\"matcher\":\"shell|ed*\",\"hooks\":[{\"type\":\"command\",\"command\":\"a\"}]},{\"hooks\":[{\"command\":\"b\",\"timeout\":5}]}],\"Stop\":[{\"hooks\":[{\"command\":\"c\"},{\"command\":\"  \"}]}]}")
+  assert_eq(for_event(hooks, "PreToolUse", "shell"), [Hook { command: "a", timeout_s: 60 }, Hook { command: "b", timeout_s: 5 }])
+  assert_eq(for_event(hooks, "PreToolUse", "edit"), [Hook { command: "a", timeout_s: 60 }, Hook { command: "b", timeout_s: 5 }])
+  assert_eq(for_event(hooks, "PreToolUse", "read"), [Hook { command: "b", timeout_s: 5 }])
+  assert_eq(for_event(hooks, "Stop", ""), [Hook { command: "c", timeout_s: 60 }])
+  assert_eq(for_event(hooks, "PostToolUse", "shell"), [])
+  assert(any_for(hooks, "Stop"))
+  assert(not any_for(hooks, "SessionStart"))
+}
+
+test "exit 0 goes on with what was printed, exit 2 stops with the reason, anything else is the hook's own failure" {
+  let h = Hook { command: "./check.sh", timeout_s: 60 }
+  assert_eq(after(quiet(), h, 0, "use pnpm\n", ""), Outcome { stopped: false, reason: "", printed: "use pnpm", failures: [] })
+  assert_eq(after(quiet(), h, 2, "", "no pushing on Fridays\n"), Outcome { stopped: true, reason: "no pushing on Fridays", printed: "", failures: [] })
+  assert(string.contains(after(quiet(), h, 2, "", "").reason, "gave no reason"))
+  let failed = after(quiet(), h, 127, "", "check.sh: not found")
+  assert(not failed.stopped)
+  assert_eq(failed.failures, ["the hook `./check.sh` failed (exit 127): check.sh: not found"])
+}
+
+test "a hook reads the event, and for a tool its name and what it was called with" {
+  let i = parsed(input("PreToolUse", "s1", "/w/p", "shell", parsed("{\"command\":\"git push\"}"), "", ""))
+  assert_eq(value.get_string(i, "hook_event_name"), some("PreToolUse"))
+  assert_eq(value.get_string(i, "tool_name"), some("shell"))
+  assert_eq(value.get_string(value.get(i, "tool_input") ?? value.null(), "command"), some("git push"))
+  assert_eq(value.get(i, "prompt"), none)
+  assert_eq(value.get_string(parsed(input("UserPromptSubmit", "s1", "/w/p", "", value.null(), "", "fix it")), "prompt"), some("fix it"))
+}
+
+test "hooks run in the project, read their input, and the first to say stop ends the run" {
+  let hooks = parsed("{\"PreToolUse\":[{\"hooks\":[{\"command\":\"cat > seen.json; pwd\"},{\"command\":\"echo no >&2; exit 2\"},{\"command\":\"touch never\"}]}]}")
+  let dir = fs_temp()!
+  let o = run(hooks, "PreToolUse", "shell", dir, "{\"x\":1}")!
+  assert(o.stopped)
+  assert_eq(o.reason, "no")
+  assert(string.ends_with(o.printed, list.last(string.split(dir, "/")) ?? ""))
+  assert_eq(process.exec("bash", ["-c", "cat '" + dir + "/seen.json'; ls '" + dir + "' | wc -l | tr -d ' '"]) ?? "", "{\"x\":1}1\n")
+}
+
+effect fn fs_temp() -> String = string.trim(process.exec("mktemp", ["-d"])!)

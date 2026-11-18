@@ -178,6 +178,34 @@ On shell commands the rules are a guard rail, not a wall: an allow rule does not
 to a command that chains or redirects, and a deny rule does not see through `bash -c`
 or a script. What confines a command is the runner (`--runner`).
 
+### Hooks
+
+The same files can name commands of yours to run at fixed points. The names and the
+shape are Claude Code's, so a hook written for it reads the same here:
+
+```json
+{ "hooks": {
+    "PreToolUse": [ { "matcher": "shell|edit",
+                      "hooks": [ { "type": "command", "command": "./check.sh" } ] } ] } }
+```
+
+| Event | When | Exit 2 means |
+|---|---|---|
+| `SessionStart` | before the first request | (nothing: what it prints is told to the model) |
+| `UserPromptSubmit` | before a request is sent | the request is not sent |
+| `PreToolUse` | before a tool runs | the tool is not run |
+| `PostToolUse` | after a tool ran | the objection goes under the result |
+| `Stop` | when the model answers and would stop | the work is not finished, and it goes on |
+
+A hook gets one JSON object on stdin (`hook_event_name`, `session_id`, `cwd`, and
+`tool_name`, `tool_input`, `tool_response` or `prompt` where they apply). Exit 0 goes
+on; exit 2 stops, with stderr as the reason given to the model; any other exit is the
+hook's own failure, said to you, and the session goes on. `matcher` is comide's tool
+names separated by `|`.
+
+A hook runs as you, unconfined. A project's hooks are not used until the project is
+trusted (`--trust-project`).
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·
