@@ -183,7 +183,8 @@ let HELP = """
   /clear       forget the conversation so far, keep the project and the cost
   /compact     put a note in place of the conversation, to make room
   /cost        what this session has spent
-  /model M    switch model, e.g. /model cf:glm-5.3-flash
+  /memory      where this project's notes between sessions are kept
+  /model M   switch model, e.g. /model cf:glm-5.3-flash
   /yes         stop asking before shell and verify commands (or ask again)
   /transcript  where this session's messages are written
   /exit        leave

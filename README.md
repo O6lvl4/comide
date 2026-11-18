@@ -124,6 +124,15 @@ The messages, the cost so far and the command that checks the work come back. Th
 system prompt is written afresh, so instruction files and skills changed since are read
 as they are now. Permission to run commands is not kept, and is asked for again.
 
+## Memory
+
+A project has one file of notes that outlive a session:
+`~/.comide/memory/<the project's path>/MEMORY.md`, a dated line per note. It is read at
+the start of every conversation in the project, and the model adds to it with the
+`remember` tool: a correction you made, a preference you stated, where something is
+that took steps to find. `/memory` says where the file is. To change or remove a note,
+edit the file; nothing else holds what comide remembers.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

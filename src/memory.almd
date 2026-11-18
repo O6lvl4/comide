@@ -1,0 +1,81 @@
+// What is worth knowing the next time, kept between sessions.
+//
+// A project has one file of notes, outside the project so it is never committed by accident:
+//
+//   ~/.comide/memory/<the project's path, / as ->/MEMORY.md
+//
+// It is plain text, a line per note, and the person can read it, edit it and delete from
+// it; nothing else holds what comide remembers. The file is read into the start of every
+// conversation in the project, and the model adds to it with the `remember` tool.
+//
+// What it is for is narrow on purpose. A note is something a later session could not
+// work out from the project: a correction the person made, a preference they stated,
+// where a thing is that took steps to find. What the code says, the code says better.
+
+import fs
+
+// More than this and the file is shown from its end, the most recent notes, and says so.
+let MAX_CHARS = 8000
+
+fn key_of(root: String) -> String = string.replace(root, "/", "-")
+
+fn file_for(home: String, root: String) -> String = home + "/.comide/memory/" + key_of(root) + "/MEMORY.md"
+
+fn shown(text: String) -> String = {
+  let t = string.trim(text)
+  if string.len(t) <= MAX_CHARS then t
+  else "[… the older notes are not shown; the file has them all]\n" + string.drop(t, string.len(t) - MAX_CHARS)
+}
+
+// What the model is told at the start, or "" when nothing has been kept.
+fn section(file: String, text: String) -> String =
+  if string.trim(text) == "" then ""
+  else "Notes kept from earlier sessions in this project (" + file + "). Each was true when it was written: check one before relying on it if it names something that could have changed.\n"
+    + shown(text)
+
+// A note as one line of the file: a single line, dated.
+fn line_of(note: String, day: String) -> String =
+  "- " + string.trim(string.replace(string.replace(note, "\r", " "), "\n", " ")) + " (" + day + ")"
+
+effect fn read(file: String) -> String = fs.read_text(file) ?? ""
+
+effect fn keep(file: String, note: String) -> Result[String, String] =
+  if string.trim(note) == "" then err("there is nothing in the note")
+  else {
+    let dir = string.strip_suffix(file, "/MEMORY.md") ?? file
+    fs.mkdir_p(dir)!
+    let line = line_of(note, datetime.format(datetime.now(), "%Y-%m-%d"))
+    fs.append_text(file, line + "\n")!
+    ok(line)
+  }
+
+test "a project's notes live under its path, outside the project" {
+  assert_eq(file_for("/h", "/w/p"), "/h/.comide/memory/-w-p/MEMORY.md")
+}
+
+test "a note is one dated line, whatever was passed" {
+  assert_eq(line_of("  the tests need\nDOCKER_HOST set ", "2026-11-18"), "- the tests need DOCKER_HOST set (2026-11-18)")
+}
+
+test "nothing kept is nothing said, and a long file is shown from its end" {
+  assert_eq(section("/f", "\n"), "")
+  assert(string.ends_with(section("/f", "- a (2026-01-01)\n"), "changed.\n- a (2026-01-01)"))
+  let long = string.repeat("- old\n", 2000) + "- newest"
+  let s = shown(long)
+  assert(string.starts_with(s, "[… the older notes are not shown"))
+  assert(string.ends_with(s, "- newest"))
+}
+
+test "notes are added to the end of the file, which is made when the first is kept" {
+  let home = fs.create_temp_dir("comide-memory")!
+  let file = file_for(home, "/w/p")
+  assert_eq(read(file)!, "")
+  let _ = keep(file, "use pnpm, not npm")!
+  let _ = keep(file, "the staging db is read-only")!
+  let lines = string.split(string.trim(read(file)!), "\n")
+  assert_eq(list.len(lines), 2)
+  assert(string.starts_with(lines[0], "- use pnpm, not npm ("))
+  assert(string.starts_with(lines[1], "- the staging db is read-only ("))
+  assert_eq(keep(file, "  "), err("there is nothing in the note"))
+  let _ = fs.remove_all(home)
+}
