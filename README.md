@@ -114,6 +114,16 @@ back word for word, and the work goes on. `/compact` does it on demand.
 The note is written by `$COMIDE_SUMMARY_MODEL`, the conversation's model unless set.
 Exact tool output from before the note is gone, and the model is told to look again.
 
+## Going back to a conversation
+
+Every conversation is kept after each request, in `~/.comide/sessions/`, under the
+project's path. `comide --continue` goes on with the project's most recent one, and
+`comide --resume ID` with a given one; both work with `run` too.
+
+The messages, the cost so far and the command that checks the work come back. The
+system prompt is written afresh, so instruction files and skills changed since are read
+as they are now. Permission to run commands is not kept, and is asked for again.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

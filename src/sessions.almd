@@ -1,0 +1,150 @@
+// A conversation kept on disk, so it can be gone back to.
+//
+// After every request the conversation is written to
+//
+//   ~/.comide/sessions/<the project's path, / as ->/<when it started, in ms>.json
+//
+// `--continue` takes up the project's most recent one, `--resume ID` a given one. What
+// comes back is the messages, the cost so far, the command that checks the work and the
+// goal. The system prompt does not come back: it is written afresh, because the project,
+// its instruction files and its skills may have changed since, and a conversation
+// resumed on a stale description of the project is worse than one that reads it again.
+
+import fs
+import json
+import self.options
+
+type Kept = { id: String, file: String, model: String, updated_ms: Int, title: String, session: options.Session }
+
+fn key_of(root: String) -> String = string.replace(root, "/", "-")
+
+fn dir_for(home: String, root: String) -> String = home + "/.comide/sessions/" + key_of(root)
+
+fn role_of(m: Value) -> String = value.get_string(m, "role") ?? ""
+
+// What the person first asked, cut to a line: the name a session is listed by.
+fn title_of(messages: List[Value]) -> String = {
+  let first = list.find(messages, (m) => role_of(m) == "user")
+  let text = string.trim(list.first(string.split(string.trim(option.map(first, (m) => value.get_string(m, "content") ?? "") ?? ""), "\n")) ?? "")
+  if string.len(text) > 80 then string.take(text, 80) + "…" else text
+}
+
+fn document(root: String, model: String, id: String, now_ms: Int, s: options.Session) -> Value = value.object([
+  ("version", value.int(1)),
+  ("id", value.string(id)),
+  ("root", value.string(root)),
+  ("model", value.string(model)),
+  ("updated_ms", value.int(now_ms)),
+  ("title", value.string(title_of(s.messages))),
+  ("cost", value.float(s.cost)),
+  ("steps", value.int(s.steps)),
+  ("check", value.string(s.check)),
+  ("goal", value.string(s.goal)),
+  ("messages", value.array(s.messages)),
+])
+
+// A kept session read back. `allow_shell` is never kept: permission is given to a run,
+// not to a conversation, and is asked for again.
+fn kept_of(file: String, doc: Value) -> Kept = Kept {
+  id: value.get_string(doc, "id") ?? "",
+  file: file,
+  model: value.get_string(doc, "model") ?? "",
+  updated_ms: value.get_int(doc, "updated_ms") ?? 0,
+  title: value.get_string(doc, "title") ?? "",
+  session: options.Session { messages: value.get_array(doc, "messages") ?? [], cost: value.get_float(doc, "cost") ?? 0.0, allow_shell: false,
+    steps: value.get_int(doc, "steps") ?? 0, check: value.get_string(doc, "check") ?? "", goal: value.get_string(doc, "goal") ?? "" },
+}
+
+// The conversation to go on with: the kept messages under a system prompt written now.
+fn taken_up(fresh_system: List[Value], kept: options.Session, allow_shell: Bool) -> options.Session =
+  { ...kept, messages: fresh_system + list.filter(kept.messages, (m) => role_of(m) != "system"), allow_shell: allow_shell }
+
+effect fn save(home: String, root: String, model: String, id: String, s: options.Session) -> Unit = {
+  // A conversation in which nothing was asked is not worth a file.
+  if list.any(s.messages, (m) => role_of(m) == "user") then {
+    let dir = dir_for(home, root)
+    let _ = fs.mkdir_p(dir)
+    let _ = fs.write_text(dir + "/" + id + ".json", json.stringify(document(root, model, id, datetime.now_ms(), s)))
+  }
+}
+
+effect fn load(file: String) -> Result[Kept, String] =
+  match fs.read_text(file) {
+    err(e) => err(e),
+    ok(text) => match json.parse(text) {
+      err(e) => err(file + " is not a session: " + e),
+      ok(doc) => ok(kept_of(file, doc)),
+    },
+  }
+
+fn base(p: String) -> String = list.last(string.split(p, "/")) ?? p
+
+// The ids in a project's directory, the most recent first. The id is the start time, so
+// the order of the names is the order of the sessions.
+effect fn ids(home: String, root: String) -> List[String] = {
+  let names = list.filter_map(fs.list_dir(dir_for(home, root)) ?? [], (n) => string.strip_suffix(base(n), ".json"))
+  list.reverse(list.sort(names))
+}
+
+// The session `--continue` or `--resume ID` means, or why there is none.
+effect fn wanted(home: String, root: String, id: String) -> Result[Kept, String] = {
+  let all = ids(home, root)!
+  if id == "" then match list.first(all) {
+    none => err("there is no earlier session in this project to continue"),
+    some(latest) => load(dir_for(home, root) + "/" + latest + ".json"),
+  }
+  else if list.contains(all, id) then load(dir_for(home, root) + "/" + id + ".json")
+  else if fs.is_file(id) then load(id)
+  else err("no session " + id + " in this project; the sessions are in " + dir_for(home, root))
+}
+
+// In UTC, and said so: the clock here knows no time zone.
+fn when(ms: Int) -> String = datetime.format(ms / 1000, "%Y-%m-%d %H:%M") + " UTC"
+
+fn msg(role: String, content: String) -> Value = value.object([("role", value.string(role)), ("content", value.string(content))])
+
+test "a project's sessions live under its path" {
+  assert_eq(dir_for("/h", "/w/my project"), "/h/.comide/sessions/-w-my project")
+}
+
+test "a session is listed by what was first asked" {
+  assert_eq(title_of([msg("system", "S"), msg("user", "fix the flaky tests\nand more"), msg("user", "second")]), "fix the flaky tests")
+  assert_eq(title_of([msg("system", "S")]), "")
+  assert_eq(string.len(title_of([msg("user", string.repeat("x", 200))])), 81)
+}
+
+test "what is kept comes back, except the permission to run commands" {
+  let s = options.Session { messages: [msg("system", "old"), msg("user", "fix a.py"), msg("assistant", "done")], cost: 0.25, allow_shell: true, steps: 3, check: "make test", goal: "ship v2" }
+  let back = kept_of("/f.json", json.parse(json.stringify(document("/w/p", "cf:glm-5.3", "1700", 99, s))) ?? value.null())
+  assert_eq(back.id, "1700")
+  assert_eq(back.model, "cf:glm-5.3")
+  assert_eq(back.title, "fix a.py")
+  assert_eq(back.session.cost, 0.25)
+  assert_eq(back.session.steps, 3)
+  assert_eq(back.session.check, "make test")
+  assert_eq(back.session.goal, "ship v2")
+  assert(not back.session.allow_shell)
+}
+
+test "a session taken up again gets the system prompt of now" {
+  let kept = options.Session { messages: [msg("system", "old"), msg("user", "fix a.py"), msg("assistant", "done")], cost: 0.25, allow_shell: false, steps: 3, check: "", goal: "" }
+  let s = taken_up([msg("system", "new")], kept, true)
+  assert_eq(list.map(s.messages, (m) => value.get_string(m, "content") ?? ""), ["new", "fix a.py", "done"])
+  assert(s.allow_shell)
+  assert_eq(s.cost, 0.25)
+}
+
+test "the most recent session is the one continued, and one can be asked for by id" {
+  let home = fs.create_temp_dir("comide-sessions")!
+  let s1 = options.Session { messages: [msg("system", "S"), msg("user", "first")], cost: 0.0, allow_shell: false, steps: 1, check: "", goal: "" }
+  let s2 = options.Session { messages: [msg("system", "S"), msg("user", "second")], cost: 0.0, allow_shell: false, steps: 1, check: "", goal: "" }
+  save(home, "/w/p", "m:x", "1000", s1)!
+  save(home, "/w/p", "m:x", "2000", s2)!
+  save(home, "/w/p", "m:x", "3000", options.Session { messages: [msg("system", "S")], cost: 0.0, allow_shell: false, steps: 0, check: "", goal: "" })!
+  assert_eq(ids(home, "/w/p")!, ["2000", "1000"])
+  assert_eq(result.map(wanted(home, "/w/p", ""), (k) => k.title), ok("second"))
+  assert_eq(result.map(wanted(home, "/w/p", "1000"), (k) => k.title), ok("first"))
+  assert_eq(result.map(wanted(home, "/w/p", "nope"), (k) => k.title), err("no session nope in this project; the sessions are in " + home + "/.comide/sessions/-w-p"))
+  assert_eq(result.map(wanted(home, "/w/other", ""), (k) => k.title), err("there is no earlier session in this project to continue"))
+  let _ = fs.remove_all(home)
+}
