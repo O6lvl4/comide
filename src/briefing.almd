@@ -1,0 +1,136 @@
+// What was written down for an agent to read before it starts.
+//
+// Two files are the convention every coding agent now shares: AGENTS.md, and CLAUDE.md
+// (Claude Code's name for the same thing). comide reads both from the project, in that
+// order, after one of the person's own that applies to every project. A project that
+// keeps one and points the other at it (`@AGENTS.md`) is read once.
+//
+// Two more places are comide's own, named by the caller rather than found:
+//
+//   COMIDE_INSTRUCTIONS        files for the model that talks (this conversation)
+//   COMIDE_SOLVE_INSTRUCTIONS  files for the model that edits (golemide, behind solve)
+//
+// They are apart because the two are different models doing different jobs, and what one
+// needs to be told is noise to the other: the talker is told how the project is worked
+// on, the editor how its code is written. Several files are separated by `:`.
+//
+// Nothing here is followed blindly because of where it was found: the text is shown to
+// the model as instructions from the project, and the person is told which files were read.
+
+import fs
+import env
+
+// A file longer than this is cut and says so. Measured sizes that prompted the number:
+// the instruction files of the projects comide was first used on are 1 to 9 KB.
+let MAX_NOTE_CHARS = 24000
+
+type Note = { path: String, text: String }
+
+fn points_at_agents(text: String) -> Bool = {
+  let t = string.trim(text)
+  t == "@AGENTS.md" or t == "@./AGENTS.md"
+}
+
+fn cut(text: String) -> String =
+  if string.len(text) <= MAX_NOTE_CHARS then text
+  else string.take(text, MAX_NOTE_CHARS) + "\n[… cut here: the file is " + int.to_string(string.len(text))
+    + " characters and the first " + int.to_string(MAX_NOTE_CHARS) + " are shown. Read the rest with read.]"
+
+fn listed(v: String) -> List[String] = list.filter(list.map(string.split(v, ":"), (p) => string.trim(p)), (p) => p != "")
+
+// Where the talker's instructions are looked for, in reading order: the person's, the
+// project's, then the files the caller named.
+fn places(root: String, config: String, named: List[String]) -> List[String] =
+  [config + "/comide/AGENTS.md", root + "/AGENTS.md", root + "/CLAUDE.md", root + "/.claude/CLAUDE.md"] + named
+
+// The files that are there and say something, each once: the same text under two names
+// (a copy, or a symlink) is one note.
+effect fn gather(paths: List[String]) -> List[Note] = {
+  var out: List[Note] = []
+  var seen: List[String] = []
+  for p in paths {
+    if fs.is_file(p) then {
+      match fs.read_text(p) {
+        err(_) => (),
+        ok(text) => {
+          let t = string.trim(text)
+          if t != "" and not points_at_agents(t) and not list.contains(seen, t) then {
+            list.push(seen, t)
+            list.push(out, Note { path: p, text: cut(t) })
+          }
+        },
+      }
+    }
+  }
+  out
+}
+
+fn shown_path(root: String, p: String) -> String = string.strip_prefix(p, root + "/") ?? p
+
+// The notes as the model reads them, or "" when there are none.
+fn section(root: String, notes: List[Note]) -> String =
+  if list.is_empty(notes) then ""
+  else "Instructions written for you by this project and its user. Follow them. Where two disagree, the later one wins; where they disagree with the user's request, the request wins.\n\n"
+    + list.join(list.map(notes, (n) => "--- " + shown_path(root, n.path) + " ---\n" + n.text), "\n\n")
+
+effect fn config_dir() -> String = {
+  let config = env.get("XDG_CONFIG_HOME") ?? ""
+  if config == "" then (env.get("HOME") ?? "") + "/.config" else config
+}
+
+effect fn for_talk(root: String) -> List[Note] =
+  gather(places(root, config_dir()!, listed(env.get("COMIDE_INSTRUCTIONS") ?? "")))!
+
+// What solve passes on to golemide with every task, or "".
+effect fn for_solve() -> String = {
+  let notes = gather(listed(env.get("COMIDE_SOLVE_INSTRUCTIONS") ?? ""))!
+  list.join(list.map(notes, (n) => n.text), "\n\n")
+}
+
+// The task golemide is given: the change, and under it what the project says about how
+// its code is written.
+fn task_with(task: String, notes: String) -> String =
+  if string.trim(notes) == "" then task
+  else task + "\n\nWhat this project says about how its code is written:\n" + notes
+
+test "a CLAUDE.md that only points at AGENTS.md is not a second note" {
+  assert(points_at_agents("@AGENTS.md\n"))
+  assert(points_at_agents("  @./AGENTS.md"))
+  assert(not points_at_agents("See @AGENTS.md for the rest."))
+}
+
+test "a long file is cut, and says how much of it is shown" {
+  let long = string.repeat("x", MAX_NOTE_CHARS + 500)
+  let c = cut(long)
+  assert(string.starts_with(c, string.repeat("x", MAX_NOTE_CHARS) + "\n[… cut here: the file is 24500 characters"))
+  assert_eq(cut("short"), "short")
+}
+
+test "the person's file comes first, then the project's, then the ones named" {
+  assert_eq(places("/w/p", "/h/.config", ["/x/a.md"]),
+    ["/h/.config/comide/AGENTS.md", "/w/p/AGENTS.md", "/w/p/CLAUDE.md", "/w/p/.claude/CLAUDE.md", "/x/a.md"])
+  assert_eq(listed(" /a.md: :/b.md "), ["/a.md", "/b.md"])
+  assert_eq(listed(""), [])
+}
+
+test "notes are shown under the path the project knows them by" {
+  let s = section("/w/p", [Note { path: "/w/p/AGENTS.md", text: "Run make test." }, Note { path: "/x/a.md", text: "Be brief." }])
+  assert(string.contains(s, "--- AGENTS.md ---\nRun make test.\n\n--- /x/a.md ---\nBe brief."))
+  assert_eq(section("/w/p", []), "")
+}
+
+test "the same text under two names is read once, and an empty file not at all" {
+  let dir = fs.create_temp_dir("comide-briefing")!
+  fs.write_text(dir + "/AGENTS.md", "Run make test.\n")!
+  fs.write_text(dir + "/CLAUDE.md", "Run make test.")!
+  fs.write_text(dir + "/empty.md", "\n")!
+  fs.write_text(dir + "/more.md", "Be brief.")!
+  let notes = gather([dir + "/AGENTS.md", dir + "/CLAUDE.md", dir + "/absent.md", dir + "/empty.md", dir + "/more.md"])!
+  assert_eq(list.map(notes, (n) => n.text), ["Run make test.", "Be brief."])
+  let _ = fs.remove_all(dir)
+}
+
+test "the editor's notes go under the task, and no notes leave the task as it was" {
+  assert_eq(task_with("fix clamp", ""), "fix clamp")
+  assert_eq(task_with("fix clamp", "Tabs, not spaces."), "fix clamp\n\nWhat this project says about how its code is written:\nTabs, not spaces.")
+}

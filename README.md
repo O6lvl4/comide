@@ -74,6 +74,24 @@ The model's tools are programs that already exist:
 A shell command, and the verify command `solve` would run, are asked about first.
 Pages are read only from the public web.
 
+## Instructions
+
+comide reads what the project wrote down for an agent before the first request, and
+says which files it read:
+
+| File | Whose |
+|---|---|
+| `~/.config/comide/AGENTS.md` | yours, for every project |
+| `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md` in the project | the project's |
+| the files in `$COMIDE_INSTRUCTIONS` (separated by `:`) | named by whoever starts comide |
+
+A `CLAUDE.md` that only says `@AGENTS.md`, or holds the same text, is read once. A file
+over 24,000 characters is cut, and says so.
+
+Those are for the model that talks. The model that edits is a different one, behind
+`solve`, and is told separately: the files in `$COMIDE_SOLVE_INSTRUCTIONS` go to golemide
+under every task. Put there what the project says about how its code is written.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

@@ -6,6 +6,7 @@ import json
 import env
 import fs
 import self.toolkit
+import self.briefing
 
 // How much of a solve's time golemide is told to leave for its report: it stops starting
 // attempts that would run past `solve_timeout_s` minus this, so the model hears how the
@@ -108,7 +109,7 @@ fn evidence_lines(doc: Value) -> List[String] = {
 // No --model: golemide runs its repair loop on its own default (flash, escalating to
 // glm-5.3 when it stalls), whatever model the conversation is on.
 effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
-  let args = ["solve", toolkit.str_arg(a, "task"), "--root", s.root, "--verify", toolkit.str_arg(a, "verify"),
+  let args = ["solve", briefing.task_with(toolkit.str_arg(a, "task"), s.solve_notes), "--root", s.root, "--verify", toolkit.str_arg(a, "verify"),
     "--attempts", int.to_string(toolkit.int_arg(a, "attempts", 6)), "--json", "--quiet"]
     + (if s.solve_model == "" then [] else ["--model", s.solve_model])
     + (if s.solve_strong == "" then [] else ["--strong-model", s.solve_strong])
