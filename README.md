@@ -148,6 +148,17 @@ back with it, and it is put back word for word when a note replaces a long conve
 That the goal is met is the model's claim, with evidence for you to read. It is not a
 proof.
 
+## Helpers
+
+Finding where something is handled can take twenty reads, and all twenty stay in the
+conversation. The `explore` tool hands such a question to a helper: another comide,
+started with `--read-only`, in a conversation of its own. Only its answer comes back.
+
+The helper runs on `$COMIDE_EXPLORE_MODEL`, the conversation's model unless set; a fast,
+cheap model does this well. It is started from `comide` on `PATH` (`$COMIDE_BIN` names
+another), goes through the same runner, and cannot start a helper of its own. What it
+spent is counted in the session's cost.
+
 ## Plan mode
 
 `/plan` (or `--plan`) has comide look at the project and answer with a plan: what it

@@ -1,0 +1,81 @@
+// A helper that looks, so the conversation does not have to.
+//
+// Finding where something is handled can take twenty reads, and all twenty stay in the
+// conversation, sent again with every later call. `explore` hands the question to another
+// comide: a fresh conversation, started with --read-only, that does the reading and
+// answers. Only the answer comes back. The helper's reads cost what they cost once, in
+// its own conversation, and are gone when it ends.
+//
+// The helper is its own model, COMIDE_EXPLORE_MODEL, the conversation's unless set:
+// looking for things is where a fast, cheap model does as well as a strong one.
+//
+// It is the same program run again (`comide`, or COMIDE_BIN), so its tools go through the
+// same runner and the same settings. It knows nothing of this conversation; the task has
+// to carry everything it needs. It cannot change a file or run a command, and it cannot
+// start a helper of its own.
+
+import fs
+import self.toolkit
+
+let TIMEOUT_S = 600
+let MAX_STEPS = 30
+
+// The helper's command line as bash runs it: marked as a helper so it starts none
+// itself, its cost written where the caller can read it, what it shows the person kept
+// out of the answer.
+fn script(with_runner: Bool) -> String =
+  "COMIDE_DEPTH=1 COMIDE_COST_FILE=\"$1\" exec \"$2\" -p \"$3\" --read-only --root \"$4\" --model \"$5\" --max-steps \"$6\""
+    + (if with_runner then " --runner \"$7\"" else "") + " 2> \"$1.err\""
+
+fn arguments(cost_file: String, bin: String, task: String, root: String, model: String, runner: String) -> List[String] =
+  ["-c", script(runner != ""), "explore", cost_file, bin, task, root, model, int.to_string(MAX_STEPS), runner]
+
+// The cost the helper wrote: "$0.001234".
+fn cost_of(text: String) -> Float = float.parse(string.trim(string.replace(text, "$", ""))) ?? 0.0
+
+// What comes back to the conversation: the answer, or why there is none.
+fn result_of(code: Int, answer: String, errs: String, cost: Float) -> toolkit.ToolResult = {
+  let said = string.trim(answer)
+  if code == 0 and said != "" then toolkit.ToolResult { text: said, brief: toolkit.count_lines(said) + " · " + toolkit.first_line_of(said, 60), failed: false, cost_usd: cost }
+  else toolkit.ToolResult { text: "The helper did not come back with an answer (exit " + int.to_string(code) + ")."
+      + (if said == "" then "" else "\nWhat it said:\n" + said)
+      + (if string.trim(errs) == "" then "" else "\nThe end of what it showed:\n" + string.drop(string.trim(errs), int.max(0, string.len(string.trim(errs)) - 1500)))
+      + "\nLook yourself, or ask again with a narrower task.",
+    brief: "no answer (exit " + int.to_string(code) + ")", failed: true, cost_usd: cost }
+}
+
+effect fn explore(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let task = string.trim(toolkit.str_arg(a, "task"))
+  if s.depth > 0 then toolkit.failed("A helper cannot start a helper. Look yourself.", "not run: already a helper")
+  else if task == "" then toolkit.failed("explore needs a task: the question, and everything the helper needs to know to answer it.", "no task")
+  else {
+    let cost_file = s.scratch + "/explore-" + int.to_string(datetime.now_ms()) + ".cost"
+    let (code, out) = toolkit.run_program("bash", arguments(cost_file, s.self_bin, task, s.root, s.explore_model, s.runner), TIMEOUT_S)!
+    let cost = cost_of(fs.read_text(cost_file) ?? "")
+    let errs = fs.read_text(cost_file + ".err") ?? ""
+    let r = result_of(code, out, errs, cost)
+    toolkit.ToolResult { text: toolkit.capped(s, r.text)!, brief: r.brief, failed: r.failed, cost_usd: r.cost_usd }
+  }
+}
+
+test "the helper is started as a helper, only to look, with its cost where the caller reads it" {
+  let args = arguments("/s/x.cost", "comide", "where is auth handled?", "/w/p", "cf:glm-5.3-flash", "")
+  assert_eq(list.drop(args, 2), ["explore", "/s/x.cost", "comide", "where is auth handled?", "/w/p", "cf:glm-5.3-flash", "30", ""])
+  assert(string.contains(script(false), "COMIDE_DEPTH=1"))
+  assert(string.contains(script(false), "--read-only"))
+  assert(not string.contains(script(false), "--runner"))
+  assert(string.contains(script(true), " --runner \"$7\" 2>"))
+}
+
+test "the answer comes back alone, with what it cost; no answer says why" {
+  let r = result_of(0, "Auth is in src/auth.py, checked in middleware.py:40.\n", "⏺ read(src/auth.py)", 0.0021)
+  assert_eq(r.text, "Auth is in src/auth.py, checked in middleware.py:40.")
+  assert(not r.failed)
+  assert_eq(r.cost_usd, 0.0021)
+  let none_came = result_of(2, "", "the model could not be reached: status 401", 0.0)
+  assert(none_came.failed)
+  assert(string.contains(none_came.text, "status 401"))
+  assert(string.contains(none_came.text, "Look yourself"))
+  assert_eq(cost_of("$0.001234\n"), 0.001234)
+  assert_eq(cost_of(""), 0.0)
+}
