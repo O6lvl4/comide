@@ -140,11 +140,28 @@ effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   let parsed = answer_of(out)
   let text = match parsed {
     ok(doc) => solve_summary(doc),
-    err(_) => "golemide solve failed (exit " + int.to_string(code) + "):\n" + out,
+    err(_) => no_answer(code, out, s.solve_timeout_s),
   }
   let spent = match parsed { ok(doc) => value.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
   let solved = match parsed { ok(doc) => value.get_bool(doc, "ok") ?? false, err(_) => false }
   toolkit.ToolResult { text: toolkit.capped(s, text)!, brief: toolkit.first_line_of(text, 90), failed: not solved, cost_usd: spent }
+}
+
+// What the model is told when solve came back with no report. A run that was stopped for
+// time (exit -1, nothing printed) used to read "golemide solve failed (exit -1):" and
+// nothing else: the model could not tell a crash from a slow test suite, and did not know
+// that the files may have been changed.
+fn no_answer(code: Int, out: String, timeout_s: Int) -> String =
+  if code == -1 and string.trim(out) == "" then
+    "solve was stopped after " + int.to_string(timeout_s) + " s without finishing, and gave no report. "
+      + "Whatever it had written is still in the files: read them before changing anything, and run the verify command yourself with shell to see where things stand and how long it takes. "
+      + "If the command alone takes more than a minute or two, give solve a faster one (fewer tests, a smaller input) or make the remaining changes yourself."
+  else "golemide solve failed (exit " + int.to_string(code) + "):\n" + out
+
+test "a solve stopped for time says so, and that the files may have changed" {
+  assert(string.starts_with(no_answer(-1, "", 300), "solve was stopped after 300 s"))
+  assert(string.contains(no_answer(-1, "", 300), "still in the files"))
+  assert_eq(no_answer(2, "golemide: no key", 300), "golemide solve failed (exit 2):\ngolemide: no key")
 }
 
 // The golemide this was built against: `edit` and `solve --json` arrived in 0.2.0, and
