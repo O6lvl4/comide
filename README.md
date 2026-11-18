@@ -133,6 +133,21 @@ the start of every conversation in the project, and the model adds to it with th
 that took steps to find. `/memory` says where the file is. To change or remove a note,
 edit the file; nothing else holds what comide remembers.
 
+## Goals
+
+A request ends when it is answered. A goal does not: `/goal TEXT` (or `--goal TEXT`)
+says what the session is for, and whenever the model stops while the goal stands, comide
+asks whether it is met. If it is not, the model goes on. It ends when the model answers
+`GOAL MET` with its evidence, when it shows it needs you, or after 25 askings in one
+request.
+
+The goal stays in your words. It is kept with the conversation, so `--continue` comes
+back with it, and it is put back word for word when a note replaces a long conversation.
+`/goal` shows it and `/goal clear` drops it.
+
+That the goal is met is the model's claim, with evidence for you to read. It is not a
+proof.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

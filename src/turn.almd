@@ -16,14 +16,19 @@ import self.options
 import self.asking
 import self.waiting
 import self.handover
+import self.goal
 
 // A turn in progress. `tin`, `tcached` and `tout` are the tokens spent; `sigs` are the
 // calls made since the model was last told it was looping. `request` is what the person
 // asked, word for word, and `last_in` the input tokens the provider counted on the last
 // call: the size of the conversation, which decides when a hand-over note takes its place.
+// `aim` is the session's goal (goal.almd), "" for none: how many times the model has been
+// asked whether it is met, whether the last thing said to it was that question, and
+// whether it has said it is.
 type Turn = { messages: List[Value], cost: Float, allow: Bool, steps: Int, done: Bool, interrupted: Bool,
   tin: Int, tcached: Int, tout: Int, work: watch.Work, check_rounds: Int, sigs: List[String], loop_warned: Bool,
-  request: String, last_in: Int }
+  request: String, last_in: Int,
+  aim: String, aim_rounds: Int, aim_asked: Bool, aim_met: Bool }
 
 fn said(t: Turn, m: Value) -> Turn = { ...t, messages: t.messages + [m] }
 
@@ -32,7 +37,7 @@ fn ended(t: Turn) -> Turn = { ...t, done: true }
 effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, user: String) -> options.Session = {
   var t = Turn { messages: s.messages + [convo.message("user", user)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
     tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false,
-    request: user, last_in: 0 }
+    request: user, last_in: 0, aim: s.goal, aim_rounds: 0, aim_asked: false, aim_met: false }
   let too_long = handover.limit()!
   while not t.done {
     // Not when there is next to nothing after the system prompt: then the size is the
@@ -45,14 +50,15 @@ effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
   // of zeros under it would only be noise.
   if not (t.interrupted and t.steps == 0) then
     options.show(opts, "\n" + ui.footer(opts.ui, t.steps, t.tin, t.tcached, t.tout, convo.usd(t.cost), convo.usd(s.cost + t.cost)))!
-  { ...s, messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check }
+  { ...s, messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check,
+    goal: if t.aim_met then "" else s.goal }
 }
 
 // The conversation has outgrown the model: a note takes its place (handover.almd). If the
 // note cannot be written the turn goes on as it was, and is not asked again until the
 // conversation has grown by another call.
 effect fn handed_over(opts: options.Options, setup: toolkit.Setup, t: Turn) -> Turn =
-  match handover.written(opts.model, opts.effort, setup.scratch, t.messages, t.request, "") {
+  match handover.written(opts.model, opts.effort, setup.scratch, t.messages, t.request, t.aim) {
     err(e) => {
       options.show(opts, "\n" + ui.note_line(opts.ui, "the conversation is long, and a note could not be written in its place: " + string.take(e, 200)))!
       { ...t, last_in: 0 }
@@ -96,9 +102,31 @@ effect fn step(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
 // answer goes to stdout.
 effect fn answered(opts: options.Options, setup: toolkit.Setup, t: Turn, h: waiting.Heard) -> Turn =
   match watch.at_finish(t.work, t.check_rounds) {
-    Done => {
+    Done => if t.aim == "" then {
       finish_answer(opts, h.reply, h.printed)!
       ended(t)
+    } else match goal.after_answer(t.aim, h.reply.content, t.aim_asked, t.aim_rounds) {
+      // A goal stands (goal.almd): an answer is not the end until the model says the goal
+      // is met, or shows it needs the person.
+      Ask => {
+        if opts.live then finish_answer(opts, h.reply, h.printed)!
+        options.show(opts, "\n" + ui.note_line(opts.ui, "a goal stands; comide asks whether it is met"))!
+        said({ ...t, aim_asked: true, aim_rounds: t.aim_rounds + 1 }, convo.message("user", goal.asked(t.aim)))
+      },
+      Met => {
+        finish_answer(opts, h.reply, h.printed)!
+        options.show(opts, "\n" + ui.note_line(opts.ui, "the goal is met, by the model's account, and is cleared"))!
+        ended({ ...t, aim_met: true })
+      },
+      NeedsPerson => {
+        finish_answer(opts, h.reply, h.printed)!
+        ended(t)
+      },
+      Enough => {
+        finish_answer(opts, h.reply, h.printed)!
+        options.show(opts, "\n" + ui.note_line(opts.ui, "asked " + int.to_string(t.aim_rounds) + " times whether the goal is met; say how to continue"))!
+        ended(t)
+      },
     },
     RunCheck(command) => {
       if opts.live then finish_answer(opts, h.reply, h.printed)!
@@ -126,7 +154,7 @@ effect fn acted(opts: options.Options, setup: toolkit.Setup, t: Turn, h: waiting
   if not opts.live and string.trim(r.content) != "" then eprintln("\n" + convo.answer_lines(u, r.content, true))
   else if opts.live and string.trim(string.drop(r.content, h.printed)) != "" then println(convo.answer_lines(u, string.drop(r.content, h.printed), h.printed == 0))
   let ran = run_calls(opts, setup, calls, t.allow, t.work)!
-  looping(opts, { ...t, messages: t.messages + ran.results, allow: ran.allow, cost: t.cost + ran.spent, work: ran.work,
+  looping(opts, { ...t, messages: t.messages + ran.results, allow: ran.allow, cost: t.cost + ran.spent, work: ran.work, aim_asked: false,
     sigs: t.sigs + list.map(calls, (c) => watch.signature(c.name, c.arguments)) })!
 }
 

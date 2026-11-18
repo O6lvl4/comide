@@ -1,0 +1,76 @@
+// A goal: what a session is for, kept in front of the model until it is met.
+//
+// A request is answered and the turn ends. A goal does not end with an answer: when the
+// model stops and says something, it is asked whether the goal is met, and if it is not
+// it goes on. The goal is in the person's words and stays in them; it is kept with the
+// session (sessions.almd), put back word for word when a hand-over note replaces the
+// conversation (handover.almd), and cleared when it is met.
+//
+// The model is the one who says the goal is met, on a first line that reads GOAL MET,
+// and has to give the evidence under it. That is a claim, not a proof: comide's own check
+// of the work (watch.almd) still runs before the turn ends, and the person reads the
+// evidence. What the goal adds is that stopping early has to be said out loud.
+//
+// It stops going on in three cases: the goal is met; the model, asked, neither works nor
+// says it is met, which means it needs the person; or it has been asked MAX_ROUNDS times
+// in one request.
+
+let MAX_ROUNDS = 25
+
+let MET = "GOAL MET"
+
+// What starts the work when a goal is set with nothing else said.
+fn opening(goal: String) -> String =
+  "The goal of this session: " + goal + "\n\nWork toward it now."
+
+// What the model is asked when it stops while a goal stands.
+fn asked(goal: String) -> String =
+  "The goal of this session, in the user's words: " + goal + "\n\n"
+    + "If it is fully met, answer with " + MET + " alone on the first line, and under it the evidence: what was run and what it showed. "
+    + "If it is not, go on working toward it now, without asking whether to. Stop only for something only the user can decide, and then say exactly what."
+
+// Whether an answer says the goal is met: its first line that says anything is the words.
+fn says_met(answer: String) -> Bool = {
+  let lines = list.filter(list.map(string.split(answer, "\n"), (l) => string.trim(l)), (l) => l != "")
+  let first = string.to_upper(string.replace(string.replace(list.first(lines) ?? "", "*", ""), "#", ""))
+  string.starts_with(string.trim(first), MET)
+}
+
+// What to do with an answer while a goal stands: `asked_already` is whether the answer
+// came straight after the question, with no work in between.
+type Next = | Ask | Met | NeedsPerson | Enough
+
+fn after_answer(goal: String, answer: String, asked_already: Bool, rounds: Int) -> Next =
+  if says_met(answer) then Met
+  else if asked_already then NeedsPerson
+  else if rounds >= MAX_ROUNDS then Enough
+  else Ask
+
+// The goal as the status line shows it.
+fn brief(goal: String) -> String = {
+  let line = string.trim(list.first(string.split(string.trim(goal), "\n")) ?? "")
+  if string.len(line) > 40 then string.take(line, 40) + "…" else line
+}
+
+test "the goal is met when the answer's first line says so, however it is dressed" {
+  assert(says_met("GOAL MET\nmake test: 42 passed"))
+  assert(says_met("\n**Goal met**\nevidence"))
+  assert(says_met("## GOAL MET: all green"))
+  assert(not says_met("The goal is not met yet."))
+  assert(not says_met("I fixed two of three.\nGOAL MET for the first two."))
+  assert(not says_met(""))
+}
+
+test "an answer is followed by the question once; a second answer with no work is for the person" {
+  assert_eq(after_answer("g", "I fixed the parser.", false, 0), Ask)
+  assert_eq(after_answer("g", "Which database should it use?", true, 1), NeedsPerson)
+  assert_eq(after_answer("g", "GOAL MET\npytest: 12 passed", true, 1), Met)
+  assert_eq(after_answer("g", "GOAL MET\npytest: 12 passed", false, 0), Met)
+  assert_eq(after_answer("g", "Still going.", false, MAX_ROUNDS), Enough)
+}
+
+test "the question carries the goal word for word" {
+  assert(string.starts_with(asked("ship v2 with all tests green"), "The goal of this session, in the user's words: ship v2 with all tests green\n\n"))
+  assert(string.starts_with(opening("ship v2"), "The goal of this session: ship v2\n\n"))
+  assert_eq(brief("ship v2\nand more"), "ship v2")
+}
