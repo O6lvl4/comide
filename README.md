@@ -227,6 +227,31 @@ names separated by `|`.
 A hook runs as you, unconfined. A project's hooks are not used until the project is
 trusted (`--trust-project`).
 
+### MCP servers
+
+Tools that live in other programs are named in the same files, in the shape every MCP
+client uses:
+
+```json
+{ "mcpServers": {
+    "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+    "docs":  { "type": "http", "url": "https://example.com/mcp",
+               "headers": { "Authorization": "Bearer ..." } } } }
+```
+
+The model is not given the servers' tools. It is told the servers' names and has three
+tools to reach through them: `mcp_tools` lists what a server offers, `mcp_describe`
+gives one tool's arguments, `mcp_call` calls it. A server with fifty tools costs one
+line until one of them is looked at.
+
+Each of those is one short exchange: the server is started (or its address called),
+greeted, asked, and left. Nothing is kept running between calls, so a server that only
+works by remembering earlier calls in its own memory is not served by this.
+
+`mcp_call` asks first unless a rule allows it (`mcp_call(files/read_file)`,
+`mcp_call(files/*)`), and does not run in plan mode. A server runs as you, unconfined;
+a project's servers are not used until the project is trusted.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

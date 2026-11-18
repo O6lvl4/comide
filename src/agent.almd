@@ -38,6 +38,7 @@ import self.sessions
 import self.memory
 import self.goal
 import self.settings
+import self.mcp
 import self.rules
 
 fn system_prompt(root: String) -> String = """
@@ -140,8 +141,12 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let rule_problems = rules.problems(loaded.settings.allow + loaded.settings.ask + loaded.settings.deny)
   for line in loaded.notes + rule_problems { options.show(opts0, ui.note_line(opts0.ui, line))! }
   let has_hooks = not list.is_empty(value.as_object(loaded.settings.hooks) ?? [])
+  // The programs and addresses whose tools can be reached (mcp.almd), by name only.
+  let servers = mcp.servers_of(loaded.settings.mcp)
   let setup = { ...setup_of(opts0)!, allow_rules: loaded.settings.allow, ask_rules: loaded.settings.ask, deny_rules: loaded.settings.deny,
-    hooks_json: if has_hooks then json.stringify(loaded.settings.hooks) else "" }
+    hooks_json: if has_hooks then json.stringify(loaded.settings.hooks) else "",
+    mcp_json: if list.is_empty(servers) then "" else json.stringify(loaded.settings.mcp) }
+  if not list.is_empty(servers) then options.show(opts0, ui.note_line(opts0.ui, "MCP servers: " + list.join(list.map(servers, (sv) => sv.name), ", ")))!
   // What a SessionStart hook prints is said to the model with the project's own notes.
   let at_start = turn.hooked(opts0, setup, "SessionStart", "", value.null(), "", "")!
   // What the project and the person wrote down for an agent (briefing.almd), after the
@@ -157,7 +162,7 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   // What was kept from earlier sessions here (memory.almd). Last, because it is the part
   // most likely to differ from one session to the next.
   let remembered = memory.section(setup.memory_file, memory.read(setup.memory_file)!)
-  let system = list.join(list.filter([system_prompt(opts0.root) + "\n" + tools.project_context(setup)!, briefed, skills.section(known),
+  let system = list.join(list.filter([system_prompt(opts0.root) + "\n" + tools.project_context(setup)!, briefed, skills.section(known), mcp.section(servers),
     if at_start.printed == "" then "" else "Said by a check the user set up to run at the start of a session:\n" + at_start.printed, remembered], (part) => part != ""), "\n\n")
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")

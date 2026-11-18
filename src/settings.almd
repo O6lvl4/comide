@@ -13,7 +13,8 @@
 // The project's file is the one a stranger can write. A repository that is cloned and
 // opened must not be able to let its own commands through, or run its own hooks, by
 // shipping a file. So of a project's settings only `ask` and `deny`, which can only make
-// comide more careful, are used as found. Its `allow` rules and its hooks are used once
+// comide more careful, are used as found. Its `allow` rules, its hooks and its MCP servers
+// (all of which let a command of the project's choosing run) are used once
 // the person has said so, with --trust-project, and only while the file stays exactly as
 // it was then: a copy is kept in ~/.comide/trust, and a changed file is a stranger again.
 
@@ -21,16 +22,18 @@ import fs
 import json
 import env
 
-type Settings = { allow: List[String], ask: List[String], deny: List[String], hooks: Value }
+// `mcp` is the `mcpServers` object: the programs and addresses whose tools can be reached (mcp.almd).
+type Settings = { allow: List[String], ask: List[String], deny: List[String], hooks: Value, mcp: Value }
 
-fn nothing() -> Settings = Settings { allow: [], ask: [], deny: [], hooks: value.object([]) }
+fn nothing() -> Settings = Settings { allow: [], ask: [], deny: [], hooks: value.object([]), mcp: value.object([]) }
 
 fn texts(v: Value, key: String) -> List[String] =
   list.filter_map(value.get_array(v, key) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
 
 fn of_doc(doc: Value) -> Settings = {
   let p = value.get(doc, "permissions") ?? value.object([])
-  Settings { allow: texts(p, "allow"), ask: texts(p, "ask"), deny: texts(p, "deny"), hooks: value.get(doc, "hooks") ?? value.object([]) }
+  Settings { allow: texts(p, "allow"), ask: texts(p, "ask"), deny: texts(p, "deny"), hooks: value.get(doc, "hooks") ?? value.object([]),
+    mcp: value.get(doc, "mcpServers") ?? value.object([]) }
 }
 
 // Hooks of two files, event by event: the entries of both.
@@ -40,12 +43,13 @@ fn hooks_joined(a: Value, b: Value) -> Value = {
 }
 
 fn joined(a: Settings, b: Settings) -> Settings =
-  Settings { allow: a.allow + b.allow, ask: a.ask + b.ask, deny: a.deny + b.deny, hooks: hooks_joined(a.hooks, b.hooks) }
+  Settings { allow: a.allow + b.allow, ask: a.ask + b.ask, deny: a.deny + b.deny, hooks: hooks_joined(a.hooks, b.hooks), mcp: value.merge(a.mcp, b.mcp) }
 
 // The part of a project's settings that can only make comide more careful.
-fn careful_part(s: Settings) -> Settings = Settings { allow: [], ask: s.ask, deny: s.deny, hooks: value.object([]) }
+fn careful_part(s: Settings) -> Settings = Settings { allow: [], ask: s.ask, deny: s.deny, hooks: value.object([]), mcp: value.object([]) }
 
-fn asks_for_trust(s: Settings) -> Bool = not list.is_empty(s.allow) or not list.is_empty(value.as_object(s.hooks) ?? [])
+fn asks_for_trust(s: Settings) -> Bool =
+  not list.is_empty(s.allow) or not list.is_empty(value.as_object(s.hooks) ?? []) or not list.is_empty(value.as_object(s.mcp) ?? [])
 
 fn parsed(path: String, text: String) -> Result[Settings, String] =
   match json.parse(text) {
@@ -93,7 +97,7 @@ effect fn load(root: String, trust_now: Bool) -> Result[Loaded, String] = {
       if (fs.read_text(copy) ?? "") == text then { all = joined(all, mine) }
       else {
         all = joined(all, careful_part(mine))
-        list.push(notes, "this project's settings have allow rules or hooks, and they are not in use: start comide with --trust-project once, after reading .comide/settings.json, to use them")
+        list.push(notes, "this project's settings have allow rules, hooks or MCP servers, and they are not in use: start comide with --trust-project once, after reading .comide/settings.json, to use them")
       }
     }
   }
@@ -114,7 +118,8 @@ test "the lists and the hooks of two files are joined" {
 test "of a project that has not been trusted, only what makes comide more careful is used" {
   let s = of_doc(json.parse("{\"permissions\":{\"allow\":[\"shell\"],\"ask\":[\"edit\"],\"deny\":[\"read(.env*)\"]},\"hooks\":{\"Stop\":[]}}") ?? value.null())
   assert(asks_for_trust(s))
-  assert_eq(careful_part(s), Settings { allow: [], ask: ["edit"], deny: ["read(.env*)"], hooks: value.object([]) })
+  assert_eq(careful_part(s), Settings { allow: [], ask: ["edit"], deny: ["read(.env*)"], hooks: value.object([]), mcp: value.object([]) })
+  assert(asks_for_trust(of_doc(json.parse("{\"mcpServers\":{\"x\":{\"command\":\"y\"}}}") ?? value.null())))
   assert(not asks_for_trust(of_doc(json.parse("{\"permissions\":{\"deny\":[\"shell(rm *)\"]}}") ?? value.null())))
 }
 

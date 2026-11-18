@@ -1,0 +1,240 @@
+// MCP: tools that live in other programs.
+//
+// A server is named in the settings, in the shape every MCP client uses:
+//
+//   "mcpServers": {
+//     "files": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."] },
+//     "docs":  { "type": "http", "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer ..." } }
+//   }
+//
+// What the model is given is not the servers' tools. A server can offer dozens, each with
+// a schema, and every one of them would ride along in every request whether it is used
+// or not. The model is told the servers' names, and has three tools of its own to reach
+// through them: `mcp_tools` lists what a server offers, `mcp_describe` gives one tool's
+// arguments, `mcp_call` calls it. A tool costs nothing until it is looked at.
+//
+// Each of those is one short exchange: the server is started (or the address called),
+// told hello, asked the one thing, and left. Nothing is kept running between calls, so a
+// server that only works by remembering earlier calls in its own memory is not served
+// by this; one that keeps its state on disk or behind its address is.
+//
+// A server is a program of the person's choosing, run as the person, like a hook. A
+// project's servers are not used until the project is trusted (settings.almd), and a
+// call asks first unless a rule allows it (`mcp_call(files/read_file)`).
+
+import fs
+import json
+import process
+
+type Server = { name: String, http: Bool, command: String, args: List[String], vars: List[String], url: String, headers: List[String] }
+
+let PROTOCOL = "2025-06-18"
+let WANTED_ID = 7001
+let TIMEOUT_S = 120
+
+fn texts(v: Value, key: String) -> List[String] =
+  list.filter_map(value.get_array(v, key) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
+
+// `{ "K": "V" }` as `K<sep>V` lines: `K=V` for the environment, `K: V` for headers.
+fn pairs(v: Value, key: String, sep: String) -> List[String] =
+  list.filter_map(value.get_object(v, key) ?? [], (row) => match value.as_string(row.1) { ok(x) => some(row.0 + sep + x), err(_) => none })
+
+fn server_of(name: String, v: Value) -> Server? = {
+  let url = value.get_string(v, "url") ?? ""
+  let command = value.get_string(v, "command") ?? ""
+  if url != "" then some(Server { name: name, http: true, command: "", args: [], vars: [], url: url, headers: pairs(v, "headers", ": ") })
+  else if command != "" then some(Server { name: name, http: false, command: command, args: texts(v, "args"), vars: pairs(v, "env", "="), url: "", headers: [] })
+  else none
+}
+
+// The servers of an `mcpServers` object. One with neither a command nor an address is
+// left out.
+fn servers_of(doc: Value) -> List[Server] =
+  list.filter_map(value.as_object(doc) ?? [], (row) => server_of(row.0, row.1))
+
+fn parsed(text: String) -> Value = json.parse(if string.trim(text) == "" then "{}" else text) ?? value.object([])
+
+fn rpc(id: Int, method: String, params: Value) -> String = {
+  var fields = [("jsonrpc", value.string("2.0"))]
+  if id > 0 then { list.push(fields, ("id", value.int(id))) }
+  list.push(fields, ("method", value.string(method)))
+  match value.as_object(params) { ok(_) => list.push(fields, ("params", params)), err(_) => () }
+  json.stringify(value.object(fields))
+}
+
+fn hello() -> String = rpc(1, "initialize", value.object([
+  ("protocolVersion", value.string(PROTOCOL)),
+  ("capabilities", value.object([])),
+  ("clientInfo", value.object([("name", value.string("comide")), ("version", value.string("1"))])),
+]))
+
+fn ready() -> String = rpc(0, "notifications/initialized", value.null())
+
+// The answer to request `id` in what a server sent back: a line of JSON, or the same
+// after `data:` when it came as an event stream. A JSON-RPC error is the error.
+fn answer_in(output: String, id: Int) -> Result[Value, String] = {
+  var found: Result[Value, String] = err("the server sent no answer" + (if string.trim(output) == "" then "" else ": " + string.take(string.trim(output), 300)))
+  for raw in string.split(output, "\n") {
+    let line = string.trim(string.strip_prefix(string.trim(raw), "data:") ?? string.trim(raw))
+    if string.starts_with(line, "{") then {
+      match json.parse(line) {
+        err(_) => (),
+        ok(doc) => if (value.get_int(doc, "id") ?? -1) == id then {
+          found = match value.get(doc, "error") {
+            some(e) => err("the server answered with an error: " + (value.get_string(e, "message") ?? json.stringify(e))),
+            none => ok(value.get(doc, "result") ?? value.object([])),
+          }
+        },
+      }
+    }
+  }
+  found
+}
+
+fn one_line(s: String, n: Int) -> String = {
+  let l = string.trim(list.first(string.split(string.trim(s), "\n")) ?? "")
+  if string.len(l) > n then string.take(l, n) + "…" else l
+}
+
+// What a server offers, a line per tool: the answer to tools/list, shortened.
+fn tools_listed(result: Value) -> String = {
+  let all = value.get_array(result, "tools") ?? []
+  if list.is_empty(all) then "(this server offers no tools)"
+  else list.join(list.map(all, (t) => "- " + (value.get_string(t, "name") ?? "") + ": " + one_line(value.get_string(t, "description") ?? "", 200)), "\n")
+}
+
+// One tool's whole description and the arguments it takes.
+fn tool_described(result: Value, tool: String) -> String? =
+  option.map(list.find(value.get_array(result, "tools") ?? [], (t) => (value.get_string(t, "name") ?? "") == tool),
+    (t) => (value.get_string(t, "description") ?? "") + "\n\narguments (JSON schema):\n" + json.stringify(value.get(t, "inputSchema") ?? value.object([])))
+
+// What a call came to: the text the tool returned, and whether the tool says it failed.
+fn call_result(result: Value) -> (String, Bool) = {
+  let said = list.filter_map(value.get_array(result, "content") ?? [], (c) =>
+    if (value.get_string(c, "type") ?? "") == "text" then value.get_string(c, "text")
+    else some("[" + (value.get_string(c, "type") ?? "content") + " content, not shown]"))
+  let text = if list.is_empty(said) then json.stringify(value.get(result, "structuredContent") ?? result) else list.join(said, "\n")
+  (text, value.get_bool(result, "isError") ?? false)
+}
+
+// A server spoken to over its stdin and stdout: it is started, sent the lines of the
+// request file, and read until the line that answers `$2` comes; then it is stopped.
+// Two named pipes, because the exchange is a conversation and a plain pipe cannot be
+// written to after the reading has begun.
+let STDIO_HELPER = """
+req=$1; want=$2; shift 2
+in=$(mktemp -u); out=$(mktemp -u)
+mkfifo "$in" "$out" || exit 3
+"$@" < "$in" > "$out" 2>/dev/null &
+pid=$!
+exec 3> "$in" 4< "$out"
+cat "$req" >&3
+while IFS= read -r line <&4; do
+  case "$line" in
+    *'"id":'"$want"[,}]*|*'"id": '"$want"[,}]*) printf '%s' "$line"; echo; break ;;
+  esac
+done
+exec 3>&- 4<&-
+kill $pid 2>/dev/null
+wait $pid 2>/dev/null
+rm -f "$in" "$out"
+"""
+
+// A server at an address: hello, the session it names if it names one, ready, the request.
+let HTTP_HELPER = """
+url=$1; hello=$2; ready=$3; req=$4; shift 4
+hdr=$(mktemp)
+curl -sS -m 30 -D "$hdr" -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' "$@" --data-binary @"$hello" "$url" || exit 4
+sid=$(grep -i '^mcp-session-id:' "$hdr" | head -1 | tr -d '[:cntrl:]' | sed 's/^[^:]*: *//')
+rm -f "$hdr"
+if [ -n "$sid" ]; then set -- "$@" -H "Mcp-Session-Id: $sid"; fi
+curl -sS -m 30 -o /dev/null -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' "$@" --data-binary @"$ready" "$url"
+curl -sS -m 110 -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' "$@" --data-binary @"$req" "$url"
+"""
+
+fn header_args(headers: List[String]) -> List[String] = list.flat_map(headers, (h) => ["-H", h])
+
+// One exchange with a server: hello, then `method`. The answer's `result`, or why not.
+effect fn ask(scratch: String, root: String, sv: Server, method: String, params: Value) -> Result[Value, String] = {
+  let stamp = scratch + "/mcp-" + int.to_string(datetime.now_ms())
+  let request = rpc(WANTED_ID, method, params)
+  let command = if sv.http then {
+    fs.write_text(stamp + ".sh", HTTP_HELPER)!
+    fs.write_text(stamp + ".hello", hello())!
+    fs.write_text(stamp + ".ready", ready())!
+    fs.write_text(stamp + ".req", request)!
+    [stamp + ".sh", sv.url, stamp + ".hello", stamp + ".ready", stamp + ".req"] + header_args(sv.headers)
+  } else {
+    fs.write_text(stamp + ".sh", STDIO_HELPER)!
+    fs.write_text(stamp + ".req", hello() + "\n" + ready() + "\n" + request + "\n")!
+    [stamp + ".sh", stamp + ".req", int.to_string(WANTED_ID), "env"] + sv.vars + [sv.command] + sv.args
+  }
+  let got = process.output(process.ProcessCommand { cmd: "bash", args: command, dir: root, timeout_ms: TIMEOUT_S * 1000 })
+  for ext in [".sh", ".hello", ".ready", ".req"] { let _ = fs.remove(stamp + ext) }
+  match got {
+    err(e) => err("the server " + sv.name + " could not be spoken to: " + e),
+    ok(st) => match answer_in(st.stdout, WANTED_ID) {
+      ok(result) => ok(result),
+      err(e) => err(sv.name + ": " + e + (if string.trim(st.stderr) == "" then "" else " (" + string.take(string.trim(st.stderr), 200) + ")")),
+    },
+  }
+}
+
+// What the model is told at the start: the servers' names, and how to reach through them.
+fn section(servers: List[Server]) -> String =
+  if list.is_empty(servers) then ""
+  else "Tools in other programs (MCP servers): " + list.join(list.map(servers, (s) => s.name), ", ")
+    + ". Their tools are not listed here. Use mcp_tools with a server's name to see what it offers, mcp_describe for a tool's arguments, and mcp_call to call it."
+
+fn named(servers: List[Server], name: String) -> Result[Server, String] =
+  match list.find(servers, (s) => s.name == name) {
+    some(s) => ok(s),
+    none => err("There is no MCP server called " + name + ". The servers are: " + (if list.is_empty(servers) then "(none)" else list.join(list.map(servers, (s) => s.name), ", "))),
+  }
+
+test "servers are read from the shape every MCP client uses" {
+  let doc = parsed("{\"files\":{\"command\":\"npx\",\"args\":[\"-y\",\"server-filesystem\",\".\"],\"env\":{\"DEBUG\":\"1\"}},\"docs\":{\"type\":\"http\",\"url\":\"https://example.com/mcp\",\"headers\":{\"Authorization\":\"Bearer x\"}},\"empty\":{}}")
+  let all = servers_of(doc)
+  assert_eq(list.map(all, (s) => s.name), ["files", "docs"])
+  assert_eq(list.first(all), some(Server { name: "files", http: false, command: "npx", args: ["-y", "server-filesystem", "."], vars: ["DEBUG=1"], url: "", headers: [] }))
+  assert_eq(list.last(all), some(Server { name: "docs", http: true, command: "", args: [], vars: [], url: "https://example.com/mcp", headers: ["Authorization: Bearer x"] }))
+  assert_eq(header_args(["A: 1", "B: 2"]), ["-H", "A: 1", "-H", "B: 2"])
+}
+
+test "a request is one line of JSON-RPC, and a notification has no id" {
+  assert_eq(rpc(7, "tools/list", value.null()), "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\"}")
+  assert_eq(ready(), "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")
+  assert(string.contains(hello(), "\"method\":\"initialize\""))
+  assert(string.contains(rpc(7, "tools/call", parsed("{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"}}")), "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"}}"))
+}
+
+test "the answer is found by its id, as a line or as an event, and an error is an error" {
+  let plain = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"serverInfo\":{}}}\n{\"jsonrpc\":\"2.0\",\"id\":7001,\"result\":{\"tools\":[]}}\n"
+  assert_eq(result.map(answer_in(plain, 7001), (r) => json.stringify(r)), ok("{\"tools\":[]}"))
+  let stream = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7001,\"result\":{\"ok\":true}}\n\n"
+  assert_eq(result.map(answer_in(stream, 7001), (r) => json.stringify(r)), ok("{\"ok\":true}"))
+  assert_eq(result.map(answer_in("{\"jsonrpc\":\"2.0\",\"id\":7001,\"error\":{\"code\":-32601,\"message\":\"no such tool\"}}", 7001), (r) => json.stringify(r)),
+    err("the server answered with an error: no such tool"))
+  assert_eq(result.map(answer_in("", 7001), (r) => json.stringify(r)), err("the server sent no answer"))
+}
+
+test "a server's tools are listed a line each, described one at a time, and a call is its text" {
+  let listed = parsed("{\"tools\":[{\"name\":\"echo\",\"description\":\"Say it back.\\nMore detail.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}},{\"name\":\"add\",\"description\":\"Add two numbers.\"}]}")
+  assert_eq(tools_listed(listed), "- echo: Say it back.\n- add: Add two numbers.")
+  assert(string.contains(tool_described(listed, "echo") ?? "", "\"properties\":{\"text\":{\"type\":\"string\"}}"))
+  assert_eq(tool_described(listed, "nope"), none)
+  assert_eq(call_result(parsed("{\"content\":[{\"type\":\"text\",\"text\":\"hi\"},{\"type\":\"image\",\"data\":\"...\"}]}")), ("hi\n[image content, not shown]", false))
+  assert_eq(call_result(parsed("{\"content\":[{\"type\":\"text\",\"text\":\"boom\"}],\"isError\":true}")), ("boom", true))
+}
+
+test "a server on stdin and stdout is started, greeted, asked, and stopped" {
+  let dir = string.trim(process.exec("mktemp", ["-d"])!)
+  // A server in a few lines of Python: it answers initialize, tools/list and tools/call,
+  // and never exits on its own, as a real one does not.
+  fs.write_text(dir + "/server.py", "import json, sys\nfor line in sys.stdin:\n    m = json.loads(line)\n    if 'id' not in m:\n        continue\n    if m['method'] == 'initialize':\n        r = {'protocolVersion': m['params']['protocolVersion'], 'capabilities': {}, 'serverInfo': {'name': 't', 'version': '0'}}\n    elif m['method'] == 'tools/list':\n        r = {'tools': [{'name': 'echo', 'description': 'Say it back.', 'inputSchema': {'type': 'object'}}]}\n    else:\n        r = {'content': [{'type': 'text', 'text': 'you said ' + m['params']['arguments']['text']}]}\n    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}), flush=True)\nimport time\ntime.sleep(60)\n")!
+  let sv = Server { name: "t", http: false, command: "python3", args: [dir + "/server.py"], vars: ["X=1"], url: "", headers: [] }
+  assert_eq(result.map(ask(dir, dir, sv, "tools/list", value.null()), tools_listed), ok("- echo: Say it back."))
+  assert_eq(result.map(ask(dir, dir, sv, "tools/call", parsed("{\"name\":\"echo\",\"arguments\":{\"text\":\"hi\"}}")), call_result), ok(("you said hi", false)))
+  let gone = Server { name: "gone", http: false, command: dir + "/no-such-program", args: [], vars: [], url: "", headers: [] }
+  assert(result.is_err(ask(dir, dir, gone, "tools/list", value.null())))
+}
