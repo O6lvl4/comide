@@ -210,6 +210,39 @@ fn command_of(name: String, arguments: String) -> String? =
     err(_) => none,
   }
 
+// What a call is about as the settings' rules see it (rules.almd): the tool the rule
+// names, and the command, path, address or words. solve's verify command is a shell
+// command and answers to the shell rules; a page is known by its host.
+fn subject_of(name: String, arguments: String) -> (String, String) =
+  match json.parse(if string.trim(arguments) == "" then "{}" else arguments) {
+    err(_) => (name, ""),
+    ok(a) => {
+      let arg = (k: String) => toolkit.str_arg(a, k)
+      if name == "shell" then ("shell", arg("command"))
+      else if name == "solve" then ("shell", arg("verify"))
+      else if name == "web_fetch" then ("web_fetch", "domain:" + host_of(arg("url")))
+      else if name == "web_search" then (name, arg("query"))
+      else if name == "skill" then (name, arg("name"))
+      else if name == "remember" then (name, arg("note"))
+      else if name == "map" then (name, arg("task"))
+      else (name, if arg("path") == "" then "." else arg("path"))
+    },
+  }
+
+fn host_of(url: String) -> String = {
+  let rest = match string.split_once(url, "://") { some((_, r)) => r, none => url }
+  let upto = (s: String, mark: String) => match string.split_once(s, mark) { some((before, _)) => before, none => s }
+  string.to_lower(upto(upto(upto(rest, "/"), "?"), ":"))
+}
+
+test "the rules see a call by its command, its path or its host" {
+  assert_eq(subject_of("shell", "{\"command\":\"git status\"}"), ("shell", "git status"))
+  assert_eq(subject_of("solve", "{\"task\":\"t\",\"verify\":\"cargo test\"}"), ("shell", "cargo test"))
+  assert_eq(subject_of("edit", "{\"path\":\"src/a.py\",\"old\":\"x\",\"new\":\"y\"}"), ("edit", "src/a.py"))
+  assert_eq(subject_of("tree", "{}"), ("tree", "."))
+  assert_eq(subject_of("web_fetch", "{\"url\":\"https://Docs.Example.com:8443/a?b=c\"}"), ("web_fetch", "domain:docs.example.com"))
+}
+
 test "a call is shown by what it is about" {
   assert_eq(call_label("read", "{\"path\":\"a.py\",\"lines\":\"3-9\"}"), "a.py:3-9")
   assert_eq(call_label("shell", "{\"command\":\"go test ./...\"}"), "go test ./...")

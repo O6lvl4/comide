@@ -17,6 +17,7 @@ import self.asking
 import self.waiting
 import self.handover
 import self.goal
+import self.rules
 
 // A turn in progress. `tin`, `tcached` and `tout` are the tokens spent; `sigs` are the
 // calls made since the model was last told it was looping. `request` is what the person
@@ -184,11 +185,27 @@ effect fn run_calls(opts: options.Options, setup: toolkit.Setup, calls: List[mod
 effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCall, ran: Ran) -> Ran = {
   let u = opts.ui
   options.show(opts, "\n" + ui.call_line(u, c.name, tools.call_label(c.name, c.arguments)))!
-  let p = match tools.command_of(c.name, c.arguments) {
-    some(_) => asking.permitted(opts, ran.allow, "Run this command?")!,
-    none => asking.Permission { run: true, allow_from_now: ran.allow, said: "" },
+  // The settings speak first (rules.almd); a call they say nothing of is asked about as
+  // it always was. `refused` is what the model is told when the settings stopped the call.
+  let (rule_tool, about) = tools.subject_of(c.name, c.arguments)
+  let (p, refused) = match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, rule_tool, about) {
+    Denied(rule) => (asking.Permission { run: false, allow_from_now: ran.allow, said: "" },
+      "Not run: the settings deny this call (" + rule + "). Do not look for another way to do the same thing; go on without it, or say what you need."),
+    Allowed(_) => (asking.Permission { run: true, allow_from_now: ran.allow, said: "" }, ""),
+    Asked(rule) => if not opts.live then (asking.Permission { run: false, allow_from_now: ran.allow, said: "" },
+        "Not run: the settings say to ask a person before this call (" + rule + "), and nobody is here to ask.")
+      else {
+        let a = asking.permitted(opts, false, "The settings ask before this (" + rule + "). Run it?")!
+        // "Stop asking" at this question is not taken as leave for everything else.
+        (asking.Permission { run: a.run, allow_from_now: ran.allow, said: a.said }, "")
+      },
+    Unsaid => (match tools.command_of(c.name, c.arguments) {
+      some(_) => asking.permitted(opts, ran.allow, "Run this command?")!,
+      none => asking.Permission { run: true, allow_from_now: ran.allow, said: "" },
+    }, ""),
   }
   let r = if p.run then tools.run(setup, c.name, c.arguments)!
+    else if refused != "" then toolkit.failed(refused, "not run: the settings")
     else toolkit.failed(asking.declined(opts, p.said), if p.said == "" then "not run" else "not run: " + p.said)
   options.show(opts, ui.result_line(u, r.brief, r.failed))!
   Ran { results: ran.results + [convo.tool_message(c.id, r.text)], allow: p.allow_from_now, spent: ran.spent + r.cost_usd,
@@ -201,7 +218,13 @@ effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCal
 effect fn run_check(opts: options.Options, setup: toolkit.Setup, command: String, allow0: Bool) -> (String, Bool, Bool, Bool) = {
   let u = opts.ui
   options.show(opts, "\n" + ui.call_line(u, "shell", command + "  (comide checks the change)"))!
-  let p = asking.permitted(opts, allow0, "Run this command to check the change?")!
+  let p = match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, "shell", command) {
+    Denied(_) => asking.Permission { run: false, allow_from_now: allow0, said: "" },
+    Allowed(_) => asking.Permission { run: true, allow_from_now: allow0, said: "" },
+    Asked(_) => if opts.live then { let a = asking.permitted(opts, false, "Run this command to check the change?")!; asking.Permission { run: a.run, allow_from_now: allow0, said: a.said } }
+      else asking.Permission { run: false, allow_from_now: allow0, said: "" },
+    Unsaid => asking.permitted(opts, allow0, "Run this command to check the change?")!,
+  }
   if not p.run then {
     options.show(opts, ui.result_line(u, "not run", true))!
     ("", false, false, p.allow_from_now)

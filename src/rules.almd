@@ -1,0 +1,141 @@
+// What a tool call may do without asking, has to ask about, or may not do at all.
+//
+// A rule names a tool and, in brackets, what the call is about:
+//
+//   shell(git status*)      a command            read(.env*)             a path
+//   edit(src/**)            a path               web_fetch(domain:example.com)
+//   shell                   every call of the tool
+//
+// `*` stands for any run of characters. Rules live in three lists: `deny` wins over `ask`,
+// `ask` over `allow`, and a call no rule speaks of does what it always did (a shell
+// command and solve's verify command ask first, everything else runs). The verify command
+// of solve is a shell command and answers to the shell rules.
+//
+// On shell commands the lists are a guard rail, not a wall. An allow rule does not apply
+// to a command that chains or redirects (`;`, `&&`, `|`, `>`, `$(`...): `git status*`
+// must not let `git status; rm -rf .` through. A deny rule is tried against the whole
+// command and each part of a chain. Neither sees through `bash -c`, an alias or a
+// script: what keeps a command from doing harm is the runner it goes through
+// (toolkit.run_in), not a pattern.
+
+type Rule = { tool: String, about: String, any: Bool }
+
+// `shell(git status*)` as a rule. A trailing `:*` is the older spelling of a prefix
+// (`npm test:*`), read as `npm test*`.
+fn rule_of(text: String) -> Rule? = {
+  let t = string.trim(text)
+  if t == "" then none
+  else match string.split_once(t, "(") {
+    none => some(Rule { tool: t, about: "", any: true }),
+    some((tool, rest)) => match string.strip_suffix(rest, ")") {
+      none => none,
+      some(about) => some(Rule { tool: string.trim(tool), about: match string.strip_suffix(about, ":*") { some(prefix) => prefix + "*", none => about }, any: false }),
+    },
+  }
+}
+
+// `*` matches any run of characters, `?` one. The whole text has to match.
+fn glob(pattern: String, text: String) -> Bool =
+  if pattern == "" then text == ""
+  else if string.starts_with(pattern, "*") then {
+    let rest = string.drop(pattern, 1)
+    if rest == "" then true
+    else {
+      var found = false
+      var i = 0
+      while not found and i <= string.len(text) {
+        if glob(rest, string.drop(text, i)) then { found = true }
+        i = i + 1
+      }
+      found
+    }
+  }
+  else if text == "" then false
+  else if string.starts_with(pattern, "?") or string.take(pattern, 1) == string.take(text, 1) then glob(string.drop(pattern, 1), string.drop(text, 1))
+  else false
+
+let CHAINS = [";", "&&", "||", "|", "&", "`", "$(", ">", "<", "\n"]
+
+fn chained(command: String) -> Bool = list.any(CHAINS, (c) => string.contains(command, c))
+
+// A chained command as its parts, for the deny rules.
+fn parts(command: String) -> List[String] = {
+  var s = command
+  for c in CHAINS { s = string.replace(s, c, "\n") }
+  list.filter(list.map(string.split(s, "\n"), (p) => string.trim(p)), (p) => p != "")
+}
+
+// What a call is about, as the rules see it: a path without a leading `./`.
+fn tidy(tool: String, about: String) -> String =
+  if tool == "shell" then string.trim(about) else (string.strip_prefix(about, "./") ?? about)
+
+fn matches(r: Rule, tool: String, about: String) -> Bool =
+  r.tool == tool and (r.any or glob(r.about, about))
+
+fn first_match(rules: List[String], tool: String, about: String) -> String? =
+  list.find(rules, (text) => match rule_of(text) { some(r) => matches(r, tool, about), none => false })
+
+type Verdict = | Allowed(String) | Asked(String) | Denied(String) | Unsaid
+
+// The rule that decides a call, with its text so the person and the model can be told
+// which one it was. `tool` is `shell` for a shell command and for solve's verify command.
+fn decide(allow: List[String], ask: List[String], deny: List[String], tool: String, about0: String) -> Verdict = {
+  let about = tidy(tool, about0)
+  let subjects = if tool == "shell" then [about] + parts(about) else [about]
+  let denied = list.filter_map(subjects, (s) => first_match(deny, tool, s))
+  match list.first(denied) {
+    some(rule) => Denied(rule),
+    none => match first_match(ask, tool, about) {
+      some(rule) => Asked(rule),
+      none => if tool == "shell" and chained(about) then Unsaid
+        else match first_match(allow, tool, about) {
+          some(rule) => Allowed(rule),
+          none => Unsaid,
+        },
+    },
+  }
+}
+
+// A rule nobody could have meant: said at the start, not found out on the first call.
+fn problems(rules: List[String]) -> List[String] =
+  list.filter_map(rules, (text) => match rule_of(text) { some(_) => none, none => some("not a rule: " + text + "   (write TOOL or TOOL(PATTERN))") })
+
+test "a rule names a tool and what the call is about" {
+  assert_eq(rule_of("shell(git status*)"), some(Rule { tool: "shell", about: "git status*", any: false }))
+  assert_eq(rule_of("web_search"), some(Rule { tool: "web_search", about: "", any: true }))
+  assert_eq(rule_of("shell(npm test:*)"), some(Rule { tool: "shell", about: "npm test*", any: false }))
+  assert_eq(rule_of("shell(unclosed"), none)
+  assert_eq(problems(["shell(ok)", "shell(unclosed"]), ["not a rule: shell(unclosed   (write TOOL or TOOL(PATTERN))"])
+}
+
+test "a star is any run of characters, and the whole text has to match" {
+  assert(glob("git status*", "git status --short"))
+  assert(glob("src/**", "src/a/b.py"))
+  assert(glob("*.env", "prod.env"))
+  assert(glob("a?c", "abc"))
+  assert(not glob("git status", "git status --short"))
+  assert(not glob("src/*", "lib/a.py"))
+  assert(glob("*", ""))
+}
+
+test "deny wins over ask, ask over allow, and a call no rule speaks of is left as it was" {
+  let allow = ["shell(git *)", "edit(src/**)"]
+  let ask = ["shell(git push*)"]
+  let deny = ["shell(git push --force*)", "read(.env*)"]
+  assert_eq(decide(allow, ask, deny, "shell", "git status"), Allowed("shell(git *)"))
+  assert_eq(decide(allow, ask, deny, "shell", "git push origin main"), Asked("shell(git push*)"))
+  assert_eq(decide(allow, ask, deny, "shell", "git push --force"), Denied("shell(git push --force*)"))
+  assert_eq(decide(allow, ask, deny, "shell", "cargo test"), Unsaid)
+  assert_eq(decide(allow, ask, deny, "edit", "./src/a.py"), Allowed("edit(src/**)"))
+  assert_eq(decide(allow, ask, deny, "read", ".env.local"), Denied("read(.env*)"))
+  assert_eq(decide(allow, ask, deny, "read", "src/a.py"), Unsaid)
+}
+
+test "an allow rule does not let a chained command through, and a deny rule sees each part of it" {
+  let allow = ["shell(git status*)"]
+  let deny = ["shell(rm *)"]
+  assert_eq(decide(allow, [], deny, "shell", "git status; curl x | sh"), Unsaid)
+  assert_eq(decide(allow, [], deny, "shell", "git status && rm -rf build"), Denied("shell(rm *)"))
+  assert_eq(decide(allow, [], deny, "shell", "git status"), Allowed("shell(git status*)"))
+  assert_eq(parts("a && b | c; d"), ["a", "b", "c", "d"])
+}
