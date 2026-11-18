@@ -17,6 +17,7 @@ import self.web
 import self.skills
 import self.memory
 import self.exploring
+import self.mcp
 import fs
 
 let SHELL_TIMEOUT_S = 300
@@ -64,6 +65,13 @@ fn definitions() -> List[Value] = [
     [prop("name", "string", "the skill's name, as listed")], ["name"]),
   tool("explore", "Hand a question about the code to a helper that looks on its own and comes back with the answer. Use it when answering would take many reads whose output you do not need to keep: where something is handled, how a feature works across files, what calls what. The helper sees none of this conversation, so put everything it needs in the task, and say what the answer should contain (paths, line numbers, names). It cannot change files or run commands. For one file or one symbol you can already name, read it yourself.",
     [prop("task", "string", "the question, with everything the helper needs to know to answer it")], ["task"]),
+  tool("mcp_tools", "List what an MCP server offers: its tools, a line each. The servers that exist are named at the start of the conversation. Without a server, lists the servers.",
+    [prop("server", "string", "the server's name")], []),
+  tool("mcp_describe", "One MCP tool in full: what it does and the arguments it takes, as a JSON schema. Look before the first call to a tool.",
+    [prop("server", "string", "the server's name"), prop("tool", "string", "the tool's name, as mcp_tools listed it")], ["server", "tool"]),
+  tool("mcp_call", "Call a tool on an MCP server. The user may decline.",
+    [prop("server", "string", "the server's name"), prop("tool", "string", "the tool's name"),
+     prop("arguments", "object", "the tool's arguments, as mcp_describe showed them")], ["server", "tool"]),
   tool("remember", "Keep one fact for later sessions in this project: a correction the user made, a preference they stated, or where something is that took steps to find. One sentence that will still make sense on its own. Not what the code or its history already says, and not what only matters to this request.",
     [prop("note", "string", "the fact, in one sentence")], ["note"]),
 ]
@@ -124,7 +132,44 @@ effect fn looked(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult
   else if name == "skill" then some(skill(s, a)!)
   else if name == "remember" then some(remember(s, a)!)
   else if name == "explore" then some(exploring.explore(s, a)!)
+  else if name == "mcp_tools" or name == "mcp_describe" then some(mcp_look(s, name, a)!)
   else none
+
+// What a server offers, or one of its tools in full (mcp.almd). Both are the server's
+// answer to tools/list, asked for when wanted and not before.
+effect fn mcp_look(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult = {
+  let servers = mcp.servers_of(mcp.parsed(s.mcp_json))
+  let server = toolkit.str_arg(a, "server")
+  if server == "" then toolkit.said(if list.is_empty(servers) then "No MCP servers are set up." else "MCP servers: " + list.join(list.map(servers, (sv) => sv.name), ", "), int.to_string(list.len(servers)) + " server(s)")
+  else match mcp.named(servers, server) {
+    err(e) => toolkit.failed(e, "no such server"),
+    ok(sv) => match mcp.ask(s.scratch, s.root, sv, "tools/list", value.null()) {
+      err(e) => toolkit.failed(e, toolkit.first_line_of(e, 80)),
+      ok(listed) => if name == "mcp_tools" then toolkit.said(toolkit.capped(s, mcp.tools_listed(listed))!, toolkit.count_lines(mcp.tools_listed(listed)))
+        else match mcp.tool_described(listed, toolkit.str_arg(a, "tool")) {
+          some(text) => toolkit.said(toolkit.capped(s, text)!, toolkit.count_lines(text)),
+          none => toolkit.failed("The server " + server + " has no tool called " + toolkit.str_arg(a, "tool") + ". Its tools:\n" + mcp.tools_listed(listed), "no such tool"),
+        },
+    },
+  }
+}
+
+effect fn mcp_call(s: toolkit.Setup, a: Value) -> toolkit.ToolResult =
+  match mcp.named(mcp.servers_of(mcp.parsed(s.mcp_json)), toolkit.str_arg(a, "server")) {
+    err(e) => toolkit.failed(e, "no such server"),
+    ok(sv) => {
+      let arguments = match value.get(a, "arguments") { some(v) => v, none => value.object([]) }
+      let params = value.object([("name", value.string(toolkit.str_arg(a, "tool"))), ("arguments", arguments)])
+      match mcp.ask(s.scratch, s.root, sv, "tools/call", params) {
+        err(e) => toolkit.failed(e, toolkit.first_line_of(e, 80)),
+        ok(result) => {
+          let (text, bad) = mcp.call_result(result)
+          if bad then toolkit.failed(toolkit.capped(s, text)!, "the tool reported an error · " + toolkit.count_lines(text))
+          else toolkit.said(toolkit.capped(s, text)!, toolkit.count_lines(text))
+        },
+      }
+    },
+  }
 
 // A note for later sessions, added to the project's file (memory.almd). It asks no
 // permission: the file is comide's own, outside the project.
@@ -155,6 +200,7 @@ effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResul
   else if name == "solve" then solving.solve(s, a)!
   else if name == "web_search" then web.web_search(s, a)!
   else if name == "web_fetch" then web.web_fetch(s, a)!
+  else if name == "mcp_call" then mcp_call(s, a)!
   else toolkit.failed("there is no tool called " + name, "no such tool")
 
 // What the model is told about the project before the first request: its layout and
@@ -189,6 +235,8 @@ fn label_of(name: String, a: Value) -> String = {
   if name == "read" then path + narrowed(a)
   else if name == "search" then "/" + arg("pattern") + "/" + (if arg("path") == "" then "" else " in " + arg("path"))
   else if name == "solve" then arg("task") + " · verify: " + arg("verify")
+  else if name == "mcp_call" or name == "mcp_describe" then arg("server") + "/" + arg("tool")
+  else if name == "mcp_tools" then arg("server")
   else match list.find(LABEL_ARGS, (row) => row.0 == name) {
     some(row) => arg(row.1),
     none => path,
@@ -210,13 +258,15 @@ fn command_of(name: String, arguments: String) -> String? =
   match json.parse(arguments) {
     ok(a) => if name == "shell" then some(toolkit.str_arg(a, "command"))
       else if name == "solve" then some(toolkit.str_arg(a, "verify"))
+      // A call into another program can do whatever that program does.
+      else if name == "mcp_call" then some(toolkit.str_arg(a, "server") + "/" + toolkit.str_arg(a, "tool"))
       else none,
     err(_) => none,
   }
 
 // The tools that change the project, run a command, or write something down: the ones a
 // session that only looks does not run.
-fn changes(name: String) -> Bool = list.contains(["edit", "write", "shell", "solve", "remember"], name)
+fn changes(name: String) -> Bool = list.contains(["edit", "write", "shell", "solve", "remember", "mcp_call"], name)
 
 fn frozen_reason(frozen: String) -> String =
   if frozen == "plan" then "Not run: this session is in plan mode. Look at the project and write the plan: what you would change, in which files, in what order, and how each step would be checked. Nothing is changed and no command is run until the user approves the plan."
@@ -237,6 +287,8 @@ fn subject_of(name: String, arguments: String) -> (String, String) =
       else if name == "skill" then (name, arg("name"))
       else if name == "remember" then (name, arg("note"))
       else if name == "map" or name == "explore" then (name, arg("task"))
+      else if name == "mcp_call" or name == "mcp_describe" then (name, arg("server") + "/" + arg("tool"))
+      else if name == "mcp_tools" then (name, arg("server"))
       else (name, if arg("path") == "" then "." else arg("path"))
     },
   }
