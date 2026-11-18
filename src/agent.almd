@@ -30,6 +30,7 @@ import self.editor
 import self.convo
 import self.options
 import self.turn
+import self.briefing
 
 fn system_prompt(root: String) -> String = """
 You are comide, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
@@ -102,7 +103,7 @@ effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
   let solve_timeout_s = int.parse(string.trim(env.get("COMIDE_SOLVE_TIMEOUT_S") ?? "")) ?? 300
   ok(toolkit.Setup { root: opts.root, golemide: opts.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx,
     solve_model: solve_model, solve_strong: if solve_strong != "" then solve_strong else solve_model,
-    runner: opts.runner, solve_timeout_s: solve_timeout_s })
+    runner: opts.runner, solve_timeout_s: solve_timeout_s, solve_notes: briefing.for_solve()! })
 }
 
 effect fn chat(opts0: options.Options) -> Result[Int, String] = {
@@ -114,7 +115,13 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let golemide_problem = solving.golemide_problem(opts0.golemide)!
   if golemide_problem != "" then options.show(opts0, ui.note_line(opts0.ui, golemide_problem))!
   let setup = setup_of(opts0)!
-  let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
+  // What the project and the person wrote down for an agent (briefing.almd), after the
+  // parts that do not change with the project's files, and said to the person by name.
+  let notes = briefing.for_talk(opts0.root)!
+  if not list.is_empty(notes) then
+    options.show(opts0, ui.note_line(opts0.ui, "read " + list.join(list.map(notes, (n) => briefing.shown_path(opts0.root, n.path)), ", ")))!
+  let briefed = briefing.section(opts0.root, notes)
+  let system = system_prompt(opts0.root) + "\n" + tools.project_context(setup)! + (if briefed == "" then "" else "\n\n" + briefed)
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
   let place = Place { setup: setup, fresh: fresh, transcript: setup.scratch + "/transcript.json",
