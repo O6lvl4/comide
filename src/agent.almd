@@ -36,6 +36,8 @@ import self.handover
 import self.sessions
 import self.memory
 import self.goal
+import self.settings
+import self.rules
 
 fn system_prompt(root: String) -> String = """
 You are comide, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
@@ -127,7 +129,11 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let _ = model.endpoint_of(opts0.model)!
   let golemide_problem = solving.golemide_problem(opts0.golemide)!
   if golemide_problem != "" then options.show(opts0, ui.note_line(opts0.ui, golemide_problem))!
-  let setup = setup_of(opts0)!
+  // The settings (settings.almd): what may run without asking, and what may not run.
+  let loaded = settings.load(opts0.root, opts0.trust_project)!
+  let rule_problems = rules.problems(loaded.settings.allow + loaded.settings.ask + loaded.settings.deny)
+  for line in loaded.notes + rule_problems { options.show(opts0, ui.note_line(opts0.ui, line))! }
+  let setup = { ...setup_of(opts0)!, allow_rules: loaded.settings.allow, ask_rules: loaded.settings.ask, deny_rules: loaded.settings.deny }
   // What the project and the person wrote down for an agent (briefing.almd), after the
   // parts that do not change with the project's files, and said to the person by name.
   let notes = briefing.for_talk(opts0.root)!
@@ -329,6 +335,8 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                      claude, claude:opus  Claude Code's `claude -p`, on your Claude login
   --effort E       reasoning effort, sent to Cloudflare only: low (default), medium, high
   --yes            run shell and verify commands without asking
+  --trust-project  use the allow rules and hooks in this project's .comide/settings.json,
+                   as the file is now; without it only its ask and deny rules are used
   --max-steps N    model calls per request before it stops to ask (default 40)
   --golemide PATH  the golemide binary (default: $COMIDE_GOLEMIDE, else golemide on PATH)
   --runner PROG    run every tool's command as `PROG KIND -- CMD ARGS...` (default:
@@ -371,6 +379,7 @@ effect fn cli(args: List[String]) -> Int =
       take_up: list.contains(args, "--continue") or list.contains(args, "--resume"),
       take_up_id: opt(args, "--resume") ?? "",
       goal: opt(args, "--goal") ?? "",
+      trust_project: list.contains(args, "--trust-project"),
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }

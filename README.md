@@ -148,6 +148,36 @@ back with it, and it is put back word for word when a note replaces a long conve
 That the goal is met is the model's claim, with evidence for you to read. It is not a
 proof.
 
+## Settings
+
+What may run without asking, and what may not run at all, is written as rules in JSON:
+
+```json
+{ "permissions": {
+    "allow": ["shell(git status*)", "shell(npm test*)"],
+    "ask":   ["shell(git push*)"],
+    "deny":  ["read(.env*)", "shell(rm -rf*)"] } }
+```
+
+A rule is a tool, and in brackets what the call is about: a command for `shell` (and
+for the verify command of `solve`), a path for `read`, `edit` and `write`,
+`domain:HOST` for `web_fetch`. `*` is any run of characters. `deny` wins over `ask`,
+`ask` over `allow`; a call no rule speaks of does what it always did.
+
+| File | Whose |
+|---|---|
+| `~/.config/comide/settings.json` | yours, for every project |
+| the files in `$COMIDE_SETTINGS` (separated by `:`) | named by whoever starts comide |
+| `.comide/settings.json` in the project | the project's |
+
+Of a project's file only `ask` and `deny` are used as found, since they can only make
+comide more careful. Its `allow` rules and hooks are used after you start comide once
+with `--trust-project`, and only while the file stays exactly as it was then.
+
+On shell commands the rules are a guard rail, not a wall: an allow rule does not apply
+to a command that chains or redirects, and a deny rule does not see through `bash -c`
+or a script. What confines a command is the runner (`--runner`).
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

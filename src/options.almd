@@ -10,7 +10,7 @@ import self.ui
 // `take_up` goes back to a kept conversation (sessions.almd): the project's most recent,
 // or the one `take_up_id` names. `goal` is a goal the run starts with (--goal), "" for none.
 type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui, runner: String,
-  take_up: Bool = false, take_up_id: String = "", goal: String = "" }
+  take_up: Bool = false, take_up_id: String = "", goal: String = "", trust_project: Bool = false }
 
 fn with_model(o: Options, m: String) -> Options = { ...o, model: m }
 

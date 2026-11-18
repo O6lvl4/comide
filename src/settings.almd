@@ -1,0 +1,124 @@
+// The settings: what may run without asking (rules.almd) and what runs around the work
+// (hooks.almd), read from JSON files.
+//
+//   ~/.config/comide/settings.json     the person's, for every project
+//   the files in $COMIDE_SETTINGS      named by whoever starts comide (separated by `:`)
+//   .comide/settings.json              the project's
+//
+//   { "permissions": { "allow": ["shell(git status*)"], "ask": [], "deny": ["read(.env*)"] },
+//     "hooks": { ... } }
+//
+// The lists of all the files are joined; `deny` wins wherever it was written.
+//
+// The project's file is the one a stranger can write. A repository that is cloned and
+// opened must not be able to let its own commands through, or run its own hooks, by
+// shipping a file. So of a project's settings only `ask` and `deny`, which can only make
+// comide more careful, are used as found. Its `allow` rules and its hooks are used once
+// the person has said so, with --trust-project, and only while the file stays exactly as
+// it was then: a copy is kept in ~/.comide/trust, and a changed file is a stranger again.
+
+import fs
+import json
+import env
+
+type Settings = { allow: List[String], ask: List[String], deny: List[String], hooks: Value }
+
+fn nothing() -> Settings = Settings { allow: [], ask: [], deny: [], hooks: value.object([]) }
+
+fn texts(v: Value, key: String) -> List[String] =
+  list.filter_map(value.get_array(v, key) ?? [], (m) => match value.as_string(m) { ok(x) => some(x), err(_) => none })
+
+fn of_doc(doc: Value) -> Settings = {
+  let p = value.get(doc, "permissions") ?? value.object([])
+  Settings { allow: texts(p, "allow"), ask: texts(p, "ask"), deny: texts(p, "deny"), hooks: value.get(doc, "hooks") ?? value.object([]) }
+}
+
+// Hooks of two files, event by event: the entries of both.
+fn hooks_joined(a: Value, b: Value) -> Value = {
+  let names = list.unique(list.map(value.as_object(a) ?? [], (row) => row.0) + list.map(value.as_object(b) ?? [], (row) => row.0))
+  value.object(list.map(names, (n) => (n, value.array((value.get_array(a, n) ?? []) + (value.get_array(b, n) ?? [])))))
+}
+
+fn joined(a: Settings, b: Settings) -> Settings =
+  Settings { allow: a.allow + b.allow, ask: a.ask + b.ask, deny: a.deny + b.deny, hooks: hooks_joined(a.hooks, b.hooks) }
+
+// The part of a project's settings that can only make comide more careful.
+fn careful_part(s: Settings) -> Settings = Settings { allow: [], ask: s.ask, deny: s.deny, hooks: value.object([]) }
+
+fn asks_for_trust(s: Settings) -> Bool = not list.is_empty(s.allow) or not list.is_empty(value.as_object(s.hooks) ?? [])
+
+fn parsed(path: String, text: String) -> Result[Settings, String] =
+  match json.parse(text) {
+    err(e) => err(path + " is not JSON: " + e),
+    ok(doc) => ok(of_doc(doc)),
+  }
+
+effect fn read_file(path: String) -> Result[Settings, String] =
+  if not fs.is_file(path) then ok(nothing())
+  else match fs.read_text(path) {
+    err(e) => err(path + ": " + e),
+    ok(text) => parsed(path, text),
+  }
+
+fn key_of(root: String) -> String = string.replace(root, "/", "-")
+fn project_file(root: String) -> String = root + "/.comide/settings.json"
+fn trust_copy(home: String, root: String) -> String = home + "/.comide/trust/" + key_of(root) + ".json"
+
+// What was read, and what the person should hear about it.
+type Loaded = { settings: Settings, notes: List[String] }
+
+// `trust_now` is --trust-project: the project's file as it is now becomes trusted.
+effect fn load(root: String, trust_now: Bool) -> Result[Loaded, String] = {
+  let home = env.get("HOME") ?? ""
+  let config = env.get("XDG_CONFIG_HOME") ?? ""
+  let base = if config == "" then home + "/.config" else config
+  var all = read_file(base + "/comide/settings.json")!
+  for p in list.filter(list.map(string.split(env.get("COMIDE_SETTINGS") ?? "", ":"), (x) => string.trim(x)), (x) => x != "") {
+    if not fs.is_file(p) then { let _: Settings = err("no settings file at " + p + " (named in COMIDE_SETTINGS)")! }
+    all = joined(all, read_file(p)!)
+  }
+  var notes: List[String] = []
+  let pf = project_file(root)
+  if fs.is_file(pf) then {
+    let text = fs.read_text(pf)!
+    let mine = parsed(pf, text)!
+    if not asks_for_trust(mine) then { all = joined(all, mine) }
+    else {
+      let copy = trust_copy(home, root)
+      if trust_now then {
+        fs.mkdir_p(home + "/.comide/trust")!
+        fs.write_text(copy, text)!
+        list.push(notes, "this project's settings are trusted as they are now; a change to .comide/settings.json will need --trust-project again")
+      }
+      if (fs.read_text(copy) ?? "") == text then { all = joined(all, mine) }
+      else {
+        all = joined(all, careful_part(mine))
+        list.push(notes, "this project's settings have allow rules or hooks, and they are not in use: start comide with --trust-project once, after reading .comide/settings.json, to use them")
+      }
+    }
+  }
+  ok(Loaded { settings: all, notes: notes })
+}
+
+test "the lists and the hooks of two files are joined" {
+  let a = of_doc(json.parse("{\"permissions\":{\"allow\":[\"shell(git status*)\"],\"deny\":[\"read(.env*)\"]},\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"a\"}]}]}}") ?? value.null())
+  let b = of_doc(json.parse("{\"permissions\":{\"allow\":[\"edit(src/**)\"],\"ask\":[\"shell(git push*)\"]},\"hooks\":{\"Stop\":[{\"hooks\":[{\"command\":\"b\"}]}],\"PreToolUse\":[]}}") ?? value.null())
+  let j = joined(a, b)
+  assert_eq(j.allow, ["shell(git status*)", "edit(src/**)"])
+  assert_eq(j.ask, ["shell(git push*)"])
+  assert_eq(j.deny, ["read(.env*)"])
+  assert_eq(list.len(value.get_array(j.hooks, "Stop") ?? []), 2)
+  assert_eq(of_doc(value.object([])), nothing())
+}
+
+test "of a project that has not been trusted, only what makes comide more careful is used" {
+  let s = of_doc(json.parse("{\"permissions\":{\"allow\":[\"shell\"],\"ask\":[\"edit\"],\"deny\":[\"read(.env*)\"]},\"hooks\":{\"Stop\":[]}}") ?? value.null())
+  assert(asks_for_trust(s))
+  assert_eq(careful_part(s), Settings { allow: [], ask: ["edit"], deny: ["read(.env*)"], hooks: value.object([]) })
+  assert(not asks_for_trust(of_doc(json.parse("{\"permissions\":{\"deny\":[\"shell(rm *)\"]}}") ?? value.null())))
+}
+
+test "a project's trust is kept beside the person's files, by the project's path" {
+  assert_eq(trust_copy("/h", "/w/p"), "/h/.comide/trust/-w-p.json")
+  assert_eq(project_file("/w/p"), "/w/p/.comide/settings.json")
+}
