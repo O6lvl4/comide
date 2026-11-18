@@ -10,6 +10,7 @@ let USAGE = """
 comide                              a coding conversation in this directory
 comide run PROMPT [--root DIR] ...  one request, answered, then exit
 comide --help                       every option
+comide --version
 """
 
 // `comide` alone is the conversation, the way `claude` is: the thing typed most should be
@@ -23,7 +24,12 @@ local fn chat_args(args: List[String]) -> List[String]? = {
   else none
 }
 
+// The version in almide.toml, said by --version so a program that starts comide can tell
+// which one it has (ci: the two are compared).
+let VERSION = "0.6.0"
+
 effect fn main() -> Unit = {
+  if (list.get(env.args(), 0) ?? "") == "--version" then { println("comide " + VERSION); process.exit(0) }
   match chat_args(["comide"] + env.args()) {
     some(rest) => process.exit(agent.cli(rest)!),
     none => {
