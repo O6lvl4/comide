@@ -148,6 +148,16 @@ back with it, and it is put back word for word when a note replaces a long conve
 That the goal is met is the model's claim, with evidence for you to read. It is not a
 proof.
 
+## Plan mode
+
+`/plan` (or `--plan`) has comide look at the project and answer with a plan: what it
+would change, in which files, in what order, and how each step would be checked. While
+it is on, the tools that change a file or run a command do not run. `/go` approves the
+plan and carries it out; `/plan off` leaves it. After `comide run "..." --plan`,
+`comide run "go ahead" --continue` carries the plan out.
+
+`--read-only` is the same holding of the tools without the plan: a run that only looks.
+
 ## Settings
 
 What may run without asking, and what may not run at all, is written as rules in JSON:

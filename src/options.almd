@@ -10,7 +10,8 @@ import self.ui
 // `take_up` goes back to a kept conversation (sessions.almd): the project's most recent,
 // or the one `take_up_id` names. `goal` is a goal the run starts with (--goal), "" for none.
 type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui, runner: String,
-  take_up: Bool = false, take_up_id: String = "", goal: String = "", trust_project: Bool = false }
+  take_up: Bool = false, take_up_id: String = "", goal: String = "", trust_project: Bool = false,
+  plan: Bool = false, read_only: Bool = false }
 
 fn with_model(o: Options, m: String) -> Options = { ...o, model: m }
 
@@ -19,7 +20,9 @@ fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options = { ...o, tui: tui,
 // `check` is the last command seen that says whether the work is done (watch.almd); it
 // outlives the turn, so "now also handle X" is checked the same way. `goal` is what the
 // session is for, in the person's words, "" when none was set.
-type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String, goal: String = "" }
+// `plan` is plan mode: the model looks and writes a plan, and nothing that changes the
+// project runs until the person approves it. It belongs to the run and is not kept.
+type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String, goal: String = "", plan: Bool = false }
 
 // `read_line` answers `String?`: the loop has to tell an empty line (a person
 // pressing return, `some("")`) from the end of input (`none`).

@@ -186,6 +186,7 @@ let HELP = """
   /goal TEXT   set a goal and work until it is met; /goal shows it, /goal clear drops it
   /memory      where this project's notes between sessions are kept
   /model M   switch model, e.g. /model cf:glm-5.3-flash
+  /plan        look and plan, changing nothing; /go approves the plan and carries it out
   /yes         stop asking before shell and verify commands (or ask again)
   /transcript  where this session's messages are written
   /exit        leave
