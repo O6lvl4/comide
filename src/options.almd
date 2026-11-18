@@ -22,7 +22,10 @@ fn with_terminal(o: Options, tui: Bool, u: ui.Ui) -> Options = { ...o, tui: tui,
 // session is for, in the person's words, "" when none was set.
 // `plan` is plan mode: the model looks and writes a plan, and nothing that changes the
 // project runs until the person approves it. It belongs to the run and is not kept.
-type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String, goal: String = "", plan: Bool = false }
+// `last_in` is the input tokens the provider counted on the last call, the size of the
+// conversation as it stands: kept, so a conversation that is already too long gets its
+// hand-over note before the next request's first call and not after it has failed.
+type Session = { messages: List[Value], cost: Float, allow_shell: Bool, steps: Int, check: String, goal: String = "", plan: Bool = false, last_in: Int = 0 }
 
 // `read_line` answers `String?`: the loop has to tell an empty line (a person
 // pressing return, `some("")`) from the end of input (`none`).

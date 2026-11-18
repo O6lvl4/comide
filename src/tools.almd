@@ -275,7 +275,7 @@ fn frozen_reason(frozen: String) -> String =
 // What a call is about as the settings' rules see it (rules.almd): the tool the rule
 // names, and the command, path, address or words. solve's verify command is a shell
 // command and answers to the shell rules; a page is known by its host.
-fn subject_of(name: String, arguments: String) -> (String, String) =
+fn subject_of(name: String, arguments: String, root: String) -> (String, String) =
   match json.parse(if string.trim(arguments) == "" then "{}" else arguments) {
     err(_) => (name, ""),
     ok(a) => {
@@ -289,7 +289,9 @@ fn subject_of(name: String, arguments: String) -> (String, String) =
       else if name == "map" or name == "explore" then (name, arg("task"))
       else if name == "mcp_call" or name == "mcp_describe" then (name, arg("server") + "/" + arg("tool"))
       else if name == "mcp_tools" then (name, arg("server"))
-      else (name, if arg("path") == "" then "." else arg("path"))
+      // A path written from the root of the disk is the same file as the one written
+      // from the project, and the rules are written from the project.
+      else (name, if arg("path") == "" or arg("path") == root then "." else (string.strip_prefix(arg("path"), root + "/") ?? arg("path")))
     },
   }
 
@@ -307,11 +309,13 @@ test "a session that only looks keeps the tools that read and holds the ones tha
 }
 
 test "the rules see a call by its command, its path or its host" {
-  assert_eq(subject_of("shell", "{\"command\":\"git status\"}"), ("shell", "git status"))
-  assert_eq(subject_of("solve", "{\"task\":\"t\",\"verify\":\"cargo test\"}"), ("shell", "cargo test"))
-  assert_eq(subject_of("edit", "{\"path\":\"src/a.py\",\"old\":\"x\",\"new\":\"y\"}"), ("edit", "src/a.py"))
-  assert_eq(subject_of("tree", "{}"), ("tree", "."))
-  assert_eq(subject_of("web_fetch", "{\"url\":\"https://Docs.Example.com:8443/a?b=c\"}"), ("web_fetch", "domain:docs.example.com"))
+  assert_eq(subject_of("shell", "{\"command\":\"git status\"}", "/w/p"), ("shell", "git status"))
+  assert_eq(subject_of("solve", "{\"task\":\"t\",\"verify\":\"cargo test\"}", "/w/p"), ("shell", "cargo test"))
+  assert_eq(subject_of("edit", "{\"path\":\"src/a.py\",\"old\":\"x\",\"new\":\"y\"}", "/w/p"), ("edit", "src/a.py"))
+  assert_eq(subject_of("read", "{\"path\":\"/w/p/.env\"}", "/w/p"), ("read", ".env"))
+  assert_eq(subject_of("read", "{\"path\":\"/etc/passwd\"}", "/w/p"), ("read", "/etc/passwd"))
+  assert_eq(subject_of("tree", "{}", "/w/p"), ("tree", "."))
+  assert_eq(subject_of("web_fetch", "{\"url\":\"https://Docs.Example.com:8443/a?b=c\"}", "/w/p"), ("web_fetch", "domain:docs.example.com"))
 }
 
 test "a call is shown by what it is about" {

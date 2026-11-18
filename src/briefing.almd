@@ -19,6 +19,7 @@
 
 import fs
 import env
+import self.place
 
 // A file longer than this is cut and says so. Measured sizes that prompted the number:
 // the instruction files of the projects comide was first used on are 1 to 9 KB.
@@ -45,11 +46,12 @@ fn places(root: String, config: String, named: List[String]) -> List[String] =
 
 // The files that are there and say something, each once: the same text under two names
 // (a copy, or a symlink) is one note.
-effect fn gather(paths: List[String]) -> List[Note] = {
+effect fn gather(root: String, paths: List[String]) -> List[Note] = {
   var out: List[Note] = []
   var seen: List[String] = []
   for p in paths {
-    if fs.is_file(p) then {
+    // A file of the project's that is a link out of the project is not read (place.almd).
+    if fs.is_file(p) and place.readable(root, p)! then {
       match fs.read_text(p) {
         err(_) => (),
         ok(text) => {
@@ -79,11 +81,11 @@ effect fn config_dir() -> String = {
 }
 
 effect fn for_talk(root: String) -> List[Note] =
-  gather(places(root, config_dir()!, listed(env.get("COMIDE_INSTRUCTIONS") ?? "")))!
+  gather(root, places(root, config_dir()!, listed(env.get("COMIDE_INSTRUCTIONS") ?? "")))!
 
 // What solve passes on to golemide with every task, or "".
 effect fn for_solve() -> String = {
-  let notes = gather(listed(env.get("COMIDE_SOLVE_INSTRUCTIONS") ?? ""))!
+  let notes = gather("", listed(env.get("COMIDE_SOLVE_INSTRUCTIONS") ?? ""))!
   list.join(list.map(notes, (n) => n.text), "\n\n")
 }
 
@@ -125,7 +127,7 @@ test "the same text under two names is read once, and an empty file not at all" 
   fs.write_text(dir + "/CLAUDE.md", "Run make test.")!
   fs.write_text(dir + "/empty.md", "\n")!
   fs.write_text(dir + "/more.md", "Be brief.")!
-  let notes = gather([dir + "/AGENTS.md", dir + "/CLAUDE.md", dir + "/absent.md", dir + "/empty.md", dir + "/more.md"])!
+  let notes = gather("", [dir + "/AGENTS.md", dir + "/CLAUDE.md", dir + "/absent.md", dir + "/empty.md", dir + "/more.md"])!
   assert_eq(list.map(notes, (n) => n.text), ["Run make test.", "Be brief."])
   let _ = fs.remove_all(dir)
 }

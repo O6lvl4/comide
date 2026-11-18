@@ -13,13 +13,12 @@
 // where a thing is that took steps to find. What the code says, the code says better.
 
 import fs
+import self.place
 
 // More than this and the file is shown from its end, the most recent notes, and says so.
 let MAX_CHARS = 8000
 
-fn key_of(root: String) -> String = string.replace(root, "/", "-")
-
-fn file_for(home: String, root: String) -> String = home + "/.comide/memory/" + key_of(root) + "/MEMORY.md"
+fn file_for(home: String, root: String) -> String = home + "/.comide/memory/" + place.key_of(root) + "/MEMORY.md"
 
 fn shown(text: String) -> String = {
   let t = string.trim(text)
@@ -50,7 +49,7 @@ effect fn keep(file: String, note: String) -> Result[String, String] =
   }
 
 test "a project's notes live under its path, outside the project" {
-  assert_eq(file_for("/h", "/w/p"), "/h/.comide/memory/-w-p/MEMORY.md")
+  assert_eq(file_for("/h", "/w/p"), "/h/.comide/memory/%2Fw%2Fp/MEMORY.md")
 }
 
 test "a note is one dated line, whatever was passed" {

@@ -11,9 +11,13 @@
 // names another: summarising is reading, and a cheaper model reads well enough.
 //
 // What is lost is real. Exact tool output is gone, and the model has to look again at
-// what it needs; the note says so. A session's transcript file keeps what came before.
+// what it needs; the note says so. What the note replaced is written to a file in the
+// run's scratch directory before it goes, and the person is told where; the kept session
+// and the transcript hold the conversation as it is after the note.
 
 import env
+import fs
+import json
 import self.model
 
 // The tokens of input after which the next call is preceded by a note
@@ -88,7 +92,7 @@ fn replaced(messages: List[Value], note: String, working_on: String, goal: Strin
 
 fn size_of(messages: List[Value]) -> Int = list.fold(messages, 0, (acc, m) => acc + string.len(text_of(m)))
 
-type Note = { messages: List[Value], cost_usd: Float, before: Int, after: Int }
+type Note = { messages: List[Value], cost_usd: Float, before: Int, after: Int, kept_at: String }
 
 // The conversation with a note in its place, and what writing it cost.
 effect fn written(talk_model: String, effort: String, scratch: String, messages: List[Value], working_on: String, goal: String) -> Result[Note, String] = {
@@ -98,7 +102,9 @@ effect fn written(talk_model: String, effort: String, scratch: String, messages:
   if string.trim(r.content) == "" then err("the note came back empty")
   else {
     let out = replaced(messages, r.content, working_on, goal)
-    ok(Note { messages: out, cost_usd: r.cost_usd, before: size_of(messages), after: size_of(out) })
+    let kept_at = scratch + "/before-note-" + int.to_string(datetime.now_ms()) + ".json"
+    let _ = fs.write_text(kept_at, json.stringify(value.array(messages)))
+    ok(Note { messages: out, cost_usd: r.cost_usd, before: size_of(messages), after: size_of(out), kept_at: kept_at })
   }
 }
 

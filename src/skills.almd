@@ -14,6 +14,7 @@
 
 import fs
 import env
+import self.place
 
 type Skill = { name: String, about: String, file: String }
 
@@ -93,14 +94,15 @@ fn places(root: String, config: String, home: String, named: List[String]) -> Li
 
 fn base(p: String) -> String = list.last(string.split(string.strip_suffix(p, "/") ?? p, "/")) ?? p
 
-effect fn found(dirs: List[String]) -> List[Skill] = {
+effect fn found(root: String, dirs: List[String]) -> List[Skill] = {
   var out: List[Skill] = []
   var names: List[String] = []
   for d in dirs {
     if fs.is_dir(d) then {
       for entry in list.sort(fs.list_dir(d) ?? []) {
         let file = d + "/" + base(entry) + "/SKILL.md"
-        if fs.is_file(file) then {
+        // A skill of the project's that is a link out of the project is not read (place.almd).
+        if fs.is_file(file) and place.readable(root, file)! then {
           match fs.read_text(file) {
             err(_) => (),
             ok(text) => {
@@ -119,7 +121,7 @@ effect fn for_project(root: String) -> List[Skill] = {
   let config = env.get("XDG_CONFIG_HOME") ?? ""
   let home = env.get("HOME") ?? ""
   let named = list.filter(list.map(string.split(env.get("COMIDE_SKILLS") ?? "", ":"), (p) => string.trim(p)), (p) => p != "")
-  found(places(root, if config == "" then home + "/.config" else config, home, named))!
+  found(root, places(root, if config == "" then home + "/.config" else config, home, named))!
 }
 
 // What the model is told at the start: the names and a line each. "" when there are none.
@@ -171,7 +173,7 @@ test "skills are found a directory each, and the first place to name one keeps i
   fs.write_text(dir + "/a/deploy/SKILL.md", "---\nname: deploy\ndescription: the project's\n---\nx")!
   fs.write_text(dir + "/b/deploy/SKILL.md", "---\nname: deploy\ndescription: the person's\n---\ny")!
   fs.write_text(dir + "/b/review/SKILL.md", "Read the diff.")!
-  let all = found([dir + "/a", dir + "/absent", dir + "/b"])!
+  let all = found("", [dir + "/a", dir + "/absent", dir + "/b"])!
   assert_eq(list.map(all, (s) => s.name + "=" + s.about), ["deploy=the project's", "review=Read the diff."])
   let _ = fs.remove_all(dir)
 }

@@ -35,8 +35,9 @@ let TIMEOUT_S = 60
 
 type Hook = { command: String, timeout_s: Int }
 
+// solve runs a verify command, which is a shell command: a hook for `shell` is for it too.
 fn applies(matcher: String, tool: String) -> Bool =
-  string.trim(matcher) == "" or list.any(string.split(matcher, "|"), (m) => rules.glob(string.trim(m), tool))
+  string.trim(matcher) == "" or list.any(string.split(matcher, "|"), (m) => rules.glob(string.trim(m), tool) or (tool == "solve" and rules.glob(string.trim(m), "shell")))
 
 // The commands to run for an event, in the order written. `tool` is "" for the events
 // that are not about a tool, and then every entry applies.
@@ -92,6 +93,7 @@ test "a hook is for the tools its matcher names, and for all of them when it nam
   assert_eq(for_event(hooks, "PreToolUse", "shell"), [Hook { command: "a", timeout_s: 60 }, Hook { command: "b", timeout_s: 5 }])
   assert_eq(for_event(hooks, "PreToolUse", "edit"), [Hook { command: "a", timeout_s: 60 }, Hook { command: "b", timeout_s: 5 }])
   assert_eq(for_event(hooks, "PreToolUse", "read"), [Hook { command: "b", timeout_s: 5 }])
+  assert_eq(for_event(hooks, "PreToolUse", "solve"), [Hook { command: "a", timeout_s: 60 }, Hook { command: "b", timeout_s: 5 }])
   assert_eq(for_event(hooks, "Stop", ""), [Hook { command: "c", timeout_s: 60 }])
   assert_eq(for_event(hooks, "PostToolUse", "shell"), [])
   assert(any_for(hooks, "Stop"))
