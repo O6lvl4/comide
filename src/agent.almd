@@ -33,6 +33,7 @@ import self.turn
 import self.briefing
 import self.skills
 import self.handover
+import self.sessions
 
 fn system_prompt(root: String) -> String = """
 You are comide, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
@@ -90,7 +91,11 @@ let KEYS_HELP = """
   esc or ctrl+c while comide works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
 """
 
-type Place = { setup: toolkit.Setup, fresh: options.Session, transcript: String, shown_root: String, history_file: String }
+// `fresh` is a conversation with nothing said in it, which /clear goes back to; `start` is
+// the one this run begins with, a kept one when it was taken up again. `session_id` names
+// the file the conversation is kept in after every request (sessions.almd).
+type Place = { setup: toolkit.Setup, fresh: options.Session, start: options.Session, transcript: String, shown_root: String, history_file: String,
+  home: String, session_id: String }
 
 // What the tools work with: the project, golemide, a scratch directory of this process's
 // own, and the helpers found on this machine.
@@ -132,12 +137,23 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let system = list.join(list.filter([system_prompt(opts0.root) + "\n" + tools.project_context(setup)!, briefed, skills.section(known)], (part) => part != ""), "\n\n")
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
-  let place = Place { setup: setup, fresh: fresh, transcript: setup.scratch + "/transcript.json",
+  // A kept conversation taken up again (sessions.almd), under the system prompt just
+  // written; or a new one, named by when it starts.
+  let kept = if opts0.take_up then some(sessions.wanted(home, opts0.root, opts0.take_up_id)!) else none
+  let start = match kept { some(k) => sessions.taken_up(fresh.messages, k.session, opts0.yes), none => fresh }
+  match kept {
+    some(k) => options.show(opts0, ui.note_line(opts0.ui, "continuing the session of " + sessions.when(k.updated_ms) + ": " + k.title
+      + " · " + int.to_string(list.len(k.session.messages)) + " messages · " + convo.usd(k.session.cost)))!,
+    none => (),
+  }
+  let place = Place { setup: setup, fresh: fresh, start: start, transcript: setup.scratch + "/transcript.json",
     shown_root: match string.strip_prefix(opts0.root, home) { some(rest) => "~" + rest, none => opts0.root },
-    history_file: home + "/.comide/history" }
+    history_file: home + "/.comide/history", home: home,
+    session_id: match kept { some(k) => k.id, none => int.to_string(datetime.now_ms()) } }
   if not opts0.live then {
-    let _ = turn.turn(opts0, setup, fresh, opts0.prompt)!
-    eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript))
+    let after = turn.turn(opts0, setup, start, opts0.prompt)!
+    sessions.save(home, opts0.root, opts0.model, place.session_id, after)!
+    eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript + " · go on with: comide --continue"))
     ok(0)
   } else {
     // The terminal is taken over only when stdin is one; a pipe keeps the line reader.
@@ -180,7 +196,7 @@ type Talk = { opts: options.Options, s: options.Session, open: Bool }
 
 effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
   let u = opts0.ui
-  var t = Talk { opts: opts0, s: place.fresh, open: true }
+  var t = Talk { opts: opts0, s: place.start, open: true }
   var history = if opts0.tui then editor.load_history(place.history_file)! else []
   println(ui.banner(u, opts0.model, place.shown_root))
   while t.open {
@@ -199,10 +215,11 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
           some(c) => slash(t, place, c)!,
           none => if string.trim(text) == "" then t else { ...t, s: turn.turn(t.opts, place.setup, t.s, text)! },
         }
+        sessions.save(place.home, t.opts.root, t.opts.model, place.session_id, t.s)!
       },
     }
   }
-  println(ui.note_line(u, "transcript: " + place.transcript + " · session " + convo.usd(t.s.cost)))
+  println(ui.note_line(u, "transcript: " + place.transcript + " · session " + convo.usd(t.s.cost) + " · go on with: comide --continue"))
   ok(0)
 }
 
@@ -263,10 +280,12 @@ fn absolute(root: String, cwd: String) -> String = {
 }
 
 let CHAT_USAGE = """
-comide [run PROMPT | -p PROMPT] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH] [--runner PROG]
+comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model M] [--effort E] [--yes] [--max-steps N] [--golemide PATH] [--runner PROG]
 
   run PROMPT       one request, answered, then exit; without it, a conversation
   -p PROMPT        the same as run
+  --continue       go on with this project's most recent conversation
+  --resume ID      go on with a given one; they are kept in ~/.comide/sessions
   --root DIR       the project (default: the working directory)
   --model M        which model thinks, as PROVIDER:MODEL (default cf:glm-5.3)
                      cf:glm-5.3, cf:glm-5.3-flash, ...   Cloudflare Workers AI
@@ -315,6 +334,8 @@ effect fn cli(args: List[String]) -> Int =
       tui: false,
       ui: ui.detect()!,
       runner: opt(args, "--runner") ?? (env.get("COMIDE_RUNNER") ?? ""),
+      take_up: list.contains(args, "--continue") or list.contains(args, "--resume"),
+      take_up_id: opt(args, "--resume") ?? "",
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }

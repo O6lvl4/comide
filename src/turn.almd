@@ -45,7 +45,7 @@ effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
   // of zeros under it would only be noise.
   if not (t.interrupted and t.steps == 0) then
     options.show(opts, "\n" + ui.footer(opts.ui, t.steps, t.tin, t.tcached, t.tout, convo.usd(t.cost), convo.usd(s.cost + t.cost)))!
-  options.Session { messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check }
+  { ...s, messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check }
 }
 
 // The conversation has outgrown the model: a note takes its place (handover.almd). If the
