@@ -18,6 +18,7 @@ import self.waiting
 import self.handover
 import self.goal
 import self.rules
+import self.hooks
 
 // A turn in progress. `tin`, `tcached` and `tout` are the tokens spent; `sigs` are the
 // calls made since the model was last told it was looping. `request` is what the person
@@ -35,16 +36,50 @@ fn said(t: Turn, m: Value) -> Turn = { ...t, messages: t.messages + [m] }
 
 fn ended(t: Turn) -> Turn = { ...t, done: true }
 
+// The hooks of an event (hooks.almd), run and their own failures said to the person.
+effect fn hooked(opts: options.Options, setup: toolkit.Setup, event: String, tool: String, tool_input: Value, response: String, prompt: String) -> hooks.Outcome =
+  if setup.hooks_json == "" then hooks.quiet()
+  else {
+    let session = list.last(string.split(setup.scratch, "/")) ?? ""
+    let o = hooks.run(hooks.parsed(setup.hooks_json), event, tool, setup.root, hooks.input(event, session, setup.root, tool, tool_input, response, prompt))!
+    for f in o.failures { options.show(opts, ui.note_line(opts.ui, f))! }
+    o
+  }
+
+// How many times in one request a Stop hook may say the work is not finished.
+let STOP_ROUNDS = 5
+
+// A request, unless a UserPromptSubmit hook stops it; what such a hook prints goes to the
+// model under the request.
 effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, user: String) -> options.Session = {
-  var t = Turn { messages: s.messages + [convo.message("user", user)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
+  let before = hooked(opts, setup, "UserPromptSubmit", "", value.null(), "", user)!
+  if before.stopped then {
+    options.show(opts, "\n" + ui.result_line(opts.ui, "not sent: a hook stopped this request: " + before.reason, true))!
+    s
+  } else worked(opts, setup, s, user, if before.printed == "" then user else user + "\n\n[Added by a hook]\n" + before.printed)!
+}
+
+effect fn worked(opts: options.Options, setup: toolkit.Setup, s: options.Session, user: String, sent: String) -> options.Session = {
+  var t = Turn { messages: s.messages + [convo.message("user", sent)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
     tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false,
     request: user, last_in: 0, aim: s.goal, aim_rounds: 0, aim_asked: false, aim_met: false }
   let too_long = handover.limit()!
+  var stop_rounds = 0
   while not t.done {
     // Not when there is next to nothing after the system prompt: then the size is the
     // system prompt's, and a note would be written before every call and shorten nothing.
     if t.last_in > too_long and list.len(t.messages) > 4 then { t = handed_over(opts, setup, t)! }
     t = step(opts, setup, s, { ...t, messages: convo.compacted(t.messages) })!
+    // The turn ended on an answer: a Stop hook may say the work is not finished, and its
+    // reason goes to the model as the next thing said.
+    if t.done and not t.interrupted and stop_rounds < STOP_ROUNDS and ended_on_answer(t.messages) then {
+      let at_stop = hooked(opts, setup, "Stop", "", value.null(), "", "")!
+      if at_stop.stopped then {
+        stop_rounds = stop_rounds + 1
+        options.show(opts, "\n" + ui.note_line(opts.ui, "a hook says the work is not finished; comide passes that on"))!
+        t = { ...said(t, convo.message("user", "A check the user set up says the work is not finished:\n" + at_stop.reason)), done: false }
+      }
+    }
   }
   let _ = fs.write_text(setup.scratch + "/transcript.json", json.stringify(value.array(t.messages)))
   // A turn stopped before the model said anything cost nothing and did nothing; a line
@@ -53,6 +88,13 @@ effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
     options.show(opts, "\n" + ui.footer(opts.ui, t.steps, t.tin, t.tcached, t.tout, convo.usd(t.cost), convo.usd(s.cost + t.cost)))!
   { ...s, messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check,
     goal: if t.aim_met then "" else s.goal }
+}
+
+// Whether the last thing in the conversation is the model answering in words, not a turn
+// cut short by a step limit or an unreachable model.
+fn ended_on_answer(messages: List[Value]) -> Bool = match list.last(messages) {
+  none => false,
+  some(m) => (value.get_string(m, "role") ?? "") == "assistant" and list.is_empty(value.get_array(m, "tool_calls") ?? []),
 }
 
 // The conversation has outgrown the model: a note takes its place (handover.almd). If the
@@ -188,7 +230,12 @@ effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCal
   // The settings speak first (rules.almd); a call they say nothing of is asked about as
   // it always was. `refused` is what the model is told when the settings stopped the call.
   let (rule_tool, about) = tools.subject_of(c.name, c.arguments)
-  let (p, refused) = match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, rule_tool, about) {
+  // A PreToolUse hook is heard before the rules: it can stop a call they would allow.
+  let call_input = json.parse(if string.trim(c.arguments) == "" then "{}" else c.arguments) ?? value.object([])
+  let pre = hooked(opts, setup, "PreToolUse", c.name, call_input, "", "")!
+  let (p, refused) = if pre.stopped then (asking.Permission { run: false, allow_from_now: ran.allow, said: "" },
+      "Not run: a check the user set up stopped this call:\n" + pre.reason)
+    else match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, rule_tool, about) {
     Denied(rule) => (asking.Permission { run: false, allow_from_now: ran.allow, said: "" },
       "Not run: the settings deny this call (" + rule + "). Do not look for another way to do the same thing; go on without it, or say what you need."),
     Allowed(_) => (asking.Permission { run: true, allow_from_now: ran.allow, said: "" }, ""),
@@ -204,9 +251,13 @@ effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCal
       none => asking.Permission { run: true, allow_from_now: ran.allow, said: "" },
     }, ""),
   }
-  let r = if p.run then tools.run(setup, c.name, c.arguments)!
-    else if refused != "" then toolkit.failed(refused, "not run: the settings")
+  let r0 = if p.run then tools.run(setup, c.name, c.arguments)!
+    else if refused != "" then toolkit.failed(refused, if pre.stopped then "not run: a hook" else "not run: the settings")
     else toolkit.failed(asking.declined(opts, p.said), if p.said == "" then "not run" else "not run: " + p.said)
+  // A PostToolUse hook sees what the tool did, and its objection goes under the result.
+  let post = if p.run then hooked(opts, setup, "PostToolUse", c.name, call_input, string.take(r0.text, 20000), "")! else hooks.quiet()
+  let r = if post.stopped then toolkit.ToolResult { text: r0.text + "\n\n[A check the user set up objects to this:]\n" + post.reason, brief: r0.brief + " · a hook objects", failed: true, cost_usd: r0.cost_usd }
+    else r0
   options.show(opts, ui.result_line(u, r.brief, r.failed))!
   Ran { results: ran.results + [convo.tool_message(c.id, r.text)], allow: p.allow_from_now, spent: ran.spent + r.cost_usd,
     work: if p.run then watch.after(ran.work, c.name, c.arguments, r.failed) else ran.work }
