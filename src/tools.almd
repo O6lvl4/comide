@@ -210,6 +210,14 @@ fn command_of(name: String, arguments: String) -> String? =
     err(_) => none,
   }
 
+// The tools that change the project, run a command, or write something down: the ones a
+// session that only looks does not run.
+fn changes(name: String) -> Bool = list.contains(["edit", "write", "shell", "solve", "remember"], name)
+
+fn frozen_reason(frozen: String) -> String =
+  if frozen == "plan" then "Not run: this session is in plan mode. Look at the project and write the plan: what you would change, in which files, in what order, and how each step would be checked. Nothing is changed and no command is run until the user approves the plan."
+  else "Not run: this session only looks. It cannot change a file or run a command; answer from what you can read."
+
 // What a call is about as the settings' rules see it (rules.almd): the tool the rule
 // names, and the command, path, address or words. solve's verify command is a shell
 // command and answers to the shell rules; a page is known by its host.
@@ -233,6 +241,13 @@ fn host_of(url: String) -> String = {
   let rest = match string.split_once(url, "://") { some((_, r)) => r, none => url }
   let upto = (s: String, mark: String) => match string.split_once(s, mark) { some((before, _)) => before, none => s }
   string.to_lower(upto(upto(upto(rest, "/"), "?"), ":"))
+}
+
+test "a session that only looks keeps the tools that read and holds the ones that change" {
+  assert(list.all(["edit", "write", "shell", "solve", "remember"], changes))
+  assert(not list.any(["read", "outline", "search", "tree", "map", "skill", "web_search", "web_fetch"], changes))
+  assert(string.contains(frozen_reason("plan"), "plan mode"))
+  assert(string.contains(frozen_reason("look"), "only looks"))
 }
 
 test "the rules see a call by its command, its path or its host" {

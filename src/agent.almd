@@ -85,10 +85,12 @@ let COMMANDS = [
   editor.Command { name: "/clear", about: "forget the conversation, keep the project and the cost" },
   editor.Command { name: "/compact", about: "put a note in place of the conversation, to make room" },
   editor.Command { name: "/cost", about: "what this session has spent" },
+  editor.Command { name: "/go", about: "approve the plan and carry it out" },
   editor.Command { name: "/goal", about: "set a goal to work until it is met, show it, or clear it" },
   editor.Command { name: "/memory", about: "where this project's notes between sessions are kept" },
   editor.Command { name: "/model", about: "show or switch the model" },
   editor.Command { name: "/yes", about: "run shell and verify commands without asking, or ask again" },
+  editor.Command { name: "/plan", about: "look and plan, changing nothing until /go" },
   editor.Command { name: "/transcript", about: "where this session's messages are written" },
   editor.Command { name: "/exit", about: "leave" },
 ]
@@ -161,7 +163,10 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let kept = if opts0.take_up then some(sessions.wanted(home, opts0.root, opts0.take_up_id)!) else none
   let begun = match kept { some(k) => sessions.taken_up(fresh.messages, k.session, opts0.yes), none => fresh }
   // --goal sets the goal the run starts with, over one a kept conversation came back with.
-  let start = if string.trim(opts0.goal) == "" then begun else { ...begun, goal: string.trim(opts0.goal) }
+  let aimed = if string.trim(opts0.goal) == "" then begun else { ...begun, goal: string.trim(opts0.goal) }
+  let start = { ...aimed, plan: opts0.plan }
+  if opts0.plan then options.show(opts0, ui.note_line(opts0.ui, "plan mode: comide looks and plans, and changes nothing" + (if opts0.live then " until you say /go" else "")))!
+  if opts0.read_only then options.show(opts0, ui.note_line(opts0.ui, "this session only looks: nothing is changed and no command is run"))!
   if start.goal != "" then options.show(opts0, ui.note_line(opts0.ui, "goal: " + start.goal))!
   match kept {
     some(k) => options.show(opts0, ui.note_line(opts0.ui, "continuing the session of " + sessions.when(k.updated_ms) + ": " + k.title
@@ -194,6 +199,7 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
 fn status_of(opts: options.Options, place: Place, s: options.Session) -> String =
   opts.model + " · " + ui.fit_path(place.shown_root, 40) + " · " + convo.usd(s.cost)
     + (if s.allow_shell then " · commands run without asking" else "")
+    + (if s.plan then " · plan mode, /go to carry it out" else "")
     + (if s.goal == "" then "" else " · goal: " + goal.brief(s.goal)) + " · /help"
 
 // One line of the conversation from the person: the input box on a terminal, a plain
@@ -258,6 +264,18 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
   }
   else if c.name == "/compact" then compact(t, place)!
   else if c.name == "/goal" then aim(t, place, c.arg)!
+  else if c.name == "/plan" then {
+    let on = if c.arg == "off" then false else if c.arg == "on" then true else not s.plan
+    println(ui.note_line(u, if on then "plan mode: comide looks and plans, and changes nothing until you say /go" else "plan mode is off"))
+    { ...t, s: { ...s, plan: on } }
+  }
+  else if c.name == "/go" then {
+    if not s.plan then { println(ui.note_line(u, "there is no plan waiting: /plan starts one")); t }
+    else {
+      println(ui.note_line(u, "the plan is approved; comide carries it out"))
+      { ...t, s: turn.turn(t.opts, place.setup, { ...s, plan: false }, "The plan is approved. Carry it out now." + (if c.arg == "" then "" else " " + c.arg))! }
+    }
+  }
   else if c.name == "/cost" then { println(ui.note_line(u, "this session: " + convo.usd(s.cost) + " over " + int.to_string(s.steps) + " model calls")); t }
   else if c.name == "/model" then switch_model(t, c.arg)!
   else if c.name == "/yes" then {
@@ -340,6 +358,10 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                                      NAME_BASE_URL for one comide does not know
                      claude, claude:opus  Claude Code's `claude -p`, on your Claude login
   --effort E       reasoning effort, sent to Cloudflare only: low (default), medium, high
+  --plan           plan mode: look and answer with a plan; nothing is changed and no
+                   command is run. /go in a conversation approves it; after `run`,
+                   `comide run "go ahead" --continue` carries it out
+  --read-only      only look, for the whole run: no file changed, no command run
   --yes            run shell and verify commands without asking
   --trust-project  use the allow rules and hooks in this project's .comide/settings.json,
                    as the file is now; without it only its ask and deny rules are used
@@ -358,7 +380,7 @@ A conversation that outgrows the model is replaced by a note about it, written b
 COMIDE_SUMMARY_MODEL (default: the conversation's model) once a call's input passes
 COMIDE_COMPACT_TOKENS (default 120000).
 
-In a conversation: /help /clear /compact /cost /goal /memory /model /yes /transcript /exit
+In a conversation: /help /clear /compact /cost /go /goal /memory /model /plan /yes /transcript /exit
 """
 
 effect fn cli(args: List[String]) -> Int =
@@ -386,6 +408,8 @@ effect fn cli(args: List[String]) -> Int =
       take_up_id: opt(args, "--resume") ?? "",
       goal: opt(args, "--goal") ?? "",
       trust_project: list.contains(args, "--trust-project"),
+      plan: list.contains(args, "--plan"),
+      read_only: list.contains(args, "--read-only"),
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }
