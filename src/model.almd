@@ -13,6 +13,7 @@
 
 import almai.live as live
 import almai.core as core
+import env
 
 // `arguments` is the JSON text the model wrote, parsed only when the tool runs, so a
 // malformed one can be answered as a tool error the model reads, not a crash.
@@ -47,6 +48,18 @@ effect fn is_done(c: Call) -> Bool = live.is_done(c.pending)!
 effect fn text_so_far(c: Call) -> String = live.text_so_far(c.pending)!
 
 effect fn abandon(c: Call) -> Unit = live.cancel(c.pending)!
+
+// A request with no tools, waited for without showing it: the calls comide makes for
+// itself (a hand-over note), where there is nothing to stream to the person.
+let ASK_MAX_MS = 600000
+
+effect fn ask(model: String, messages: List[Value], max_tokens: Int, effort: String, scratch: String) -> Result[Reply, String] = {
+  let c = start(model, messages, [], max_tokens, effort, scratch)!
+  let t0 = datetime.now_ms()
+  while not is_done(c)! and datetime.now_ms() - t0 <= ASK_MAX_MS { env.sleep_ms(100) }
+  if not is_done(c)! then { abandon(c)!; err("request timeout: no complete answer within 600s") }
+  else settle(c)
+}
 
 effect fn settle(c: Call) -> Result[Reply, String] =
   match live.finish(c.pending) {

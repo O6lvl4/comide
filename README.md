@@ -103,6 +103,17 @@ They are looked for in `.claude/skills` and `.agents/skills` in the project, the
 `~/.config/comide/skills`, `~/.claude/skills`, and the directories in `$COMIDE_SKILLS`
 (separated by `:`). The first place to name a skill keeps it.
 
+## Long conversations
+
+Old tool output is cut to its opening lines as a conversation grows. When that is not
+enough, and a call's input passes `$COMIDE_COMPACT_TOKENS` (default 120,000), the
+conversation is replaced by a note about it: what was asked, what was decided, what
+was found, what was changed, what was under way. The request being worked on is put
+back word for word, and the work goes on. `/compact` does it on demand.
+
+The note is written by `$COMIDE_SUMMARY_MODEL`, the conversation's model unless set.
+Exact tool output from before the note is gone, and the model is told to look again.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·

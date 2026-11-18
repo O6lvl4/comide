@@ -32,6 +32,7 @@ import self.options
 import self.turn
 import self.briefing
 import self.skills
+import self.handover
 
 fn system_prompt(root: String) -> String = """
 You are comide, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
@@ -76,6 +77,7 @@ fn command_of(line: String) -> Slash? = {
 let COMMANDS = [
   editor.Command { name: "/help", about: "keys and commands" },
   editor.Command { name: "/clear", about: "forget the conversation, keep the project and the cost" },
+  editor.Command { name: "/compact", about: "put a note in place of the conversation, to make room" },
   editor.Command { name: "/cost", about: "what this session has spent" },
   editor.Command { name: "/model", about: "show or switch the model" },
   editor.Command { name: "/yes", about: "run shell and verify commands without asking, or ask again" },
@@ -212,17 +214,33 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
   else if c.name == "/help" then { println(ui.help(u) + (if t.opts.tui then "\n\n" + ui.dim(u, KEYS_HELP) else "")); t }
   else if c.name == "/clear" then {
     println(ui.note_line(u, "the conversation is cleared; the project and the cost so far are kept"))
-    { ...t, s: options.Session { messages: place.fresh.messages, cost: s.cost, allow_shell: s.allow_shell, steps: s.steps, check: "" } }
+    { ...t, s: { ...s, messages: place.fresh.messages, check: "" } }
   }
+  else if c.name == "/compact" then compact(t, place)!
   else if c.name == "/cost" then { println(ui.note_line(u, "this session: " + convo.usd(s.cost) + " over " + int.to_string(s.steps) + " model calls")); t }
   else if c.name == "/model" then switch_model(t, c.arg)!
   else if c.name == "/yes" then {
     let allow = not s.allow_shell
     println(ui.note_line(u, if allow then "shell and verify commands now run without asking" else "shell and verify commands are asked about again"))
-    { ...t, s: options.Session { messages: s.messages, cost: s.cost, allow_shell: allow, steps: s.steps, check: s.check } }
+    { ...t, s: { ...s, allow_shell: allow } }
   }
   else if c.name == "/transcript" then { println(ui.note_line(u, place.transcript)); t }
   else { println(ui.note_line(u, "no command " + c.name + "; /help lists them")); t }
+}
+
+// /compact: the hand-over note now, without waiting for the conversation to outgrow the
+// model (handover.almd).
+effect fn compact(t: Talk, place: Place) -> Talk = {
+  let u = t.opts.ui
+  if list.len(t.s.messages) < 3 then { println(ui.note_line(u, "there is nothing to make shorter yet")); t }
+  else match handover.written(t.opts.model, t.opts.effort, place.setup.scratch, t.s.messages, "", "") {
+    err(e) => { println(ui.note_line(u, "a note could not be written: " + string.take(e, 200))); t }
+    ok(n) => {
+      println(ui.note_line(u, "a note now stands in place of the conversation (" + int.to_string(n.before / 1000) + "k → "
+        + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + ")"))
+      { ...t, s: { ...t.s, messages: n.messages, cost: t.s.cost + n.cost_usd } }
+    }
+  }
 }
 
 effect fn switch_model(t: Talk, to: String) -> Talk = {
@@ -269,7 +287,11 @@ COMIDE_SOLVE_MODEL and COMIDE_SOLVE_STRONG_MODEL choose others, with the same na
 A solve may take COMIDE_SOLVE_TIMEOUT_S seconds (default 300); golemide stops in time to
 say how far it got.
 
-In a conversation: /help /clear /cost /model /yes /transcript /exit
+A conversation that outgrows the model is replaced by a note about it, written by
+COMIDE_SUMMARY_MODEL (default: the conversation's model) once a call's input passes
+COMIDE_COMPACT_TOKENS (default 120000).
+
+In a conversation: /help /clear /compact /cost /model /yes /transcript /exit
 """
 
 effect fn cli(args: List[String]) -> Int =
