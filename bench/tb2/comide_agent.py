@@ -48,6 +48,10 @@ CREDENTIALS = (
     "CLAUDECLI_API_KEY",
 )
 
+# Which models golemide's solve runs on, when the caller chose them (comide --help). Not
+# set, solve runs on golemide's own; Harbor's -m only names the model comide thinks with.
+SOLVE_MODELS = ("COMIDE_SOLVE_MODEL", "COMIDE_SOLVE_STRONG_MODEL")
+
 
 class Comide(BaseInstalledAgent):
     @staticmethod
@@ -97,7 +101,7 @@ class Comide(BaseInstalledAgent):
             # $HOME is not granted: it is /root here, and where a task image has a
             # /root/.ssh, Landlock cannot keep it closed inside a grant of /root, so porta
             # refuses the run (break-filter-js-from-html).
-            passed = ",".join(CREDENTIALS + ("COMIDE_COST_FILE", "TERM", "LANG"))
+            passed = ",".join(CREDENTIALS + SOLVE_MODELS + ("COMIDE_COST_FILE", "TERM", "LANG"))
             run = (
                 f"{INSTALL_DIR}/bin/porta run {INSTALL_DIR}/bin/comide --allow-root"
                 ' -v "$PWD" -v /tmp'
@@ -119,7 +123,7 @@ class Comide(BaseInstalledAgent):
         )
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
-        env = {k: os.environ[k] for k in CREDENTIALS if os.environ.get(k)}
+        env = {k: os.environ[k] for k in CREDENTIALS + SOLVE_MODELS if os.environ.get(k)}
         await self.exec_as_agent(environment, command=self.command(self.render_instruction(instruction)), env=env)
 
     def populate_context_post_run(self, context: AgentContext) -> None:

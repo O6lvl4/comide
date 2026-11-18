@@ -12,9 +12,10 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # What aitrium rests on: Almide's HTTP client honouring HTTPS_PROXY and a proxy's CA
 # (almide/almide#2833, in v0.65.1-rc2 and later), and porta's credential broker
 # (almide/porta#42, on develop until porta releases it). Commits, not tags or branches,
-# so the bundle can be named. ALMIDE_REF is v0.65.1-rc3.
-ARG ALMIDE_REF=9d80eb004b82235fda52ecf0f4e5f5a43705a4ed
-ARG PORTA_REF=d51cccbf991f
+# so the bundle can be named. ALMIDE_REF is v0.70.0-rc3: comide, golemide and the tools
+# beside them moved to the epoch 15 stdlib (2026-11-06) and no longer build on 0.65.
+ARG ALMIDE_REF=250fb6dc3f9f640aaeacc40192e74ae8f87e1fbc
+ARG PORTA_REF=3c79e54adadc
 
 RUN git init -q /tmp/almide && cd /tmp/almide \
  && git remote add origin https://github.com/almide/almide \

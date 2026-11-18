@@ -25,7 +25,7 @@ cp "$HERE/Dockerfile" "$ctx/"
 : > "$ctx/SOURCES"
 for repo in gramide-cli hew ctxgate golemide comide aitrium; do
   dir="$COMPANIONS_DIR/$repo"
-  [ -d "$dir/.git" ] || { echo "not a clone: $dir" >&2; exit 2; }
+  [ -e "$dir/.git" ] || { echo "not a clone: $dir" >&2; exit 2; }
   mkdir -p "$ctx/src/$repo"
   git -C "$dir" archive HEAD | tar -x -C "$ctx/src/$repo"
   echo "$repo $(git -C "$dir" rev-parse --short HEAD)" >> "$ctx/SOURCES"
