@@ -89,6 +89,16 @@ comide は最初の頼みごとの前に、プロジェクトがエージェン�
 別に伝えます。`$COMIDE_SOLVE_INSTRUCTIONS` のファイルは、タスクのたびに golemide に渡ります。
 コードの書き方についてプロジェクトが決めていることは、そちらに書きます。
 
+## スキル
+
+スキルは `SKILL.md` を置いたディレクトリです。ある種類の作業の手順を書いたもので、
+冒頭に `name` と `description` を持ちます。comide は最初に名前と説明だけを並べ、
+本文は、モデルが `skill` ツールで開いたときに読みます。
+
+探す場所は、プロジェクトの `.claude/skills` と `.agents/skills`、次に
+`~/.config/comide/skills`、`~/.claude/skills`、`$COMIDE_SKILLS` のディレクトリ（`:` 区切り）です。
+同じ名前のスキルは、先に見つかったものを使います。
+
 ## キー
 
 Enter で送信 · Alt+Enter で改行 · ↑↓ で履歴 · Tab で `/コマンド` を補完 ·

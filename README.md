@@ -92,6 +92,17 @@ Those are for the model that talks. The model that edits is a different one, beh
 `solve`, and is told separately: the files in `$COMIDE_SOLVE_INSTRUCTIONS` go to golemide
 under every task. Put there what the project says about how its code is written.
 
+## Skills
+
+A skill is a directory with a `SKILL.md` in it: a procedure written down for one kind
+of task, with `name` and `description` in its front matter. comide lists the names and
+descriptions at the start, and reads a skill's text only when the model opens it with
+the `skill` tool.
+
+They are looked for in `.claude/skills` and `.agents/skills` in the project, then
+`~/.config/comide/skills`, `~/.claude/skills`, and the directories in `$COMIDE_SKILLS`
+(separated by `:`). The first place to name a skill keeps it.
+
 ## Keys
 
 Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·
