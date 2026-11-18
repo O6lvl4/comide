@@ -21,6 +21,7 @@
 import fs
 import json
 import env
+import self.place
 
 // `mcp` is the `mcpServers` object: the programs and addresses whose tools can be reached (mcp.almd).
 type Settings = { allow: List[String], ask: List[String], deny: List[String], hooks: Value, mcp: Value }
@@ -64,9 +65,8 @@ effect fn read_file(path: String) -> Result[Settings, String] =
     ok(text) => parsed(path, text),
   }
 
-fn key_of(root: String) -> String = string.replace(root, "/", "-")
 fn project_file(root: String) -> String = root + "/.comide/settings.json"
-fn trust_copy(home: String, root: String) -> String = home + "/.comide/trust/" + key_of(root) + ".json"
+fn trust_copy(home: String, root: String) -> String = home + "/.comide/trust/" + place.key_of(root) + ".json"
 
 // What was read, and what the person should hear about it.
 type Loaded = { settings: Settings, notes: List[String] }
@@ -124,6 +124,6 @@ test "of a project that has not been trusted, only what makes comide more carefu
 }
 
 test "a project's trust is kept beside the person's files, by the project's path" {
-  assert_eq(trust_copy("/h", "/w/p"), "/h/.comide/trust/-w-p.json")
+  assert_eq(trust_copy("/h", "/w/p"), "/h/.comide/trust/%2Fw%2Fp.json")
   assert_eq(project_file("/w/p"), "/w/p/.comide/settings.json")
 }

@@ -33,7 +33,12 @@ fn asked(goal: String) -> String =
 fn says_met(answer: String) -> Bool = {
   let lines = list.filter(list.map(string.split(answer, "\n"), (l) => string.trim(l)), (l) => l != "")
   let first = string.to_upper(string.replace(string.replace(list.first(lines) ?? "", "*", ""), "#", ""))
-  string.starts_with(string.trim(first), MET)
+  // The words, and then nothing or a mark: "GOAL MET: all green" is the claim, "Goal met
+  // partially" is not.
+  match string.strip_prefix(string.trim(first), MET) {
+    none => false,
+    some(rest) => string.trim(rest) == "" or list.any([":", ".", "!", ",", ";", "-", "—", "–", "("], (mark) => string.starts_with(string.trim(rest), mark)),
+  }
 }
 
 // What to do with an answer while a goal stands: `asked_already` is whether the answer
@@ -57,6 +62,9 @@ test "the goal is met when the answer's first line says so, however it is dresse
   assert(says_met("\n**Goal met**\nevidence"))
   assert(says_met("## GOAL MET: all green"))
   assert(not says_met("The goal is not met yet."))
+  assert(not says_met("Goal met partially: two of three tests pass."))
+  assert(says_met("GOAL MET - pytest: 12 passed"))
+  assert(says_met("GOAL MET."))
   assert(not says_met("I fixed two of three.\nGOAL MET for the first two."))
   assert(not says_met(""))
 }

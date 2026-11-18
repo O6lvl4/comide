@@ -86,7 +86,8 @@ says which files it read:
 | the files in `$COMIDE_INSTRUCTIONS` (separated by `:`) | named by whoever starts comide |
 
 A `CLAUDE.md` that only says `@AGENTS.md`, or holds the same text, is read once. A file
-over 24,000 characters is cut, and says so.
+over 24,000 characters is cut, and says so. A file of the project's that is a link to
+somewhere outside the project is not read; the same holds for the project's skills.
 
 Those are for the model that talks. The model that edits is a different one, behind
 `solve`, and is told separately: the files in `$COMIDE_SOLVE_INSTRUCTIONS` go to golemide
@@ -113,6 +114,8 @@ back word for word, and the work goes on. `/compact` does it on demand.
 
 The note is written by `$COMIDE_SUMMARY_MODEL`, the conversation's model unless set.
 Exact tool output from before the note is gone, and the model is told to look again.
+What the note replaced is written to a file in the run's temporary directory, and you
+are told where.
 
 ## Going back to a conversation
 
@@ -123,6 +126,10 @@ project's path. `comide --continue` goes on with the project's most recent one, 
 The messages, the cost so far and the command that checks the work come back. The
 system prompt is written afresh, so instruction files and skills changed since are read
 as they are now. Permission to run commands is not kept, and is asked for again.
+
+"Most recent" is the one most recently started. A kept conversation is the whole of it:
+every tool's output, and the system prompt with your own instruction files and notes in
+it. The files are readable by you only, and are not in the project.
 
 ## Memory
 
@@ -195,9 +202,20 @@ Of a project's file only `ask` and `deny` are used as found, since they can only
 comide more careful. Its `allow` rules and hooks are used after you start comide once
 with `--trust-project`, and only while the file stays exactly as it was then.
 
-On shell commands the rules are a guard rail, not a wall: an allow rule does not apply
-to a command that chains or redirects, and a deny rule does not see through `bash -c`
-or a script. What confines a command is the runner (`--runner`).
+A rule on `read` speaks for every tool that reads (`read`, `outline`, `search`,
+`tree`), and a rule on `edit` for both tools that write a file. Paths are compared as
+the place they name: `a/../.env`, `././.env` and `.ENV` are `.env` to a deny or an ask
+rule. `edit` and `write` refuse anything under `.comide/`, whatever the lists say: the
+settings are yours to change, not the model's.
+
+The rules are a guard rail, not a wall. On shell commands an allow rule does not apply
+to a command that chains or redirects; deny and ask rules are tried against each part of
+a chain, with grouping, leading `NAME=value` words and the program's directory taken
+off. They do not see through `bash -c`, an alias, a script, or the same thing done with
+other flags. A rule on a file does not stop a search of the directory it is in, a link
+that points at it, a shell command that reads it, or `solve`, whose edits golemide
+makes. What confines a command or keeps a file from the model is the runner
+(`--runner`).
 
 ### Hooks
 

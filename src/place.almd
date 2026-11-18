@@ -1,0 +1,57 @@
+// Where comide keeps what belongs to a project, and what a project may hand it.
+//
+// Sessions, memory and trust are each kept under the project's path. The path becomes
+// one directory name by writing `/` as `%2F` (and `%` as `%25`), which no two paths
+// share. It was `/` as `-`, and `/w/a-b` and `/w/a/b` then shared their sessions, their
+// memory and their trust (found in review, 2026-11-18).
+//
+// A project's own files are read into the conversation before anything is asked
+// (instructions, skills). A file in a cloned repository can be a link to anywhere, so
+// such a file is read only if the place it really is lies inside the project.
+
+import process
+
+fn key_of(root: String) -> String = string.replace(string.replace(root, "%", "%25"), "/", "%2F")
+
+effect fn real(p: String) -> String =
+  match process.output(process.ProcessCommand { cmd: "realpath", args: [p], timeout_ms: 5000 }) {
+    ok(st) => if st.code == 0 then string.trim(st.stdout) else "",
+    err(_) => "",
+  }
+
+fn inside(real_root: String, real_path: String) -> Bool =
+  real_root != "" and real_path != "" and (real_path == real_root or string.starts_with(real_path, real_root + "/"))
+
+// Whether `path`, followed through every link, is still in `root`. A path that cannot
+// be followed is not.
+effect fn within(root: String, path: String) -> Bool = inside(real(root)!, real(path)!)
+
+// Whether a file found at `path` may be read into the conversation unasked: always when
+// it is not the project's (the person's own files are theirs to link as they like), and
+// for the project's only when it really is in the project.
+effect fn readable(root: String, path: String) -> Bool =
+  if root == "" or not string.starts_with(path, root + "/") then true else within(root, path)!
+
+test "no two projects share a name" {
+  assert_eq(key_of("/w/p"), "%2Fw%2Fp")
+  assert(key_of("/w/a-b") != key_of("/w/a/b"))
+  assert(key_of("/w/a%2Fb") != key_of("/w/a/b"))
+}
+
+test "a file is in the project when the place it really is lies under the project's" {
+  assert(inside("/w/p", "/w/p/AGENTS.md"))
+  assert(inside("/w/p", "/w/p"))
+  assert(not inside("/w/p", "/w/p-other/AGENTS.md"))
+  assert(not inside("/w/p", "/etc/passwd"))
+  assert(not inside("", "/w/p/a"))
+  assert(not inside("/w/p", ""))
+}
+
+test "a link out of the project is not readable as the project's, and a link inside it is" {
+  let dir = string.trim(process.exec("mktemp", ["-d"])!)
+  let _ = process.exec("bash", ["-c", "cd '" + dir + "' && mkdir p outside && echo secret > outside/s && echo notes > p/AGENTS.md && ln -s AGENTS.md p/CLAUDE.md && ln -s ../outside/s p/LEAK.md"])!
+  assert(readable(dir + "/p", dir + "/p/AGENTS.md")!)
+  assert(readable(dir + "/p", dir + "/p/CLAUDE.md")!)
+  assert(not readable(dir + "/p", dir + "/p/LEAK.md")!)
+  assert(readable(dir + "/p", dir + "/outside/s")!)
+}

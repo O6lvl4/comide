@@ -13,12 +13,12 @@
 import fs
 import json
 import self.options
+import self.place
+import process
 
 type Kept = { id: String, file: String, model: String, updated_ms: Int, title: String, session: options.Session }
 
-fn key_of(root: String) -> String = string.replace(root, "/", "-")
-
-fn dir_for(home: String, root: String) -> String = home + "/.comide/sessions/" + key_of(root)
+fn dir_for(home: String, root: String) -> String = home + "/.comide/sessions/" + place.key_of(root)
 
 fn role_of(m: Value) -> String = value.get_string(m, "role") ?? ""
 
@@ -40,19 +40,25 @@ fn document(root: String, model: String, id: String, now_ms: Int, s: options.Ses
   ("steps", value.int(s.steps)),
   ("check", value.string(s.check)),
   ("goal", value.string(s.goal)),
+  ("last_in", value.int(s.last_in)),
   ("messages", value.array(s.messages)),
 ])
 
 // A kept session read back. `allow_shell` is never kept: permission is given to a run,
 // not to a conversation, and is asked for again.
+// An id is a start time, all digits. A file handed over by path says its own id, and that
+// id becomes part of the path the conversation is saved to next: anything else is dropped.
+fn sound_id(id: String) -> String = match int.parse(id) { ok(n) => if n > 0 and int.to_string(n) == id then id else "", err(_) => "" }
+
 fn kept_of(file: String, doc: Value) -> Kept = Kept {
-  id: value.get_string(doc, "id") ?? "",
+  id: sound_id(value.get_string(doc, "id") ?? ""),
   file: file,
   model: value.get_string(doc, "model") ?? "",
   updated_ms: value.get_int(doc, "updated_ms") ?? 0,
   title: value.get_string(doc, "title") ?? "",
   session: options.Session { messages: value.get_array(doc, "messages") ?? [], cost: value.get_float(doc, "cost") ?? 0.0, allow_shell: false,
-    steps: value.get_int(doc, "steps") ?? 0, check: value.get_string(doc, "check") ?? "", goal: value.get_string(doc, "goal") ?? "" },
+    steps: value.get_int(doc, "steps") ?? 0, check: value.get_string(doc, "check") ?? "", goal: value.get_string(doc, "goal") ?? "",
+    last_in: value.get_int(doc, "last_in") ?? 0 },
 }
 
 // The conversation to go on with: the kept messages under a system prompt written now.
@@ -64,7 +70,12 @@ effect fn save(home: String, root: String, model: String, id: String, s: options
   if list.any(s.messages, (m) => role_of(m) == "user") then {
     let dir = dir_for(home, root)
     let _ = fs.mkdir_p(dir)
-    let _ = fs.write_text(dir + "/" + id + ".json", json.stringify(document(root, model, id, datetime.now_ms(), s)))
+    let file = dir + "/" + id + ".json"
+    let _ = fs.write_text(file, json.stringify(document(root, model, id, datetime.now_ms(), s)))
+    // The file holds the whole conversation: every tool's output, and the system prompt
+    // with the person's own instruction files and notes in it. It is for the person only.
+    let _ = process.exec("chmod", ["700", dir])
+    let _ = process.exec("chmod", ["600", file])
   }
 }
 
@@ -104,7 +115,7 @@ fn when(ms: Int) -> String = datetime.format(ms / 1000, "%Y-%m-%d %H:%M") + " UT
 fn msg(role: String, content: String) -> Value = value.object([("role", value.string(role)), ("content", value.string(content))])
 
 test "a project's sessions live under its path" {
-  assert_eq(dir_for("/h", "/w/my project"), "/h/.comide/sessions/-w-my project")
+  assert_eq(dir_for("/h", "/w/my project"), "/h/.comide/sessions/%2Fw%2Fmy project")
 }
 
 test "a session is listed by what was first asked" {
@@ -144,7 +155,11 @@ test "the most recent session is the one continued, and one can be asked for by 
   assert_eq(ids(home, "/w/p")!, ["2000", "1000"])
   assert_eq(result.map(wanted(home, "/w/p", ""), (k) => k.title), ok("second"))
   assert_eq(result.map(wanted(home, "/w/p", "1000"), (k) => k.title), ok("first"))
-  assert_eq(result.map(wanted(home, "/w/p", "nope"), (k) => k.title), err("no session nope in this project; the sessions are in " + home + "/.comide/sessions/-w-p"))
+  assert_eq(result.map(wanted(home, "/w/p", "nope"), (k) => k.title), err("no session nope in this project; the sessions are in " + home + "/.comide/sessions/%2Fw%2Fp"))
+  assert_eq(string.trim(process.exec("bash", ["-c", "stat -f %Lp '" + home + "/.comide/sessions/%2Fw%2Fp/1000.json' 2>/dev/null || stat -c %a '" + home + "/.comide/sessions/%2Fw%2Fp/1000.json'"]) ?? ""), "600")
+  assert_eq(sound_id("1795000000000"), "1795000000000")
+  assert_eq(sound_id("../x"), "")
+  assert_eq(sound_id("12abc"), "")
   assert_eq(result.map(wanted(home, "/w/other", ""), (k) => k.title), err("there is no earlier session in this project to continue"))
   let _ = fs.remove_all(home)
 }

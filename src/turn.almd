@@ -71,7 +71,7 @@ effect fn worked(opts: options.Options, setup: toolkit.Setup, s: options.Session
   var t = Turn { messages: s.messages + [convo.message("user", sent)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
     tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false,
     // A goal is not pressed in a session that cannot act on it.
-    request: user, last_in: 0, aim: if setup.frozen == "" then s.goal else "", aim_rounds: 0, aim_asked: false, aim_met: false }
+    request: user, last_in: s.last_in, aim: if setup.frozen == "" then s.goal else "", aim_rounds: 0, aim_asked: false, aim_met: false }
   let too_long = handover.limit()!
   var stop_rounds = 0
   while not t.done {
@@ -96,7 +96,7 @@ effect fn worked(opts: options.Options, setup: toolkit.Setup, s: options.Session
   if not (t.interrupted and t.steps == 0) then
     options.show(opts, "\n" + ui.footer(opts.ui, t.steps, t.tin, t.tcached, t.tout, convo.usd(t.cost), convo.usd(s.cost + t.cost)))!
   { ...s, messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check,
-    goal: if t.aim_met then "" else s.goal }
+    goal: if t.aim_met then "" else s.goal, last_in: t.last_in }
 }
 
 // Whether the last thing in the conversation is the model answering in words, not a turn
@@ -117,8 +117,10 @@ effect fn handed_over(opts: options.Options, setup: toolkit.Setup, t: Turn) -> T
     },
     ok(n) => {
       options.show(opts, "\n" + ui.note_line(opts.ui, "the conversation was long; a note now stands in its place (" + int.to_string(n.before / 1000) + "k → "
-        + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + ")"))!
-      { ...t, messages: n.messages, cost: t.cost + n.cost_usd, last_in: 0 }
+        + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + "); what it replaced is in " + n.kept_at))!
+      // The question about the goal went with the conversation it was in: the model has
+      // not been asked, as far as the note it now reads can tell.
+      { ...t, messages: n.messages, cost: t.cost + n.cost_usd, last_in: 0, aim_asked: false }
     },
   }
 
@@ -238,7 +240,7 @@ effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCal
   options.show(opts, "\n" + ui.call_line(u, c.name, tools.call_label(c.name, c.arguments)))!
   // The settings speak first (rules.almd); a call they say nothing of is asked about as
   // it always was. `refused` is what the model is told when the settings stopped the call.
-  let (rule_tool, about) = tools.subject_of(c.name, c.arguments)
+  let (rule_tool, about) = tools.subject_of(c.name, c.arguments, setup.root)
   // A PreToolUse hook is heard before the rules: it can stop a call they would allow.
   let call_input = json.parse(if string.trim(c.arguments) == "" then "{}" else c.arguments) ?? value.object([])
   // In a session that only looks (plan mode, --read-only) the tools that change things
@@ -283,7 +285,10 @@ effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCal
 effect fn run_check(opts: options.Options, setup: toolkit.Setup, command: String, allow0: Bool) -> (String, Bool, Bool, Bool) = {
   let u = opts.ui
   options.show(opts, "\n" + ui.call_line(u, "shell", command + "  (comide checks the change)"))!
-  let p = match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, "shell", command) {
+  // comide's own check is a shell command like any other, and a hook for shell hears of it.
+  let pre = hooked(opts, setup, "PreToolUse", "shell", value.object([("command", value.string(command))]), "", "")!
+  let p = if pre.stopped then asking.Permission { run: false, allow_from_now: allow0, said: "" }
+    else match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, "shell", command) {
     Denied(_) => asking.Permission { run: false, allow_from_now: allow0, said: "" },
     Allowed(_) => asking.Permission { run: true, allow_from_now: allow0, said: "" },
     Asked(_) => if opts.live then { let a = asking.permitted(opts, false, "Run this command to check the change?")!; asking.Permission { run: a.run, allow_from_now: allow0, said: a.said } }

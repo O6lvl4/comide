@@ -11,12 +11,25 @@
 // command and solve's verify command ask first, everything else runs). The verify command
 // of solve is a shell command and answers to the shell rules.
 //
+// A rule on `read` speaks for every tool that reads (read, outline, search, tree), and a
+// rule on `edit` for both tools that write a file (edit, write): what is being kept from
+// the model is the file, not one way of reaching it. Paths are compared as the place
+// they name, not as they were spelt: `a/../.env`, `././.env`, the same path written from
+// the root, and `.ENV` are all `.env` to a deny or an ask rule.
+//
+// The settings themselves are not the model's to change: edit and write refuse anything
+// under `.comide/`, whatever the lists say.
+//
 // On shell commands the lists are a guard rail, not a wall. An allow rule does not apply
 // to a command that chains or redirects (`;`, `&&`, `|`, `>`, `$(`...): `git status*`
-// must not let `git status; rm -rf .` through. A deny rule is tried against the whole
-// command and each part of a chain. Neither sees through `bash -c`, an alias or a
-// script: what keeps a command from doing harm is the runner it goes through
-// (toolkit.run_in), not a pattern.
+// must not let `git status; rm -rf .` through. A deny or an ask rule is tried against
+// the whole command, against each part of a chain, and against each part with its
+// grouping, its leading NAME=value words and the directory of its program taken off, so
+// that `(rm -rf x)`, `X=1 rm -rf x`, `/bin/rm -rf x` and `rm   -rf x` are `rm -rf x`. None of
+// it sees through `bash -c`, an alias, a script, or the same thing done with other
+// flags (`rm -r -f`). And a rule on a file does not stop a search of the directory it is
+// in, or solve, whose edits golemide makes. What keeps a command or a model from a file
+// is the runner (toolkit.run_in), not a pattern.
 
 type Rule = { tool: String, about: String, any: Bool }
 
@@ -67,13 +80,69 @@ fn parts(command: String) -> List[String] = {
 
 // What a call is about, as the rules see it: a path without a leading `./`.
 fn tidy(tool: String, about: String) -> String =
-  if tool == "shell" then string.trim(about) else (string.strip_prefix(about, "./") ?? about)
+  if tool == "shell" then squeezed(string.trim(about))
+  else if list.contains(READS, tool) or list.contains(WRITES, tool) then norm_path(about)
+  else about
 
-fn matches(r: Rule, tool: String, about: String) -> Bool =
-  r.tool == tool and (r.any or glob(r.about, about))
+let READS = ["read", "outline", "search", "tree"]
+let WRITES = ["edit", "write"]
 
-fn first_match(rules: List[String], tool: String, about: String) -> String? =
-  list.find(rules, (text) => match rule_of(text) { some(r) => matches(r, tool, about), none => false })
+// The tool a rule may name to speak for `tool`: `read` for the tools that read, `edit`
+// for the tools that write a file, and otherwise the tool itself.
+fn family(tool: String) -> String =
+  if list.contains(READS, tool) then "read" else if list.contains(WRITES, tool) then "edit" else tool
+
+// A path as the place it names: no `.`, no doubled `/`, and `..` taken up. A `..` that
+// climbs out of where the path started stays, so `../x` is not `x`.
+fn norm_path(p: String) -> String = {
+  var out: List[String] = []
+  for seg in string.split(p, "/") {
+    if seg == ".." then {
+      if not list.is_empty(out) and (list.last(out) ?? "") != ".." then { out = list.take(out, list.len(out) - 1) }
+      else { list.push(out, seg) }
+    } else if seg != "" and seg != "." then { list.push(out, seg) }
+  }
+  let joined = list.join(out, "/")
+  if string.starts_with(p, "/") then "/" + joined else if joined == "" then "." else joined
+}
+
+fn squeezed(s: String) -> String =
+  list.join(list.filter(string.split(string.replace(string.replace(s, "\t", " "), "\r", " "), " "), (w) => w != ""), " ")
+
+fn assigns(word: String) -> Bool = match string.split_once(word, "=") {
+  some((name, _)) => name != "" and not list.any(["/", "-", ".", "\"", "'", "$", "("], (c) => string.contains(name, c)),
+  none => false,
+}
+
+// One part of a command with what hides its program taken off: grouping, leading
+// NAME=value words, and the directory the program was named by.
+fn plain(part: String) -> String = {
+  var words = string.split(squeezed(string.replace(string.replace(string.replace(string.replace(part, "(", " "), ")", " "), "{", " "), "}", " ")), " ")
+  while not list.is_empty(words) and assigns(list.first(words) ?? "") { words = list.drop(words, 1) }
+  match list.first(words) {
+    none => "",
+    some(program) => list.join([list.last(string.split(program, "/")) ?? program] + list.drop(words, 1), " "),
+  }
+}
+
+fn matches(r: Rule, tool: String, about: String, any_case: Bool) -> Bool =
+  (r.tool == tool or r.tool == family(tool))
+    and (r.any or (if any_case then glob(string.to_lower(r.about), string.to_lower(about)) else glob(r.about, about)))
+
+fn first_match(rules: List[String], tool: String, about: String, any_case: Bool) -> String? =
+  list.find(rules, (text) => match rule_of(text) { some(r) => matches(r, tool, about, any_case), none => false })
+
+// Every way a call is looked at by the rules that hold it back.
+fn subjects(tool: String, about: String) -> List[String] =
+  if tool != "shell" then [about]
+  else list.unique(list.filter([about] + parts(about) + list.map([about] + parts(about), plain), (s) => s != ""))
+
+let SETTINGS_ARE_THE_PERSONS = "built in: the files under .comide are the person's to change, not the model's"
+
+fn under_comide(about: String) -> Bool = {
+  let p = string.to_lower(about)
+  p == ".comide" or string.starts_with(p, ".comide/")
+}
 
 type Verdict = | Allowed(String) | Asked(String) | Denied(String) | Unsaid
 
@@ -81,18 +150,20 @@ type Verdict = | Allowed(String) | Asked(String) | Denied(String) | Unsaid
 // which one it was. `tool` is `shell` for a shell command and for solve's verify command.
 fn decide(allow: List[String], ask: List[String], deny: List[String], tool: String, about0: String) -> Verdict = {
   let about = tidy(tool, about0)
-  let subjects = if tool == "shell" then [about] + parts(about) else [about]
-  let denied = list.filter_map(subjects, (s) => first_match(deny, tool, s))
-  match list.first(denied) {
+  // A path is held back whatever its case: on a disk that ignores case, `.ENV` is `.env`.
+  let any_case = tool != "shell"
+  let seen = subjects(tool, about)
+  match list.first(list.filter_map(seen, (s) => first_match(deny, tool, s, any_case))) {
     some(rule) => Denied(rule),
-    none => match first_match(ask, tool, about) {
-      some(rule) => Asked(rule),
-      none => if tool == "shell" and chained(about) then Unsaid
-        else match first_match(allow, tool, about) {
-          some(rule) => Allowed(rule),
-          none => Unsaid,
-        },
-    },
+    none => if family(tool) == "edit" and under_comide(about) then Denied(SETTINGS_ARE_THE_PERSONS)
+      else match list.first(list.filter_map(seen, (s) => first_match(ask, tool, s, any_case))) {
+        some(rule) => Asked(rule),
+        none => if tool == "shell" and chained(about) then Unsaid
+          else match first_match(allow, tool, about, false) {
+            some(rule) => Allowed(rule),
+            none => Unsaid,
+          },
+      },
   }
 }
 
@@ -129,6 +200,48 @@ test "deny wins over ask, ask over allow, and a call no rule speaks of is left a
   assert_eq(decide(allow, ask, deny, "edit", "./src/a.py"), Allowed("edit(src/**)"))
   assert_eq(decide(allow, ask, deny, "read", ".env.local"), Denied("read(.env*)"))
   assert_eq(decide(allow, ask, deny, "read", "src/a.py"), Unsaid)
+}
+
+test "a path is the place it names, however it was spelt" {
+  assert_eq(norm_path("a/../.env"), ".env")
+  assert_eq(norm_path("././.env"), ".env")
+  assert_eq(norm_path(".//src//a.py"), "src/a.py")
+  assert_eq(norm_path("../x"), "../x")
+  assert_eq(norm_path("a/../../x"), "../x")
+  assert_eq(norm_path("/w/p/./a"), "/w/p/a")
+  assert_eq(norm_path("."), ".")
+  let deny = ["read(.env*)"]
+  assert_eq(decide([], [], deny, "read", "a/../.env"), Denied("read(.env*)"))
+  assert_eq(decide([], [], deny, "read", "././.env.local"), Denied("read(.env*)"))
+  assert_eq(decide([], [], deny, "read", ".ENV"), Denied("read(.env*)"))
+}
+
+test "a rule on read speaks for every tool that reads, and a rule on edit for both that write" {
+  let deny = ["read(.env*)", "edit(migrations/*)"]
+  assert_eq(decide([], [], deny, "search", ".env"), Denied("read(.env*)"))
+  assert_eq(decide([], [], deny, "outline", ".env"), Denied("read(.env*)"))
+  assert_eq(decide([], [], deny, "write", "migrations/001.sql"), Denied("edit(migrations/*)"))
+  assert_eq(decide([], [], ["write(docs/*)"], "edit", "docs/a.md"), Unsaid)
+  assert_eq(decide(["read(src/*)"], [], [], "tree", "src/a"), Allowed("read(src/*)"))
+}
+
+test "the settings are not the model's to change" {
+  assert_eq(decide(["edit"], [], [], "write", ".comide/settings.json"), Denied(SETTINGS_ARE_THE_PERSONS))
+  assert_eq(decide([], [], [], "edit", "x/../.COMIDE/settings.json"), Denied(SETTINGS_ARE_THE_PERSONS))
+  assert_eq(decide([], [], [], "read", ".comide/settings.json"), Unsaid)
+  assert_eq(decide([], [], [], "write", ".comidex/a"), Unsaid)
+}
+
+test "a held-back command is seen through grouping, NAME=value words, the program's directory and extra spaces" {
+  let deny = ["shell(rm -rf*)"]
+  assert_eq(plain("( X=1 /bin/rm   -rf x )"), "rm -rf x")
+  assert_eq(plain("FOO=bar BAZ=1 git push"), "git push")
+  assert_eq(plain("./run.sh a=b"), "run.sh a=b")
+  for command in ["(rm -rf x)", "{ rm -rf x; }", "X=1 rm -rf x", "rm   -rf x", "/bin/rm -rf x", "true && X=1 /bin/rm -rf x"] {
+    assert_eq(decide([], [], deny, "shell", command), Denied("shell(rm -rf*)"))
+  }
+  assert_eq(decide([], ["shell(git push*)"], [], "shell", "true; git  push"), Asked("shell(git push*)"))
+  assert_eq(decide([], [], deny, "shell", "rm -r -f x"), Unsaid)
 }
 
 test "an allow rule does not let a chained command through, and a deny rule sees each part of it" {

@@ -110,8 +110,8 @@ type Place = { setup: toolkit.Setup, fresh: options.Session, start: options.Sess
 // What the tools work with: the project, golemide, a scratch directory of this process's
 // own, and the helpers found on this machine.
 effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
-  let scratch = (string.strip_suffix(fs.temp_dir(), "/") ?? fs.temp_dir()) + "/comide-" + int.to_string(process.pid())
-  fs.mkdir_p(scratch)!
+  // Made new, with a name nobody could have made first: scripts are written here and run.
+  let scratch = fs.create_temp_dir("comide-")!
   let has_ctxgate = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v ctxgate"] }) { ok(st) => st.code == 0, err(_) => false }
   let searx = string.strip_suffix(env.get("COMIDE_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
   // The model solve runs on, golemide's defaults unless set; the strong one follows it,
@@ -184,10 +184,11 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let place = Place { setup: setup, fresh: fresh, start: start, transcript: setup.scratch + "/transcript.json",
     shown_root: match string.strip_prefix(opts0.root, home) { some(rest) => "~" + rest, none => opts0.root },
     history_file: home + "/.comide/history", home: home,
-    session_id: match kept { some(k) => k.id, none => int.to_string(datetime.now_ms()) } }
+    session_id: match kept { some(k) => if k.id == "" then int.to_string(datetime.now_ms()) else k.id, none => int.to_string(datetime.now_ms()) } }
   if not opts0.live then {
     let after = turn.turn(opts0, setup, start, opts0.prompt)!
-    sessions.save(home, opts0.root, opts0.model, place.session_id, after)!
+    // A helper's conversation is not the person's: kept, it would be the one --continue finds.
+    if setup.depth == 0 then sessions.save(home, opts0.root, opts0.model, place.session_id, after)!
     eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript + " · go on with: comide --continue"))
     ok(0)
   } else {
@@ -252,7 +253,7 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
           some(c) => slash(t, place, c)!,
           none => if string.trim(text) == "" then t else { ...t, s: turn.turn(t.opts, place.setup, t.s, text)! },
         }
-        sessions.save(place.home, t.opts.root, t.opts.model, place.session_id, t.s)!
+        if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, place.session_id, t.s)!
       },
     }
   }
@@ -324,8 +325,8 @@ effect fn compact(t: Talk, place: Place) -> Talk = {
     err(e) => { println(ui.note_line(u, "a note could not be written: " + string.take(e, 200))); t }
     ok(n) => {
       println(ui.note_line(u, "a note now stands in place of the conversation (" + int.to_string(n.before / 1000) + "k → "
-        + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + ")"))
-      { ...t, s: { ...t.s, messages: n.messages, cost: t.s.cost + n.cost_usd } }
+        + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + "); what it replaced is in " + n.kept_at))
+      { ...t, s: { ...t.s, messages: n.messages, cost: t.s.cost + n.cost_usd, last_in: 0 } }
     }
   }
 }
@@ -339,8 +340,35 @@ effect fn switch_model(t: Talk, to: String) -> Talk = {
   }
 }
 
-fn opt(args: List[String], name: String) -> String? =
-  match list.index_of(args, name) { none => none, some(i) => list.get(args, i + 1) }
+// The command line, read once from the left: an option that takes a value takes the
+// word after it, whatever that word is, and that word is then nobody's option. Reading
+// the list by asking "is --x anywhere in it" let the request itself be an option: a
+// request that was the text `--trust-project` trusted the project (found in review,
+// 2026-11-18; the explore tool passes a model's words as the request).
+let TAKES_VALUE = ["-p", "--root", "--model", "--effort", "--max-steps", "--golemide", "--runner", "--resume", "--goal"]
+
+type Args = { flags: List[String], values: List[(String, String)] }
+
+fn read_args(args: List[String]) -> Args = {
+  var flags: List[String] = []
+  var values: List[(String, String)] = []
+  var i = 0
+  while i < list.len(args) {
+    let a = args[i]
+    if list.contains(TAKES_VALUE, a) then {
+      match list.get(args, i + 1) { some(v) => list.push(values, (a, v)), none => () }
+      i = i + 2
+    } else {
+      list.push(flags, a)
+      i = i + 1
+    }
+  }
+  Args { flags: flags, values: values }
+}
+
+fn opt(a: Args, name: String) -> String? = option.map(list.find(a.values, (row) => row.0 == name), (row) => row.1)
+
+fn has(a: Args, name: String) -> Bool = list.contains(a.flags, name)
 
 fn absolute(root: String, cwd: String) -> String = {
   let r = string.strip_suffix(root, "/") ?? root
@@ -391,8 +419,12 @@ COMIDE_COMPACT_TOKENS (default 120000).
 In a conversation: /help /clear /compact /cost /go /goal /memory /model /plan /yes /transcript /exit
 """
 
-effect fn cli(args: List[String]) -> Int =
-  if list.contains(args, "--help") or list.contains(args, "-h") then { println(CHAT_USAGE); 0 }
+effect fn cli(raw: List[String]) -> Int = {
+  let args = read_args(raw)
+  // A helper another comide started (exploring.almd) is given a model's words as its
+  // request and must not be able to do what only the person may: trust a project.
+  let helper = (int.parse(string.trim(env.get("COMIDE_DEPTH") ?? "")) ?? 0) > 0
+  if has(args, "--help") or has(args, "-h") then { println(CHAT_USAGE); 0 }
   else {
     let prompt = opt(args, "-p") ?? ""
     let opts = options.Options {
@@ -405,22 +437,34 @@ effect fn cli(args: List[String]) -> Int =
       effort: opt(args, "--effort") ?? "low",
       max_steps: int.parse(opt(args, "--max-steps") ?? "40") ?? 40,
       max_tokens: 16384,
-      yes: list.contains(args, "--yes"),
+      yes: has(args, "--yes"),
       prompt: prompt,
       golemide: opt(args, "--golemide") ?? (env.get("COMIDE_GOLEMIDE") ?? "golemide"),
       live: prompt == "",
       tui: false,
       ui: ui.detect()!,
       runner: opt(args, "--runner") ?? (env.get("COMIDE_RUNNER") ?? ""),
-      take_up: list.contains(args, "--continue") or list.contains(args, "--resume"),
+      take_up: has(args, "--continue") or option.is_some(opt(args, "--resume")),
       take_up_id: opt(args, "--resume") ?? "",
       goal: opt(args, "--goal") ?? "",
-      trust_project: list.contains(args, "--trust-project"),
-      plan: list.contains(args, "--plan"),
-      read_only: list.contains(args, "--read-only"),
+      trust_project: has(args, "--trust-project") and not helper,
+      plan: has(args, "--plan"),
+      read_only: has(args, "--read-only") or helper,
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }
+}
+
+test "an option's value is its value, even when it looks like an option" {
+  let a = read_args(["-p", "--trust-project", "--read-only", "--root", "/w", "--yes"])
+  assert_eq(opt(a, "-p"), some("--trust-project"))
+  assert(not has(a, "--trust-project"))
+  assert(has(a, "--read-only"))
+  assert(has(a, "--yes"))
+  assert_eq(opt(a, "--root"), some("/w"))
+  assert_eq(opt(read_args(["-p", "--model"]), "--model"), none)
+  assert_eq(opt(read_args(["--resume"]), "--resume"), none)
+}
 
 test "a line starting with a slash is a command" {
   assert_eq(command_of("/model cf:glm-5.3"), some(Slash { name: "/model", arg: "cf:glm-5.3" }))
