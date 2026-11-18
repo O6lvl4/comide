@@ -15,11 +15,15 @@ import self.convo
 import self.options
 import self.asking
 import self.waiting
+import self.handover
 
 // A turn in progress. `tin`, `tcached` and `tout` are the tokens spent; `sigs` are the
-// calls made since the model was last told it was looping.
+// calls made since the model was last told it was looping. `request` is what the person
+// asked, word for word, and `last_in` the input tokens the provider counted on the last
+// call: the size of the conversation, which decides when a hand-over note takes its place.
 type Turn = { messages: List[Value], cost: Float, allow: Bool, steps: Int, done: Bool, interrupted: Bool,
-  tin: Int, tcached: Int, tout: Int, work: watch.Work, check_rounds: Int, sigs: List[String], loop_warned: Bool }
+  tin: Int, tcached: Int, tout: Int, work: watch.Work, check_rounds: Int, sigs: List[String], loop_warned: Bool,
+  request: String, last_in: Int }
 
 fn said(t: Turn, m: Value) -> Turn = { ...t, messages: t.messages + [m] }
 
@@ -27,8 +31,15 @@ fn ended(t: Turn) -> Turn = { ...t, done: true }
 
 effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, user: String) -> options.Session = {
   var t = Turn { messages: s.messages + [convo.message("user", user)], cost: 0.0, allow: s.allow_shell, steps: 0, done: false, interrupted: false,
-    tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false }
-  while not t.done { t = step(opts, setup, s, { ...t, messages: convo.compacted(t.messages) })! }
+    tin: 0, tcached: 0, tout: 0, work: watch.fresh(s.check), check_rounds: 0, sigs: [], loop_warned: false,
+    request: user, last_in: 0 }
+  let too_long = handover.limit()!
+  while not t.done {
+    // Not when there is next to nothing after the system prompt: then the size is the
+    // system prompt's, and a note would be written before every call and shorten nothing.
+    if t.last_in > too_long and list.len(t.messages) > 4 then { t = handed_over(opts, setup, t)! }
+    t = step(opts, setup, s, { ...t, messages: convo.compacted(t.messages) })!
+  }
   let _ = fs.write_text(setup.scratch + "/transcript.json", json.stringify(value.array(t.messages)))
   // A turn stopped before the model said anything cost nothing and did nothing; a line
   // of zeros under it would only be noise.
@@ -36,6 +47,22 @@ effect fn turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
     options.show(opts, "\n" + ui.footer(opts.ui, t.steps, t.tin, t.tcached, t.tout, convo.usd(t.cost), convo.usd(s.cost + t.cost)))!
   options.Session { messages: t.messages, cost: s.cost + t.cost, allow_shell: t.allow, steps: s.steps + t.steps, check: t.work.check }
 }
+
+// The conversation has outgrown the model: a note takes its place (handover.almd). If the
+// note cannot be written the turn goes on as it was, and is not asked again until the
+// conversation has grown by another call.
+effect fn handed_over(opts: options.Options, setup: toolkit.Setup, t: Turn) -> Turn =
+  match handover.written(opts.model, opts.effort, setup.scratch, t.messages, t.request, "") {
+    err(e) => {
+      options.show(opts, "\n" + ui.note_line(opts.ui, "the conversation is long, and a note could not be written in its place: " + string.take(e, 200)))!
+      { ...t, last_in: 0 }
+    },
+    ok(n) => {
+      options.show(opts, "\n" + ui.note_line(opts.ui, "the conversation was long; a note now stands in its place (" + int.to_string(n.before / 1000) + "k → "
+        + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + ")"))!
+      { ...t, messages: n.messages, cost: t.cost + n.cost_usd, last_in: 0 }
+    },
+  }
 
 // One model call and what follows from it.
 effect fn step(opts: options.Options, setup: toolkit.Setup, s: options.Session, t: Turn) -> Turn = {
@@ -55,7 +82,7 @@ effect fn step(opts: options.Options, setup: toolkit.Setup, s: options.Session, 
       let r = h.reply
       let calls = convo.with_ids(r.calls, s.steps + t.steps)
       let spent = said({ ...t, cost: t.cost + r.cost_usd, tin: t.tin + r.input_tokens, tcached: t.tcached + r.cached_tokens,
-        tout: t.tout + r.output_tokens }, convo.assistant_message(r.content, calls))
+        tout: t.tout + r.output_tokens, last_in: r.input_tokens }, convo.assistant_message(r.content, calls))
       let next = if list.is_empty(calls) then answered(opts, setup, spent, h)! else acted(opts, setup, spent, h, calls)!
       record_cost(s.cost + next.cost)!
       { ...next, steps: next.steps + 1 }

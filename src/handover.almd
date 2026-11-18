@@ -1,0 +1,139 @@
+// When the conversation no longer fits: a hand-over note in its place.
+//
+// convo.compacted already cuts old tool output, and that is enough for most sessions. It
+// never touches the requests and the answers, so a long enough session still outgrows the
+// model. Past a size, measured in the tokens the provider last counted, the whole
+// conversation after the system prompt is replaced by a note a model writes about it:
+// what was asked, what was found, what was changed, what was under way. The work goes on
+// from the note.
+//
+// The note is written by its own model, the conversation's unless COMIDE_SUMMARY_MODEL
+// names another: summarising is reading, and a cheaper model reads well enough.
+//
+// What is lost is real. Exact tool output is gone, and the model has to look again at
+// what it needs; the note says so. A session's transcript file keeps what came before.
+
+import env
+import self.model
+
+// The tokens of input after which the next call is preceded by a note
+// (COMIDE_COMPACT_TOKENS). The default leaves room under a 200k window for the note's
+// own request, which sends the conversation once more.
+let ABOVE_TOKENS = 120000
+
+let NOTE_MAX_TOKENS = 4096
+let RESULT_CHARS = 1500
+let ARGUMENT_CHARS = 300
+
+let WRITER = """
+You are writing the hand-over note for a coding session that has grown too long to send whole. The same assistant will continue from your note alone, in the same project, with the same tools, and without the conversation below.
+
+Write the note under these headings, and nothing before or after it:
+
+Requests: what the user asked for, in their words, in order, and which of them are finished.
+Decisions: anything the user said to do or not to do, and corrections they made.
+The project: what was learned that would cost steps to find again. Paths, how the tests run, where things are.
+Changes: what was changed, file by file, and what checked each change.
+Under way: what was being done when the note was written, and the next step.
+
+Be specific. Give paths, commands and names exactly. Leave out pleasantries and anything the code itself shows.
+"""
+
+fn limit_from(v: String) -> Int = match int.parse(string.trim(v)) { ok(n) => if n > 0 then n else ABOVE_TOKENS, err(_) => ABOVE_TOKENS }
+
+fn role_of(m: Value) -> String = value.get_string(m, "role") ?? ""
+fn text_of(m: Value) -> String = value.get_string(m, "content") ?? ""
+
+fn clipped(s: String, n: Int) -> String = if string.len(s) > n then string.take(s, n) + " […]" else s
+
+fn call_text(c: Value) -> String = {
+  let f = value.get(c, "function") ?? value.null()
+  "CALLED " + (value.get_string(f, "name") ?? "") + " " + clipped(value.get_string(f, "arguments") ?? "", ARGUMENT_CHARS)
+}
+
+// One message as a line or two of the transcript the writer reads.
+fn line_of(m: Value) -> String = {
+  let role = role_of(m)
+  if role == "user" then "USER: " + text_of(m)
+  else if role == "tool" then "RESULT: " + clipped(text_of(m), RESULT_CHARS)
+  else if role == "assistant" then {
+    let calls = list.map(value.get_array(m, "tool_calls") ?? [], call_text)
+    let said = if string.trim(text_of(m)) == "" then [] else ["ASSISTANT: " + text_of(m)]
+    list.join(said + calls, "\n")
+  }
+  else ""
+}
+
+// The conversation after the system prompt, as text.
+fn transcript(messages: List[Value]) -> String =
+  list.join(list.filter(list.map(list.filter(messages, (m) => role_of(m) != "system"), line_of), (l) => l != ""), "\n\n")
+
+fn request(messages: List[Value]) -> List[Value] = [
+  value.object([("role", value.string("system")), ("content", value.string(string.trim(WRITER)))]),
+  value.object([("role", value.string("user")), ("content", value.string(transcript(messages)))]),
+]
+
+// What the conversation becomes: the system prompt as it was, then the note, said as a
+// user message so the next call follows it. `working_on` is the request the turn is in
+// the middle of, in the person's words, and `goal` the session's goal; both are put back
+// word for word, because a note that paraphrases the request is how a session drifts.
+fn replaced(messages: List[Value], note: String, working_on: String, goal: String) -> List[Value] = {
+  let system = list.filter(list.take(messages, 1), (m) => role_of(m) == "system")
+  let said = "[The conversation up to here was replaced by this note to make room. Tool output from before it is gone: look again at what you need.]\n\n"
+    + string.trim(note)
+    + (if string.trim(goal) == "" then "" else "\n\nThe goal of this session, in the user's words: " + goal)
+    + (if string.trim(working_on) == "" then "" else "\n\nThe request you are in the middle of, in the user's words: " + working_on + "\n\nGo on with it.")
+  system + [value.object([("role", value.string("user")), ("content", value.string(said))])]
+}
+
+fn size_of(messages: List[Value]) -> Int = list.fold(messages, 0, (acc, m) => acc + string.len(text_of(m)))
+
+type Note = { messages: List[Value], cost_usd: Float, before: Int, after: Int }
+
+// The conversation with a note in its place, and what writing it cost.
+effect fn written(talk_model: String, effort: String, scratch: String, messages: List[Value], working_on: String, goal: String) -> Result[Note, String] = {
+  let named = string.trim(env.get("COMIDE_SUMMARY_MODEL") ?? "")
+  let writer = if named == "" then talk_model else named
+  let r = model.ask(writer, request(messages), NOTE_MAX_TOKENS, effort, scratch)!
+  if string.trim(r.content) == "" then err("the note came back empty")
+  else {
+    let out = replaced(messages, r.content, working_on, goal)
+    ok(Note { messages: out, cost_usd: r.cost_usd, before: size_of(messages), after: size_of(out) })
+  }
+}
+
+effect fn limit() -> Int = limit_from(env.get("COMIDE_COMPACT_TOKENS") ?? "")
+
+fn msg(role: String, content: String) -> Value = value.object([("role", value.string(role)), ("content", value.string(content))])
+
+test "the transcript the writer reads has the requests whole and the tool output clipped" {
+  let call = value.object([("id", value.string("c1")), ("type", value.string("function")),
+    ("function", value.object([("name", value.string("read")), ("arguments", value.string("{\"path\":\"a.py\"}"))]))])
+  let said = value.object([("role", value.string("assistant")), ("content", value.string("Looking.")), ("tool_calls", value.array([call]))])
+  let result = value.object([("role", value.string("tool")), ("tool_call_id", value.string("c1")), ("content", value.string(string.repeat("x", 5000)))])
+  let t = transcript([msg("system", "S"), msg("user", "fix a.py"), said, result])
+  assert(string.starts_with(t, "USER: fix a.py\n\nASSISTANT: Looking.\nCALLED read {\"path\":\"a.py\"}\n\nRESULT: " + string.repeat("x", 1500) + " […]"))
+  assert(not string.contains(t, "S\n"))
+}
+
+test "the note takes the conversation's place, after the system prompt, with the request and the goal word for word" {
+  let out = replaced([msg("system", "S"), msg("user", "fix a.py"), msg("assistant", "done")], "Requests: fix a.py (finished).", "now fix b.py", "ship v2")
+  assert_eq(list.len(out), 2)
+  assert_eq(text_of(list.first(out) ?? value.null()), "S")
+  let note = text_of(list.last(out) ?? value.null())
+  assert(string.contains(note, "Requests: fix a.py (finished)."))
+  assert(string.contains(note, "The goal of this session, in the user's words: ship v2"))
+  assert(string.ends_with(note, "in the user's words: now fix b.py\n\nGo on with it."))
+  assert_eq(role_of(list.last(out) ?? value.null()), "user")
+}
+
+test "with no request under way and no goal, the note stands alone" {
+  let out = replaced([msg("system", "S"), msg("user", "hi")], "Requests: none.", "", "")
+  assert(string.ends_with(text_of(list.last(out) ?? value.null()), "Requests: none."))
+}
+
+test "the size that sets it off can be chosen, and nonsense keeps the default" {
+  assert_eq(limit_from("50000"), 50000)
+  assert_eq(limit_from(""), ABOVE_TOKENS)
+  assert_eq(limit_from("-3"), ABOVE_TOKENS)
+}
