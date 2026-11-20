@@ -1,0 +1,256 @@
+// What the model is told, and what the loop decides. All of it pure, so all of it tested.
+
+import self.exchange
+
+fn system_prompt(root: String) -> String = """
+You are an AI assistant solving a task in a Linux terminal. You start in ${root}.
+
+You have one tool, shell. It runs a command in a terminal that lasts for the whole task: the directory you change to and the variables you export stay. Each call takes, before the command, your analysis of what the output so far shows and your plan for what to run next and why. Think the step through before you call it: every response should carry your reasoning as well as the call.
+
+A command gets wait_s seconds (30 if you do not say; 300 at most). If it has not finished, you get what it printed so far and a job number, and it keeps running: call shell with that job and no command to wait for it and read on. Give quick commands a short wait. For slow ones (a build, an install, a download, a long script) wait, look, and wait again rather than assuming the result.
+
+Work the task through to the end. When it is complete, reply without calling the tool and say what you did.
+"""
+
+// What the model is told when it answers in writing (said.almd). The shape of the answer
+// and the questions under "analysis" and "plan" are terminus-2's, to the word where the
+// tool is the same; the terminal's own rules are comide's (shell.almd).
+fn written_prompt(root: String) -> String = """
+You are an AI assistant tasked with solving command-line tasks in a Linux environment. You will be given a task description and the output from previously executed commands. Your goal is to solve the task by providing batches of shell commands. The terminal starts in ${root}.
+
+Format your response as JSON with the following structure:
+
+{
+  "analysis": "Analyze the current state based on the terminal output provided. What do you see? What has been accomplished? What still needs to be done?",
+  "plan": "Describe your plan for the next steps. What commands will you run and why? Be specific about what you expect each command to accomplish.",
+  "commands": [
+    {"command": "ls -la", "wait_s": 5},
+    {"command": "cd project && make", "wait_s": 120}
+  ],
+  "task_complete": false
+}
+
+Required fields:
+- "analysis": your analysis of the current situation
+- "plan": your plan for the next steps
+- "commands": the commands to run now, in order (may be empty)
+
+Optional fields:
+- "task_complete": true when the task is complete (false when left out)
+
+A command object is one of:
+- {"command": "...", "wait_s": N}: run this command line. The terminal is one and it lasts: the directory you change to and the variables you export are still there for the next command and the next response.
+- {"job": N, "wait_s": N}: wait for a command that is still running, and read on.
+- {"job": N, "stop": true}: end a command that is still running.
+
+"wait_s" is how many seconds to wait for the command (30 when left out, 300 at most). Give quick commands (cd, ls, cat) a short wait. A command that has not finished in that time is not stopped: you are shown what it has printed so far and its job number, and it keeps running. For slow commands (a build, an install, a download, a long script) wait, look, and wait again rather than assuming the result.
+
+Each command's output is shown to you, ending with its exit code or saying it is still running. Long output is cut in the middle and the whole of it is kept in a file whose path you are given.
+
+Important notes:
+- The JSON must be valid: escape quotes and newlines inside strings. A command may span several lines (a here-document, a script) as long as the string is escaped.
+- Text before or after the JSON is tolerated but is not read.
+- Write long files in parts if one response would be too long.
+"""
+
+// Said back when a reply cannot be read, as terminus-2 does; nothing was run.
+fn unread_note(reason: String) -> String =
+  "Previous response had parsing errors: " + reason + ". None of its commands were run. Please fix these issues and provide a proper JSON response."
+
+// Said when a reply reached the output limit: its JSON has no end, so nothing was run.
+let WRITTEN_CUT_NOTE = "ERROR! Your last response reached the output limit before the JSON was finished, so none of the commands in it were run. Respond again with a shorter response: fewer commands, and long files written in parts."
+
+let WRITTEN_CONFIRM_NOTE = "Are you sure you want to mark the task as complete? Your work will be graded as it stands now and you will not be able to make any further corrections. If so, include \"task_complete\": true in your JSON response again."
+
+let NOTHING_NOTE = "(no commands were given)"
+
+// Two things added to terminus-2 by the two agents built on it that beat it with the same
+// model on the official Terminal-Bench 2.0 board (Opus 4.6: terminus-2 62.9, Terminus-KIRA
+// 74.7, Meta-Harness 76.4; docs/decisions/beating-terminus2.md). Both are off unless asked
+// for, until they are measured here.
+//
+// 1. The survey (Meta-Harness, COMIDE_SURVEY=1): what the terminal is like, looked up
+//    before the first reply and shown with the task, so the model does not spend its first
+//    steps finding out. Meta-Harness reports +1.7 (Opus 4.6) and +3.9 (Haiku 4.5) over KIRA.
+let SURVEY_COMMAND = "echo \"working directory: $(pwd)\"; echo; echo '$ ls -la'; ls -la 2>&1 | head -40; echo; echo 'available:'; for t in python3 python pip pip3 uv gcc g++ cc make cmake node npm java rustc cargo go git curl wget apt-get apk conda R; do p=$(command -v $t 2>/dev/null) && echo \"  $t: $p\"; done; echo; (python3 --version 2>&1; gcc --version 2>&1 | head -1) 2>/dev/null; echo; echo \"cpus: $(nproc 2>/dev/null)\"; free -h 2>/dev/null | head -2; df -h . 2>/dev/null | tail -1"
+
+// A command's output without the line shell.almd ends it with.
+fn without_trailer(text: String) -> String = {
+  let lines = string.split(string.trim_end(text), "\n")
+  let last = list.last(lines) ?? ""
+  if string.starts_with(last, "[exit code") or string.starts_with(last, "[still running") then list.join(list.take(lines, list.len(lines) - 1), "\n") else text
+}
+
+fn with_survey(task: String, survey: String) -> String =
+  if string.trim(survey) == "" then task
+  else task + "\n\n[Environment Snapshot, taken before you started]\n" + string.trim(survey)
+
+// 2. The task shown again when the model says it is done (Terminus-KIRA, COMIDE_RECALL=1).
+//    After a long run the request is far up the conversation; the question is asked with
+//    the request beside it. The two questions are KIRA's, shortened. Kept short on
+//    purpose: Meta-Harness measured a longer checklist at −5.6, with the model going round
+//    in "verification spirals", and taking the question away altogether at −6.7.
+fn recall_note(task: String) -> String =
+  "Before this is final, here is the original task again:\n\n" + string.trim(task)
+    + "\n\nCheck your work against it, requirement by requirement. Does it still hold if the inputs, sizes or values used to check it are different from the ones you tried? Have you run it the way the person who asked will run it?\n\n"
+    + "Your work will be graded as it stands now and you will not be able to make any further corrections. If anything is missing, do it. If you are sure, include \"task_complete\": true in your JSON response again."
+
+// 3. The check by someone who was not there (COMIDE_CHECK=1). The tasks comide fails
+//    end the same way: the model writes a check of its own, the check passes, and it says
+//    complete; asking it again in the same conversation does not change its mind (measured,
+//    famulus6 Unit 0.3). So when it has said complete, the conversation is put away and a
+//    new one begins in the same terminal, holding only the task and this note: a reader
+//    with nothing invested in the work. It may fix what it finds, for at most CHECK_STEPS
+//    replies. It is told to leave the rest in place: a directive to clean up was what sank
+//    two of Meta-Harness's candidates.
+//
+//    Its first run (nine dev tasks) kept the seven that passed and fixed neither of the
+//    two that failed. In one of them, polyglot-c-py, the work was right and the directory
+//    held the one file asked for; the check compiled its trial beside it, left the binary
+//    there, and the grader's "only this file" failed. Without the check the same task had
+//    failed the same way, by the worker's own leftovers. Hence the line about where to
+//    build: a place to work in, and a removal narrowed to what testing leaves.
+let CHECK_STEPS = 30
+
+fn check_task(task: String) -> String =
+  "Task Description:\n" + string.trim(task)
+    + "\n\n[Review]\nSomeone else has already worked on this task in this terminal and reports it complete. You have not seen what they did, and their report is not evidence: the checks they ran were their own, and passed. Find out whether the task, as written above, is actually done, and finish it if it is not.\n\n"
+    + "- Go through the task requirement by requirement and look at what is there now: the files, their names and places, the exact formats and interfaces asked for.\n"
+    + "- Run the result the way the task says it will be used, on inputs of your own choosing, not only the ones their tests used.\n"
+    + "- Build and test in a directory of your own (mktemp -d), so that you add nothing to the directories the task names. If testing has already left build products or caches beside what the task asked for, remove those and nothing else.\n"
+    + "- If a requirement is not met, fix it. Change only what the task needs, and leave the rest of their work in place.\n\n"
+    + "When every requirement holds, include \"task_complete\": true in your JSON response."
+
+// terminus-2 asks this once when its model says it is done, and comide is held against
+// terminus-2. Asking was measured not to change results on its own (famulus6 Unit 0.3;
+// arXiv 2610.00917); it is here so the two differ in one thing less.
+let CONFIRM_NOTE = "Are you sure the task is complete? Your work will be graded as it stands now and you will not be able to correct anything afterwards. If there is anything left to do or to check, do it. If you are sure, reply again without calling the tool."
+
+// A reply that reached the output limit with no tool call is not an answer: the model
+// was stopped while thinking, or mid-sentence. famulus6 took it as the final answer and
+// ended tasks with nothing written (its Unit 0.3). The model is told and goes on; after
+// this many in a row the run ends.
+let CUT_ROUNDS = 3
+let CUT_NOTE = "Your last reply reached the output limit before it finished, and no tool was called. Nothing was lost but that reply. Go on with the work: decide the next step and call the tool. Write long files in parts."
+
+// What the loop does with a reply.
+type Next =
+  | GoOn       // it was cut off: say so and call again
+  | Confirm    // it says it is done, after working: ask once
+  | Finish     // it says it is done, and has been asked (or never worked): the answer
+  | Act        // it called the tool
+
+// `worked` is whether any reply before this one was taken; `confirmed` whether the
+// question has been asked since the tool last ran. Working again after the question means
+// the next stop is asked about too, as terminus-2 does.
+fn next(r: exchange.Reply, cut: Int, worked: Bool, confirmed: Bool) -> Next =
+  if not list.is_empty(r.calls) then Act
+  else if r.finish == "length" and cut < CUT_ROUNDS then GoOn
+  else if worked and not confirmed then Confirm
+  else Finish
+
+fn opt(args: List[String], name: String) -> String? = {
+  var found: String? = none
+  var i = 0
+  while i + 1 < list.len(args) {
+    if (list.get(args, i) ?? "") == name then { found = list.get(args, i + 1) }
+    i = i + 1
+  }
+  found
+}
+
+fn first_line(s: String, n: Int) -> String = {
+  let l = list.first(string.split(string.trim(s), "\n")) ?? ""
+  if string.len(l) > n then string.take(l, n) + "…" else l
+}
+
+fn usd(x: Float) -> String = {
+  let micros = int.from_saturating(x * 1000000.0 + 0.5)
+  "$" + int.to_string(micros / 1000000) + "." + string.pad_start(int.to_string(micros % 1000000), 6, "0")
+}
+
+// One step of the record, in the shape bench/cost.py reads: the prompt tokens are all
+// that was sent, the cached ones among them. almai counts the two apart (its `input` is
+// what was not read from cache; seen on the first real run, 176 beside 768 cached).
+//
+// How much the model reasoned and how much it wrote are kept beside the tokens: whether
+// a model is thinking at all cannot be told from a pass or a fail, and on the first real
+// run comide's steps came to about 150 output tokens each where terminus-2's reasoning
+// alone ran to 1,500 characters a step.
+fn step_record(n: Int, r: exchange.Reply) -> Value =
+  value.object([("step_id", value.int(n)), ("metrics", value.object([("prompt_tokens", value.int(r.input + r.cached)),
+    ("cached_tokens", value.int(r.cached)), ("completion_tokens", value.int(r.output)), ("cost_usd", value.float(r.usd))])),
+    ("reasoning_chars", value.int(string.len(r.reasoning))), ("content_chars", value.int(string.len(r.content))),
+    ("call_chars", value.int(list.fold(r.calls, 0, (n, c) => n + string.len(c.arguments)))), ("finish", value.string(r.finish))])
+
+fn reply(finish: String, calls: Int) -> exchange.Reply =
+  exchange.Reply { content: "", reasoning: "", calls: list.map(list.range(0, calls), (i) => exchange.Call { id: int.to_string(i), name: "shell", arguments: "{}" }),
+    finish: finish, usd: 0.0, input: 0, cached: 0, output: 0 }
+
+test "a reply cut off with no tool call goes on, three times in a row at most" {
+  assert_eq(next(reply("length", 0), 0, true, false), GoOn)
+  assert_eq(next(reply("length", 0), 2, true, false), GoOn)
+  assert_eq(next(reply("length", 0), 3, true, false), Confirm)
+  assert_eq(next(reply("length", 1), 0, true, false), Act)
+}
+
+test "the model is asked whether it is done only after it has worked, and once per stop" {
+  assert_eq(next(reply("stop", 0), 0, true, false), Confirm)
+  assert_eq(next(reply("stop", 0), 0, true, true), Finish)
+  assert_eq(next(reply("stop", 0), 0, false, false), Finish)
+  assert_eq(next(reply("stop", 2), 0, true, false), Act)
+}
+
+test "an option's value is the word after it" {
+  assert_eq(opt(["--model", "cf:x", "--root", "/w"], "--root"), some("/w"))
+  assert_eq(opt(["--model", "cf:x"], "--root"), none)
+}
+
+test "nothing in what the model is told asks it to be brief" {
+  let p = string.to_lower(system_prompt("/app"))
+  assert(not string.contains(p, "brief"))
+  assert(not string.contains(p, "concise"))
+  assert(string.contains(p, "/app"))
+}
+
+test "asked in writing, the model is shown the shape of the answer and the terminal's rules" {
+  let p = written_prompt("/app")
+  assert(string.contains(p, "\"analysis\""))
+  assert(string.contains(p, "\"task_complete\""))
+  assert(string.contains(p, "keeps running"))
+  assert(string.contains(p, "/app"))
+  assert(not string.contains(string.to_lower(p), "brief"))
+  assert(string.contains(unread_note("the reply is not valid JSON"), "None of its commands were run"))
+}
+
+test "the survey is shown under the task, without the terminal's own last line" {
+  assert_eq(without_trailer("a\nb\n[exit code 0]"), "a\nb")
+  assert_eq(without_trailer("a\nb"), "a\nb")
+  assert_eq(with_survey("do it", ""), "do it")
+  let t = with_survey("do it", "working directory: /app\n")
+  assert(string.starts_with(t, "do it\n\n[Environment Snapshot"))
+  assert(string.ends_with(t, "working directory: /app"))
+}
+
+test "asked whether it is done, the model is shown the task again" {
+  let n = recall_note("  write /app/run.py  ")
+  assert(string.contains(n, "original task again:\n\nwrite /app/run.py\n"))
+  assert(string.contains(n, "\"task_complete\": true"))
+  assert(string.len(n) < 900)
+}
+
+test "the one who checks is shown the task and told the report is not evidence" {
+  let n = check_task("  write /app/run.py  ")
+  assert(string.starts_with(n, "Task Description:\nwrite /app/run.py\n\n[Review]"))
+  assert(string.contains(n, "not evidence"))
+  assert(string.contains(n, "leave the rest of their work in place"))
+  assert(not string.contains(string.to_lower(n), "clean"))
+  assert(string.contains(n, "a directory of your own"))
+  assert(string.contains(n, "and nothing else"))
+  assert(string.len(n) < 1400)
+}
+
+test "money is written to the cent of a cent" {
+  assert_eq(usd(0.0123456), "$0.012346")
+  assert_eq(usd(2.5), "$2.500000")
+}

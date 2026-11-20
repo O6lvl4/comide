@@ -1,0 +1,37 @@
+// comide's terminal as a program that does one call and ends, for nautra.
+//
+//   comide-shell STATE_DIR      (the call's arguments as JSON on stdin; the result on stdout)
+//
+// Under nautra the agent is a WebAssembly component and cannot start a process. Its
+// terminal is this, named as a native tool in the composition file, which nautra confines
+// with the host kernel and starts fresh for every call. What makes it one terminal across
+// calls is STATE_DIR: the directory it is in, the variables exported, the jobs and their
+// output (shell.almd). A command still running when the call ends runs on, and the next
+// call can wait for it, read on, or stop it.
+//
+// {"close": true} ends everything still running; the agent sends it last.
+
+import env
+import io
+import json
+import process
+import self.shell
+
+effect fn main() -> Unit = {
+  let dir = string.trim(list.get(env.args(), 0) ?? "")
+  if dir == "" then {
+    eprintln("usage: comide-shell STATE_DIR   (the call's arguments as JSON on stdin)")
+    process.exit(2)
+  } else {
+    let a = json.parse(io.read_all()) ?? value.object([])
+    let sh = shell.at(dir, env.cwd() ?? ".")!
+    if (value.get_bool(a, "close") ?? false) then {
+      shell.close(sh)!
+      println("[closed]")
+    } else {
+      let (after, text) = shell.call(sh, a)!
+      shell.keep(after)!
+      println(text)
+    }
+  }
+}

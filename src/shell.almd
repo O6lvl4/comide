@@ -1,0 +1,211 @@
+// The one tool: a terminal that keeps its state and never holds the model up.
+//
+// Keeps its state: the working directory and the exported variables a command leaves
+// behind are there for the next one, as in a terminal a person types into. famulus6 gave
+// every command a new shell, and a model that had run `cd build` or activated an
+// environment found itself somewhere else on the next call.
+//
+// Never holds the model up: a command gets `wait_s` seconds. When they pass it is not
+// killed; what it has printed so far goes back with a job number, and it runs on. The
+// model can wait for it again, read on, or stop it. famulus6 killed a command at 300 s
+// and had no way to leave one running. terminus-2, which comide is held against, sends
+// keystrokes with a duration and reads the screen whatever state it is in; this is that,
+// for a tool call. (An independent study of four harnesses found a shell that returns a
+// hang as a timeout to be what let models recover: arXiv 2610.00917.)
+//
+// How: each command is a script run in the background, writing to a file. The script
+// goes to the saved directory and takes up the saved variables first, and saves both on
+// the way out, whichever way out that is. "Finished" is its exit file being there.
+//
+// Before the command, the model writes what it sees and what it means to do (`analysis`,
+// `plan`). They are read by nobody here; writing them is the point. terminus-2 asks the
+// same of every reply, and with the same model wrote 5 to 50 times what famulus6 did on
+// a task and passed more of them (famulus6 Unit 0.3).
+
+import fs
+import env
+import json
+import process
+
+let WAIT_DEFAULT = 30
+let WAIT_MAX = 300
+// What goes back of a long output: 10,000 characters, as terminus-2 and mini-swe-agent
+// keep. At 16,000 comide's first real run sent about 50k tokens a step where terminus-2
+// sent 22k on the same task, and the size of what is sent again every step is the cost.
+let MAX_CHARS = 10000
+let KEEP_EACH_END = 5000
+let POLL_MS = 100
+
+// `dir` is this run's own directory, where the scripts, their output and the saved state
+// are. `next` numbers the jobs.
+// `apart`: the process that starts a job ends before the job does (shelltool.almd), so
+// the job is started as nobody's child.
+type Shell = { dir: String, next: Int, apart: Bool }
+
+fn quote(s: String) -> String = "'" + string.replace(s, "'", "'\\''") + "'"
+
+fn prop(name: String, kind: String, desc: String) -> (String, Value) =
+  (name, value.object([("type", value.string(kind)), ("description", value.string(desc))]))
+
+fn definition() -> Value =
+  value.object([("type", value.string("function")), ("function", value.object([
+    ("name", value.string("shell")),
+    ("description", value.string("Run a command in the terminal. The terminal is one and it lasts: the directory you cd to and the variables you export are still there on your next call. The command gets wait_s seconds; if it has not finished by then you get what it has printed so far and a job number, and it keeps running. Call again with that job (and no command) to wait for it and read on, or with stop to end it. Every result ends with the exit code, or says the command is still running.")),
+    ("parameters", value.object([("type", value.string("object")), ("properties", value.object([
+      prop("analysis", "string", "Write this first. What the output so far shows: what you see, what has been done, what is still missing or uncertain. Be specific."),
+      prop("plan", "string", "Write this second. What you will run now and why, what you expect it to show, and what you will do next depending on the result."),
+      prop("command", "string", "The command line, as you would type it. Leave it out to wait for a job."),
+      prop("wait_s", "integer", "Seconds to wait for it: 30 when left out, 300 at most. Short for quick commands; for slow ones wait a while, then wait again."),
+      prop("job", "integer", "A job still running, to wait for and read on (with no command), or to stop."),
+      prop("stop", "boolean", "With job: end that job now."),
+    ])), ("required", value.array([value.string("analysis"), value.string("plan")]))])),
+  ]))])
+
+fn job_path(sh: Shell, n: Int, ext: String) -> String = sh.dir + "/job-" + int.to_string(n) + "." + ext
+
+// What a job runs. The command is sourced, not run as a child, so that its cd and its
+// exports are this shell's and can be saved; the trap saves them however the command
+// ends, an `exit` of its own included.
+fn script(sh: Shell, n: Int) -> String = {
+  let d = quote(sh.dir)
+  let j = quote(job_path(sh, n, "exit"))
+  "cd \"$(cat " + d + "/cwd 2>/dev/null)\" 2>/dev/null\n"
+    + "[ -f " + d + "/env ] && . " + d + "/env 2>/dev/null\n"
+    + "echo $$ > " + quote(job_path(sh, n, "pid")) + "\n"
+    + "trap 'c=$?; pwd > " + d + "/cwd.new; export -p > " + d + "/env.new; echo $c > " + j + "' EXIT\n"
+    + ". " + quote(job_path(sh, n, "cmd")) + "\n"
+}
+
+fn clamp_wait(asked: Int) -> Int = if asked <= 0 then WAIT_DEFAULT else if asked > WAIT_MAX then WAIT_MAX else asked
+
+// The head and the tail of a long output, with where the whole of it is.
+fn shown(text: String, path: String) -> String =
+  if string.len(text) <= MAX_CHARS then text
+  else string.take(text, KEEP_EACH_END)
+    + "\n\n[... " + int.to_string(string.len(text) - 2 * KEEP_EACH_END) + " characters left out. The whole output is in " + path + ".]\n\n"
+    + string.drop(text, string.len(text) - KEEP_EACH_END)
+
+effect fn text_of(path: String) -> String = match fs.read_text(path) { ok(t) => t, err(_) => "" }
+
+effect fn open(root: String) -> Result[Shell, String] = {
+  let dir = fs.create_temp_dir("comide-")!
+  fs.write_text(dir + "/cwd", root + "\n")!
+  ok(Shell { dir: dir, next: 1, apart: false })
+}
+
+// The terminal of a run whose calls are separate processes (shelltool.almd, under nautra):
+// all of its state is in `dir`, the number of the next job included. `root` is where it
+// starts, the first time.
+effect fn at(dir: String, root: String) -> Shell = {
+  if not fs.exists(dir + "/cwd") then { let _ = fs.write_text(dir + "/cwd", root + "\n") }
+  Shell { dir: dir, next: int.parse(string.trim(text_of(dir + "/next")!)) ?? 1, apart: true }
+}
+
+effect fn keep(sh: Shell) -> Unit = {
+  let _ = fs.write_text(sh.dir + "/next", int.to_string(sh.next) + "\n")
+}
+
+// Waits up to `wait_s` for job `n`, then says where it stands. A finished job's directory
+// and variables become the terminal's.
+effect fn attend(sh: Shell, n: Int, wait_s: Int) -> String = {
+  let exit_file = job_path(sh, n, "exit")
+  let out_file = job_path(sh, n, "out")
+  let t0 = datetime.now_ms()
+  while not fs.exists(exit_file) and datetime.now_ms() - t0 < wait_s * 1000 { env.sleep_ms(POLL_MS) }
+  let out = shown(string.trim_end(text_of(out_file)!), out_file)
+  if fs.exists(exit_file) then {
+    let code = string.trim(text_of(exit_file)!)
+    let cwd = text_of(sh.dir + "/cwd.new")!
+    if string.trim(cwd) != "" then { let _ = fs.write_text(sh.dir + "/cwd", cwd) }
+    let vars = text_of(sh.dir + "/env.new")!
+    if string.trim(vars) != "" then { let _ = fs.write_text(sh.dir + "/env", vars) }
+    out + (if out == "" then "" else "\n") + "[exit code " + (if code == "" then "unknown" else code) + "]"
+  } else out + (if out == "" then "" else "\n") + "[still running after " + int.to_string(wait_s) + " s, as job " + int.to_string(n)
+    + ". Call shell with job " + int.to_string(n) + " and no command to wait for it and read on, or with stop to end it.]"
+}
+
+effect fn start(sh: Shell, command: String) -> Result[Shell, String] = {
+  let n = sh.next
+  fs.write_text(job_path(sh, n, "cmd"), command + "\n")!
+  fs.write_text(job_path(sh, n, "sh"), script(sh, n))!
+  let line = "exec bash " + quote(job_path(sh, n, "sh")) + " > " + quote(job_path(sh, n, "out")) + " 2>&1 < /dev/null"
+  // A child started with process.start is ended when the program that started it ends.
+  // A job of a terminal whose every call is its own program is started by a shell that
+  // leaves at once instead, so that it is that shell's orphan and runs on.
+  // A later call cannot signal it: under nautra on Linux each call has process numbers of
+  // its own. So a watcher is left beside the job, which ends it when the stop file appears.
+  // The watcher is the job's parent, not its child: a `wait` in the command does not wait
+  // for it.
+  if sh.apart then {
+    let halt = quote(job_path(sh, n, "stop"))
+    // `set -m` gives the job a process group of its own, so that it and all it started
+    // can be ended together without reading /proc (a closed terminal may not).
+    let watched = "set -m; (" + line + ") & p=$!; trap '' TERM; "
+      + "while [ ! -f " + halt + " ] && kill -0 $p 2>/dev/null; do sleep 0.3; done; "
+      + "[ ! -f " + halt + " ] || kill -TERM -- -$p 2>/dev/null"
+    let _ = process.exec("bash", ["-c", "(" + watched + ") > /dev/null 2>&1 &"])!
+  }
+  else { let _ = process.start(process.ProcessCommand { cmd: "bash", args: ["-c", line] })! }
+  ok({ ...sh, next: n + 1 })
+}
+
+effect fn stop(sh: Shell, n: Int) -> String = {
+  let pid = string.trim(text_of(job_path(sh, n, "pid"))!)
+  if pid == "" then "[no job " + int.to_string(n) + "]"
+  else if fs.exists(job_path(sh, n, "exit")) then "[job " + int.to_string(n) + " had already finished]"
+  else if sh.apart then {
+    // The job's watcher sees this file and ends the job (see `start`).
+    let _ = fs.write_text(job_path(sh, n, "stop"), "")
+    attend(sh, n, 5)!
+  } else {
+    // Its children first, then the script itself, whose trap writes the exit file.
+    let _ = process.exec("bash", ["-c", "pkill -TERM -P " + pid + " 2>/dev/null; kill -TERM " + pid + " 2>/dev/null; true"])
+    attend(sh, n, 5)!
+  }
+}
+
+fn int_arg(a: Value, k: String) -> Int = value.get_int(a, k) ?? (int.parse(value.get_string(a, k) ?? "") ?? 0)
+
+// One call of the tool: the terminal as it is afterwards, and what goes back to the model.
+effect fn call(sh: Shell, a: Value) -> (Shell, String) = {
+  let command = value.get_string(a, "command") ?? ""
+  let job = int_arg(a, "job")
+  let wait_s = clamp_wait(int_arg(a, "wait_s"))
+  if string.trim(command) != "" then match start(sh, command) {
+    ok(started) => (started, attend(started, sh.next, wait_s)!),
+    err(e) => (sh, "[the command could not be started: " + e + "]"),
+  } else if job <= 0 or job >= sh.next then (sh, "[nothing to do: give a command, or the number of a job that is running]")
+  else if (value.get_bool(a, "stop") ?? false) then (sh, stop(sh, job)!)
+  else (sh, attend(sh, job, wait_s)!)
+}
+
+// Everything still running is ended: nothing of a run outlives it.
+effect fn close(sh: Shell) -> Unit = {
+  var n = 1
+  while n < sh.next {
+    if not fs.exists(job_path(sh, n, "exit")) then { let _ = stop(sh, n)! }
+    n = n + 1
+  }
+}
+
+test "the wait is 30 seconds when not said, and 300 at most" {
+  assert_eq(clamp_wait(0), 30)
+  assert_eq(clamp_wait(5), 5)
+  assert_eq(clamp_wait(9999), 300)
+}
+
+test "a long output keeps its head and its tail and says where the rest is" {
+  let long = string.repeat("a", 10000) + string.repeat("b", 10000)
+  let s = shown(long, "/x/job-1.out")
+  assert(string.starts_with(s, "aaaa"))
+  assert(string.ends_with(s, "bbbb"))
+  assert(string.contains(s, "10000 characters left out"))
+  assert(string.contains(s, "/x/job-1.out"))
+  assert_eq(shown("short", "/x"), "short")
+}
+
+test "the model writes what it sees and what it means to do before the command" {
+  let d = json.stringify(definition())
+  assert(string.contains(d, "\"required\":[\"analysis\",\"plan\"]"))
+  assert(string.index_of(d, "\"analysis\"") ?? 0 < (string.index_of(d, "\"command\"") ?? 0))
+}

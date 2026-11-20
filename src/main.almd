@@ -1,25 +1,27 @@
 // comide — a coding agent in the terminal.
 //
-// A coding conversation (agent.almd) that hands its code changes to golemide.
+// A coding conversation (agent.almd) that hands its code changes to golemide, and an
+// errand (errand.almd): one task worked to the end in a terminal, with no one watching.
 
 import process
 import self.agent
+import self.errand
 import env
 
 let USAGE = """
 comide                              a coding conversation in this directory
-comide run PROMPT [--root DIR] ...  one request, answered, then exit
+comide run TASK [--root DIR] ...    one task, worked to the end, then exit (comide run --help)
+comide -p PROMPT [--root DIR] ...   one request in the conversation's way, answered, then exit
 comide --help                       every option
 comide --version
 """
 
 // `comide` alone is the conversation, the way `claude` is: the thing typed most should be
-// the shortest. `run PROMPT` is `-p PROMPT` spelled as a verb. Anything else that is
-// not an option is a mistake, said as one.
+// the shortest. `run` is not a conversation and is taken before this is asked. Anything
+// else that is not an option is a mistake, said as one.
 local fn chat_args(args: List[String]) -> List[String]? = {
   let first = list.get(args, 1) ?? ""
-  if first == "run" then some(["-p"] + list.drop(args, 2))
-  else if first == "chat" then some(list.drop(args, 2))
+  if first == "chat" then some(list.drop(args, 2))
   else if first == "" or string.starts_with(first, "-") then some(list.drop(args, 1))
   else none
 }
@@ -30,6 +32,7 @@ let VERSION = "0.6.1"
 
 effect fn main() -> Unit = {
   if (list.get(env.args(), 0) ?? "") == "--version" then { println("comide " + VERSION); process.exit(0) }
+  if (list.get(env.args(), 0) ?? "") == "run" then process.exit(errand.cli(list.drop(env.args(), 1))!)
   match chat_args(["comide"] + env.args()) {
     some(rest) => process.exit(agent.cli(rest)!),
     none => {
@@ -40,10 +43,8 @@ effect fn main() -> Unit = {
   }
 }
 
-test "comide alone is the conversation; run is one request; a bare word is a mistake" {
+test "comide alone is the conversation; a bare word is a mistake" {
   assert_eq(chat_args(["comide"]), some([]))
-  assert_eq(chat_args(["comide", "run", "fix the flaky tests"]), some(["-p", "fix the flaky tests"]))
-  assert_eq(chat_args(["comide", "run", "fix it", "--yes"]), some(["-p", "fix it", "--yes"]))
   assert_eq(chat_args(["comide", "-p", "fix it"]), some(["-p", "fix it"]))
   assert_eq(chat_args(["comide", "--root", "../x"]), some(["--root", "../x"]))
   assert_eq(chat_args(["comide", "--help"]), some(["--help"]))

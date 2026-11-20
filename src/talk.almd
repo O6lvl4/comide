@@ -1,0 +1,70 @@
+// One call of the model.
+//
+// Nothing is set that would make the model do less than it can:
+//
+//   - no reasoning effort is sent. The model reasons as its maker set it to; famulus6
+//     sent `low` and the model wrote 5 to 50 times less than it did for terminus-2,
+//     which sends none (famulus6 Unit 0.3)
+//   - the output limit is the caller's and is large (errand.almd), because a model
+//     reasoning at its hardest spends most of a small one before it writes a word
+//
+// COMIDE_FAKE names a directory that stands in for the model, for ci/check.sh: call N
+// writes what it would have sent to request-N.json and takes its reply from reply-N.json.
+// No network is touched.
+//
+// No tests here: a file that reaches the network cannot run its tests on the compiler's
+// WebAssembly path. What can be tested is in exchange.almd.
+
+import almai.live as live
+import almai.core as core
+import env
+import fs
+import json
+import self.exchange
+
+let EFFORT = ""
+let LIMITS = live.Limits { total_s: 1800, idle_s: 300 }
+let WAIT_MAX_MS = 1830000
+let TRIES = 4
+
+effect fn once(model: String, messages: List[Value], tools: List[Value], max_tokens: Int) -> Result[exchange.Reply, String] =
+  match live.start(live.Request { model: model, messages: messages, tools: tools, max_tokens: max_tokens, effort: EFFORT }, LIMITS) {
+    err(e) => err(core.error_text(e)),
+    ok(p) => {
+      let t0 = datetime.now_ms()
+      while not live.is_done(p)! and datetime.now_ms() - t0 <= WAIT_MAX_MS { env.sleep_ms(100) }
+      if not live.is_done(p)! then { live.cancel(p)!; err("request timeout: no complete answer within 1830s") }
+      else match live.finish(p) {
+        err(e) => err(core.error_text(e)),
+        ok(r) => ok(exchange.Reply { content: r.content, reasoning: r.reasoning,
+          calls: list.map(r.calls, (c) => exchange.Call { id: c.id, name: c.name, arguments: c.arguments }),
+          finish: core.finish_name(r.finish), usd: r.cost.usd, input: core.count(r.usage.input),
+          cached: core.count(r.usage.cache_read), output: core.count(r.usage.output) }),
+      }
+    },
+  }
+
+effect fn stand_in(dir: String, n: Int, model: String, messages: List[Value], tools: List[Value], max_tokens: Int) -> Result[exchange.Reply, String] = {
+  fs.write_text(dir + "/request-" + int.to_string(n) + ".json", json.stringify(exchange.request(model, messages, tools, max_tokens, EFFORT)))!
+  match fs.read_text(dir + "/reply-" + int.to_string(n) + ".json") {
+    ok(text) => exchange.written_reply(text),
+    err(_) => err("the stand-in has no reply-" + int.to_string(n) + ".json"),
+  }
+}
+
+effect fn tried(attempt: Int, model: String, messages: List[Value], tools: List[Value], max_tokens: Int) -> Result[exchange.Reply, String] =
+  match once(model, messages, tools, max_tokens) {
+    ok(r) => ok(r),
+    err(e) => if attempt < TRIES and exchange.passing(e) then {
+      eprintln("  the model call failed (" + string.take(e, 160) + "); trying again")
+      env.sleep_ms(5000 * attempt)
+      tried(attempt + 1, model, messages, tools, max_tokens)
+    } else err(e),
+  }
+
+// Call `n` of a run, tried again when the failure is one that passes.
+effect fn ask(n: Int, model: String, messages: List[Value], tools: List[Value], max_tokens: Int) -> Result[exchange.Reply, String] = {
+  let dir = string.trim(env.get("COMIDE_FAKE") ?? "")
+  if dir != "" then stand_in(dir, n, model, messages, tools, max_tokens)
+  else tried(1, model, messages, tools, max_tokens)
+}

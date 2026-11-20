@@ -1,0 +1,97 @@
+// What the model said, when it is asked to answer in writing: one JSON object with its
+// analysis, its plan, the commands to run, and whether the task is complete.
+//
+// This is terminus-2's way of asking (harbor-framework/harbor, terminus_2: "analysis",
+// "plan", "commands", "task_complete"), and the only way of asking that has been seen to
+// make glm-5.3 on Workers AI think: its replies there carried 1,500 to 13,000 characters
+// of reasoning a step. Asked through a tool call instead, on comide's first real run,
+// the same model wrote about 150 tokens a step. Of eight harnesses read (docs/decisions),
+// seven ask through tool calls and one in writing; the seven are not known to have been
+// run on this model and provider, and the one has.
+//
+// The reply is found leniently (text before the first brace and after the last is let
+// go) and read strictly: what cannot be read is said back to the model, as terminus-2
+// does, and nothing is run.
+
+import json
+
+// One thing to do in the terminal: a command, or a job to wait for or stop (shell.almd).
+type Order = { command: String, job: Int, wait_s: Int, stop: Bool }
+
+type Said = { analysis: String, plan: String, orders: List[Order], complete: Bool }
+
+fn int_of(v: Value, k: String) -> Int = value.get_int(v, k) ?? (int.parse(value.get_string(v, k) ?? "") ?? 0)
+
+fn order_of(v: Value) -> Order =
+  Order { command: value.get_string(v, "command") ?? "", job: int_of(v, "job"), wait_s: int_of(v, "wait_s"), stop: value.get_bool(v, "stop") ?? false }
+
+// The object in a reply: from its first brace to its last.
+fn object_in(text: String) -> String? = match string.index_of(text, "{") {
+  none => none,
+  some(a) => match string.last_index_of(text, "}") {
+    none => none,
+    some(b) => if b > a then some(string.slice(text, a, b + 1)) else none,
+  },
+}
+
+fn read(text: String) -> Result[Said, String] = match object_in(text) {
+  none => err("there is no JSON object in the reply"),
+  some(body) => match json.parse(body) {
+    err(e) => err("the reply is not valid JSON: " + e),
+    ok(d) => {
+      let orders = list.map(value.get_array(d, "commands") ?? [], (c) => order_of(c))
+      let empty = list.filter(orders, (o) => string.trim(o.command) == "" and o.job <= 0)
+      if not list.is_empty(empty) then err("a command has neither \"command\" nor \"job\"")
+      else ok(Said { analysis: value.get_string(d, "analysis") ?? "", plan: value.get_string(d, "plan") ?? "",
+        orders: orders, complete: value.get_bool(d, "task_complete") ?? false })
+    },
+  },
+}
+
+// An order as the arguments shell.call takes.
+fn arguments(o: Order) -> Value =
+  value.object([("command", value.string(o.command)), ("job", value.int(o.job)), ("wait_s", value.int(o.wait_s)), ("stop", value.bool(o.stop))])
+
+// How an order is shown above its result.
+fn shown(o: Order) -> String =
+  if string.trim(o.command) != "" then "$ " + o.command
+  else if o.stop then "(stop job " + int.to_string(o.job) + ")"
+  else "(job " + int.to_string(o.job) + ")"
+
+// What happens after a reply's commands have run.
+type After =
+  | Work      // not complete: show the results and go on
+  | AskSure   // complete, for the first time since it last worked: ask once
+  | Done      // complete again, having been asked: the end
+
+// Complete twice in a row ends it, as in terminus-2. Saying complete, being asked, and
+// then not saying it again takes the question back: the next "complete" is asked about.
+fn after(s: Said, asked: Bool) -> After =
+  if not s.complete then Work else if asked then Done else AskSure
+
+test "the reply is one object, with what to run" {
+  let s = read("{\"analysis\":\"a\",\"plan\":\"p\",\"commands\":[{\"command\":\"ls\",\"wait_s\":5},{\"job\":3}],\"task_complete\":false}") ?? Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(s.analysis, "a")
+  assert_eq(list.map(s.orders, (o) => shown(o)), ["$ ls", "(job 3)"])
+  assert_eq(list.map(s.orders, (o) => o.wait_s), [5, 0])
+  assert(not s.complete)
+}
+
+test "words around the object are let go, and a fence too" {
+  let s = read("Here it is:\n```json\n{\"analysis\":\"a\",\"plan\":\"p\",\"commands\":[],\"task_complete\":true}\n```\nDone.") ?? Said { analysis: "", plan: "", orders: [], complete: false }
+  assert(s.complete)
+  assert(list.is_empty(s.orders))
+}
+
+test "what cannot be read is an error, with the reason" {
+  assert_eq(read("I will list the files now."), err("there is no JSON object in the reply"))
+  assert(string.starts_with(match read("{\"analysis\": \"a\", \"commands\": [") { ok(_) => "", err(e) => e }, "there is no JSON object") or string.starts_with(match read("{\"analysis\": \"a\", \"commands\": [}") { ok(_) => "", err(e) => e }, "the reply is not valid JSON"))
+  assert_eq(read("{\"commands\":[{\"wait_s\":5}]}"), err("a command has neither \"command\" nor \"job\""))
+}
+
+test "complete twice in a row ends it; once is asked about" {
+  let done = Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(after(done, false), AskSure)
+  assert_eq(after(done, true), Done)
+  assert_eq(after({ ...done, complete: false }, true), Work)
+}

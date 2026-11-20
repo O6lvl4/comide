@@ -1,0 +1,218 @@
+// comide as a WebAssembly component, for nautra.
+//
+//   nautra run -f comide.toml TASK        (nautra/run.sh writes the file and runs it)
+//
+// The same work as errand.almd asked in writing, with the same words and the same rules
+// (charge.almd, said.almd, exchange.almd), by a program that can do nothing but send HTTP
+// requests, and only where nautra lets it:
+//
+//   - the model: a granted host. The key is bound to that host by nautra (--secret), which
+//     puts it on the request; what this program holds under the key's name is a
+//     placeholder. Nothing here, and nothing the model can make the terminal print, is
+//     the key.
+//   - the terminal: the tool `shell` of the MCP server at http://tools.nautra/, a name
+//     that never leaves nautra. It is shelltool.almd, native and confined to the
+//     workspace it was given.
+//
+// The model is called with almai's own parts (where a model id goes, the body, reading
+// the stream), not almai.live: live also runs `claude -p` as a process, and a program
+// that names a process call does not build as a component.
+//
+//   COMIDE_MODEL            the model, as almai names it (default: cf:glm-5.3)
+//   COMIDE_MAX_TOKENS       output tokens a reply may take (default: 65536)
+//   COMIDE_MAX_STEPS        model calls before it stops (default: 200)
+//   COMIDE_REASONING_BACK   0: what the model reasoned is not sent back
+//   COMIDE_CHECK            1: said complete, the work is checked in a new conversation
+//   COMIDE_LOG_DIR          a mounted directory for trajectory.json, cost.txt, transcript.json
+
+import env
+import fs
+import http
+import json
+import almai.core as core
+import almai.route as route
+import almai.wire as wire
+import almai.wire_openai as wire_openai
+import almai.answer as answer
+import self.exchange
+import self.charge
+import self.said
+
+let TOOLS = "http://tools.nautra/"
+let TRIES = 4
+let UNREAD_ROUNDS = 5
+// A function, not a constant: a top-level record does not build as a component (almide 0.70.0).
+fn limits() -> http.HttpLimits = http.HttpLimits { total_ms: 1800000, idle_ms: 300000 }
+
+fn headers_of(ep: route.Endpoint) -> List[(String, String)] = {
+  var hs = [("Content-Type", "application/json")]
+  for h in ep.headers {
+    match string.split_once(h, ":") { some((k, v)) => { hs = hs + [(string.trim(k), string.trim(v))] }, none => () }
+  }
+  hs
+}
+
+effect fn once(model: String, messages: List[Value], max_tokens: Int) -> Result[exchange.Reply, String] =
+  match route.endpoint(model) {
+    err(e) => err(e),
+    ok(ep) => if ep.kind != "chat" then err("comide under nautra speaks to OpenAI-shaped endpoints only; " + model + " is " + ep.kind) else {
+      let encoded = wire_openai.encode(wire.Ask { model_id: ep.model_id, provider: ep.provider, messages: messages, tools: [], max_tokens: max_tokens, effort: "", schema: none })
+      match http.start(http.new_request("POST", ep.url, encoded.body, headers_of(ep)), limits()) {
+        err(e) => err("transport: " + e),
+        ok(call) => {
+          while option.is_none(http.poll(call)) { env.sleep_ms(100) }
+          match http.wait(call) {
+            err(e) => err(core.error_text(answer.call_failure(e))),
+            ok(r) => match answer.read_http(answer.Shape { kind: ep.kind, schema_tool: false }, http.status(r), http.body(r), 0) {
+              err(e) => err(core.error_text(e)),
+              ok((f, _)) => ok(exchange.Reply { content: f.content, reasoning: f.reasoning, calls: [],
+                finish: core.finish_name(core.settled_finish(f.finish, false)), usd: route.cost_of(f.meter, f.usage, ep).usd,
+                input: core.count(f.usage.input), cached: core.count(f.usage.cache_read), output: core.count(f.usage.output) }),
+            },
+          }
+        },
+      }
+    },
+  }
+
+effect fn ask(attempt: Int, model: String, messages: List[Value], max_tokens: Int) -> Result[exchange.Reply, String] =
+  match once(model, messages, max_tokens) {
+    ok(r) => ok(r),
+    err(e) => if attempt < TRIES and exchange.passing(e) then {
+      eprintln("  the model call failed (" + string.take(e, 160) + "); trying again")
+      env.sleep_ms(5000 * attempt)
+      ask(attempt + 1, model, messages, max_tokens)
+    } else err(e),
+  }
+
+// One call of the terminal, and what it said. A refusal or a failure is said to the model
+// like any other result: it can do something about most of them.
+effect fn terminal(a: Value) -> String = {
+  let message = value.object([("jsonrpc", value.string("2.0")), ("id", value.int(1)), ("method", value.string("tools/call")),
+    ("params", value.object([("name", value.string("shell")), ("arguments", a)]))])
+  match http.send(http.new_request("POST", TOOLS, json.stringify(message), [("Content-Type", "application/json")])) {
+    err(e) => "[the terminal could not be reached: " + e + "]",
+    ok(resp) => match json.parse(http.body(resp)) {
+      err(_) => "[the terminal's answer could not be read]",
+      ok(reply) => match value.get(reply, "error") {
+        some(problem) => "[the terminal refused the call: " + (value.get_string(problem, "message") ?? "no reason given") + "]",
+        none => {
+          let result = value.get(reply, "result") ?? value.object([])
+          string.trim_end(list.join(list.filter_map(value.get_array(result, "content") ?? [], (part) => value.get_string(part, "text")), "\n"))
+        },
+      },
+    },
+  }
+}
+
+effect fn run_orders(orders: List[said.Order]) -> String = {
+  var parts: List[String] = []
+  for o in orders {
+    eprintln("\n⏺ " + charge.first_line(said.shown(o), 110))
+    let text = terminal(said.arguments(o))!
+    eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
+    list.push(parts, said.shown(o) + "\n" + text)
+  }
+  if list.is_empty(parts) then charge.NOTHING_NOTE else list.join(parts, "\n\n")
+}
+
+effect fn record(dir: String, steps: List[Value], spent: Float, messages: List[Value]) -> Unit =
+  if dir == "" then ()
+  else {
+    let _ = fs.write_text(dir + "/trajectory.json", json.stringify(value.object([("agent", value.string("comide under nautra")), ("steps", value.array(steps))])))
+    let _ = fs.write_text(dir + "/cost.txt", charge.usd(spent) + "\n")
+    let _ = fs.write_text(dir + "/transcript.json", json.stringify(value.array(messages)))
+  }
+
+fn as_kept(r: exchange.Reply, back: Bool) -> exchange.Reply = if back then r else { ...r, reasoning: "" }
+
+effect fn setting(name: String) -> String = string.trim(env.get(name) ?? "")
+
+effect fn main() -> Unit = {
+  let task = string.trim(list.join(env.args(), " "))
+  guard task != "" else err("give comide a task")!
+  let model = if setting("COMIDE_MODEL")! == "" then "cf:glm-5.3" else setting("COMIDE_MODEL")!
+  let max_tokens = int.parse(setting("COMIDE_MAX_TOKENS")!) ?? 65536
+  let max_steps = int.parse(setting("COMIDE_MAX_STEPS")!) ?? 200
+  let reasoning_back = setting("COMIDE_REASONING_BACK")! != "0"
+  let check = setting("COMIDE_CHECK")! == "1"
+  let log_dir = setting("COMIDE_LOG_DIR")!
+  let root = string.trim(charge.without_trailer(terminal(value.object([("command", value.string("pwd")), ("wait_s", value.int(10))]))!))
+  var messages = [exchange.message("system", string.trim(charge.written_prompt(root))), exchange.message("user", "Task Description:\n" + task)]
+  var records: List[Value] = []
+  var spent = 0.0
+  var steps = 0
+  var unread = 0
+  var asked = false
+  var checking = false
+  var check_from = 0
+  var done = false
+  var failure = ""
+  while not done {
+    if steps >= max_steps then {
+      failure = "stopped after " + int.to_string(steps) + " model calls (COMIDE_MAX_STEPS)"
+      done = true
+    } else if checking and steps - check_from >= charge.CHECK_STEPS then {
+      eprintln("\n  the check has taken " + int.to_string(charge.CHECK_STEPS) + " replies; the work stands as it is")
+      done = true
+    } else match ask(1, model, messages, max_tokens) {
+      err(e) => {
+        failure = "the model call failed: " + e
+        done = true
+      },
+      ok(r) => {
+        steps = steps + 1
+        spent = spent + r.usd
+        list.push(records, charge.step_record(steps, r))
+        list.push(messages, exchange.assistant_message(as_kept(r, reasoning_back), []))
+        record(log_dir, records, spent, messages)!
+        match said.read(r.content) {
+          err(reason) => {
+            unread = unread + 1
+            eprintln("\n  the reply could not be read (" + reason + "); nothing was run")
+            if unread >= UNREAD_ROUNDS then {
+              failure = int.to_string(unread) + " replies in a row could not be read"
+              done = true
+            } else list.push(messages, exchange.message("user", if r.finish == "length" then charge.WRITTEN_CUT_NOTE else charge.unread_note(reason)))
+          },
+          ok(s) => {
+            unread = 0
+            if string.trim(s.analysis) != "" then eprintln("\n" + charge.first_line(s.analysis, 300))
+            let seen = run_orders(s.orders)!
+            match said.after(s, asked) {
+              Work => {
+                list.push(messages, exchange.message("user", seen))
+                asked = false
+              },
+              AskSure => {
+                eprintln("\n  comide asks the model once whether the task is complete")
+                list.push(messages, exchange.message("user", seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
+                asked = true
+              },
+              Done => {
+                if check and not checking then {
+                  eprintln("\n  the model says the task is complete; comide has it checked in a new conversation")
+                  if log_dir != "" then {
+                    let _ = fs.write_text(log_dir + "/transcript-work.json", json.stringify(value.array(messages)))
+                    let _ = fs.write_text(log_dir + "/check.txt", "the check began after step " + int.to_string(steps) + "\n")
+                  }
+                  messages = [exchange.message("system", string.trim(charge.written_prompt(root))), exchange.message("user", charge.check_task(task))]
+                  checking = true
+                  check_from = steps
+                  asked = false
+                } else {
+                  println(if string.trim(s.analysis) == "" then "(task marked complete)" else string.trim(s.analysis))
+                  done = true
+                }
+              },
+            }
+          },
+        }
+      },
+    }
+  }
+  // Nothing of a run outlives it: whatever is still running in the terminal is ended.
+  let _ = terminal(value.object([("close", value.bool(true))]))!
+  eprintln("\n  " + int.to_string(steps) + " steps · " + charge.usd(spent))
+  guard failure == "" else err(failure)!
+}

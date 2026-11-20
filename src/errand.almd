@@ -1,0 +1,289 @@
+// An errand: one task, worked to the end with no one watching.
+//
+//   comide run TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
+//
+// The loop: ask the model for its next step, run what it says in the one terminal, send
+// what came back, and stop when it says twice that the task is complete. The model is
+// asked in writing by default (said.almd): no tool is sent and every reply is one JSON
+// object. This loop was first written and measured outside comide, as famulus7, against
+// Harbor's terminus-2 on the same model and tasks; the comments that speak of a measured
+// run speak of those.
+//
+// What the loop decides is in charge.almd and what it sends in exchange.almd, where they
+// are tested; ci/check.sh drives this file end to end against a stand-in for the model.
+
+import env
+import fs
+import json
+import self.exchange
+import self.charge
+import self.said
+import self.shell
+import self.talk
+
+let USAGE = """
+comide run TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
+
+  --ask HOW       how the model is asked for its next step (default: writing)
+                    writing  every reply is one JSON object: analysis, plan, commands,
+                             task_complete. No tool is sent
+                    tool     one tool, shell, called with analysis, plan and a command
+  --model M       the model, as almai names it (default: cf:glm-5.3)
+  --root DIR      where the terminal starts (default: this directory)
+  --max-steps N   model calls before it stops (default: 200)
+
+  COMIDE_MAX_TOKENS       output tokens a reply may take (default: 65536)
+  COMIDE_LOG_DIR          where the record of the run is written as it goes:
+                          trajectory.json (the tokens of every step), cost.txt, transcript.json
+  COMIDE_REASONING_BACK   0: what the model reasoned is not sent back to it
+  COMIDE_CHECK            1: said complete, the work is checked once in a new conversation
+"""
+
+// The record is written after every step, not at the end: a run stopped at a task's
+// timeout or a cost limit is killed where it stands, and what it had done is what there
+// is to read. The first real run lost its conversation this way.
+effect fn record(dir: String, steps: List[Value], spent: Float, messages: List[Value]) -> Unit =
+  if dir == "" then ()
+  else {
+    let _ = fs.write_text(dir + "/trajectory.json", json.stringify(value.object([("agent", value.string("comide run")), ("steps", value.array(steps))])))
+    let _ = fs.write_text(dir + "/cost.txt", charge.usd(spent) + "\n")
+    let _ = fs.write_text(dir + "/transcript.json", json.stringify(value.array(messages)))
+  }
+
+effect fn run_tool(sh: shell.Shell, c: exchange.Call) -> (shell.Shell, String) =
+  if c.name != "shell" then (sh, "[there is no tool named " + c.name + ": the one tool is shell]")
+  else match json.parse(c.arguments) {
+    err(e) => (sh, "[the arguments of this call are not JSON (" + charge.first_line(e, 120) + "). If the reply was cut off, send a shorter command: write long files in parts.]"),
+    ok(a) => {
+      let command = value.get_string(a, "command") ?? ""
+      eprintln("\n⏺ shell(" + (if string.trim(command) == "" then "job " + int.to_string(shell.int_arg(a, "job")) else charge.first_line(command, 110)) + ")")
+      let (after, text) = shell.call(sh, a)!
+      eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
+      (after, text)
+    },
+  }
+
+effect fn work(sh0: shell.Shell, task: String, model: String, root: String, max_steps: Int, max_tokens: Int, log_dir: String) -> Int = {
+  var sh = sh0
+  let tools = [shell.definition()]
+  var messages = [exchange.message("system", string.trim(charge.system_prompt(root))), exchange.message("user", task)]
+  var records: List[Value] = []
+  var spent = 0.0
+  var steps = 0
+  var cut = 0
+  var confirmed = false
+  var done = false
+  var code = 0
+  while not done {
+    if steps >= max_steps then {
+      eprintln("\nstopped after " + int.to_string(steps) + " model calls (--max-steps)")
+      code = 3
+      done = true
+    } else match talk.ask(steps + 1, model, messages, tools, max_tokens) {
+      err(e) => {
+        eprintln("\nthe model call failed: " + e)
+        code = 1
+        done = true
+      },
+      ok(r) => {
+        let worked = steps > 0
+        steps = steps + 1
+        spent = spent + r.usd
+        list.push(records, charge.step_record(steps, r))
+        let calls = exchange.with_ids(r.calls, steps)
+        list.push(messages, exchange.assistant_message(as_kept(r)!, calls))
+        record(log_dir, records, spent, messages)!
+        match charge.next(r, cut, worked, confirmed) {
+          GoOn => {
+            eprintln("\n  the reply reached the output limit with no tool call; comide asks the model to go on")
+            list.push(messages, exchange.message("user", charge.CUT_NOTE))
+            cut = cut + 1
+          },
+          Confirm => {
+            eprintln("\n  comide asks the model once whether the task is complete")
+            list.push(messages, exchange.message("user", charge.CONFIRM_NOTE))
+            confirmed = true
+          },
+          Finish => {
+            println(if string.trim(r.content) == "" then "(no answer)" else string.trim(r.content))
+            done = true
+          },
+          Act => {
+            if string.trim(r.content) != "" then eprintln("\n" + string.trim(r.content))
+            for c in calls {
+              let (after, text) = run_tool(sh, c)!
+              sh = after
+              list.push(messages, exchange.tool_message(c.id, text))
+            }
+            cut = 0
+            confirmed = false
+          },
+        }
+      },
+    }
+  }
+  shell.close(sh)!
+  eprintln("\n  " + int.to_string(steps) + " steps · " + charge.usd(spent))
+  let _ = fs.write_text(sh.dir + "/transcript.json", json.stringify(value.array(messages)))
+  eprintln("  transcript: " + sh.dir + "/transcript.json")
+  code
+}
+
+// The same loop with the model asked in writing (said.almd): no tool is sent, every reply
+// is one JSON object, and its commands are run in order and their output handed back as
+// the next message. A reply that cannot be read runs nothing and is said back; so many in
+// a row end the run.
+let UNREAD_ROUNDS = 5
+
+effect fn on(name: String) -> Bool = string.trim(env.get(name) ?? "") == "1"
+
+// The reply as it goes into the conversation: with what the model reasoned, unless
+// COMIDE_REASONING_BACK=0. Sending it back is what the model's makers say to do, and it
+// is what the conversation is mostly made of: in the first ten-task run, 47% of everything
+// sent again on every step was earlier reasoning (9% to 84% by task), and a step cost three
+// to five times terminus-2's, which sends none back and passes as many. All of it or none:
+// keeping only the last few would change the start of the conversation on every step and
+// lose the provider's cache. Which of the two passes more is not measured yet.
+effect fn as_kept(r: exchange.Reply) -> exchange.Reply =
+  if string.trim(env.get("COMIDE_REASONING_BACK") ?? "") == "0" then { ...r, reasoning: "" } else r
+
+effect fn run_orders(sh0: shell.Shell, orders: List[said.Order]) -> (shell.Shell, String) = {
+  var sh = sh0
+  var parts: List[String] = []
+  for o in orders {
+    eprintln("\n⏺ " + charge.first_line(said.shown(o), 110))
+    let (next_sh, text) = shell.call(sh, said.arguments(o))!
+    sh = next_sh
+    eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
+    list.push(parts, said.shown(o) + "\n" + text)
+  }
+  (sh, if list.is_empty(parts) then charge.NOTHING_NOTE else list.join(parts, "\n\n"))
+}
+
+effect fn work_written(sh0: shell.Shell, task: String, model: String, root: String, max_steps: Int, max_tokens: Int, log_dir: String) -> Int = {
+  var sh = sh0
+  var survey = ""
+  if on("COMIDE_SURVEY")! then {
+    let (surveyed, text) = shell.call(sh, said.arguments(said.Order { command: charge.SURVEY_COMMAND, job: 0, wait_s: 20, stop: false }))!
+    sh = surveyed
+    survey = charge.without_trailer(text)
+    eprintln("\n  comide looked at the environment before the first reply (" + int.to_string(string.len(survey)) + " characters)")
+  }
+  let recall = on("COMIDE_RECALL")!
+  var messages = [exchange.message("system", string.trim(charge.written_prompt(root))), exchange.message("user", "Task Description:\n" + charge.with_survey(task, survey))]
+  var records: List[Value] = []
+  var spent = 0.0
+  var steps = 0
+  var unread = 0
+  var asked = false
+  var done = false
+  var code = 0
+  // The check by someone who was not there (charge.check_task): `checking` once the first
+  // conversation has been put away, `check_from` the step it ended at.
+  let check = on("COMIDE_CHECK")!
+  var checking = false
+  var check_from = 0
+  while not done {
+    if steps >= max_steps then {
+      eprintln("\nstopped after " + int.to_string(steps) + " model calls (--max-steps)")
+      code = 3
+      done = true
+    } else if checking and steps - check_from >= charge.CHECK_STEPS then {
+      eprintln("\n  the check has taken " + int.to_string(charge.CHECK_STEPS) + " replies; the work stands as it is")
+      done = true
+    } else match talk.ask(steps + 1, model, messages, [], max_tokens) {
+      err(e) => {
+        eprintln("\nthe model call failed: " + e)
+        code = 1
+        done = true
+      },
+      ok(r) => {
+        steps = steps + 1
+        spent = spent + r.usd
+        list.push(records, charge.step_record(steps, r))
+        list.push(messages, exchange.assistant_message(as_kept(r)!, []))
+        record(log_dir, records, spent, messages)!
+        match said.read(r.content) {
+          err(reason) => {
+            unread = unread + 1
+            eprintln("\n  the reply could not be read (" + reason + "); nothing was run")
+            if unread >= UNREAD_ROUNDS then {
+              eprintln("\nstopped: " + int.to_string(unread) + " replies in a row could not be read")
+              code = 4
+              done = true
+            } else list.push(messages, exchange.message("user", if r.finish == "length" then charge.WRITTEN_CUT_NOTE else charge.unread_note(reason)))
+          },
+          ok(s) => {
+            unread = 0
+            if string.trim(s.analysis) != "" then eprintln("\n" + charge.first_line(s.analysis, 300))
+            let (next_sh, seen) = run_orders(sh, s.orders)!
+            sh = next_sh
+            match said.after(s, asked) {
+              Work => {
+                list.push(messages, exchange.message("user", seen))
+                asked = false
+              },
+              AskSure => {
+                eprintln("\n  comide asks the model once whether the task is complete")
+                list.push(messages, exchange.message("user", seen + "\n\n" + (if recall then charge.recall_note(task) else charge.WRITTEN_CONFIRM_NOTE)))
+                asked = true
+              },
+              Done => {
+                if check and not checking then {
+                  eprintln("\n  the model says the task is complete; comide has it checked in a new conversation")
+                  if log_dir != "" then {
+                    let _ = fs.write_text(log_dir + "/transcript-work.json", json.stringify(value.array(messages)))
+                    let _ = fs.write_text(log_dir + "/check.txt", "the check began after step " + int.to_string(steps) + "\n")
+                  }
+                  messages = [exchange.message("system", string.trim(charge.written_prompt(root))), exchange.message("user", charge.check_task(task))]
+                  checking = true
+                  check_from = steps
+                  asked = false
+                } else {
+                  println(if string.trim(s.analysis) == "" then "(task marked complete)" else string.trim(s.analysis))
+                  done = true
+                }
+              },
+            }
+          },
+        }
+      },
+    }
+  }
+  shell.close(sh)!
+  eprintln("\n  " + int.to_string(steps) + " steps · " + charge.usd(spent))
+  code
+}
+
+// `args` is what followed `run`: the task, then its options. The exit code is the answer:
+// 0 done, 1 the model could not be reached, 2 a mistake in the call, 3 out of steps, 4 replies
+// that could not be read.
+effect fn cli(args: List[String]) -> Int = {
+  let task = list.get(args, 0) ?? ""
+  let rest = list.drop(args, 1)
+  if string.trim(task) == "" or task == "--help" or task == "-h" then {
+    eprintln(string.trim(USAGE))
+    2
+  } else {
+    let root = charge.opt(rest, "--root") ?? (env.cwd() ?? ".")
+    match shell.open(root) {
+      err(e) => {
+        eprintln("no directory to keep the terminal's state in: " + e)
+        1
+      },
+      ok(sh) => {
+        let model = charge.opt(rest, "--model") ?? "cf:glm-5.3"
+        let max_steps = int.parse(charge.opt(rest, "--max-steps") ?? "") ?? 200
+        let max_tokens = int.parse(string.trim(env.get("COMIDE_MAX_TOKENS") ?? "")) ?? 65536
+        let log_dir = string.trim(env.get("COMIDE_LOG_DIR") ?? "")
+        let ask = charge.opt(rest, "--ask") ?? "writing"
+        if ask == "tool" then work(sh, task, model, root, max_steps, max_tokens, log_dir)!
+        else if ask == "writing" then work_written(sh, task, model, root, max_steps, max_tokens, log_dir)!
+        else {
+          eprintln("no way of asking named " + ask + ": writing or tool")
+          2
+        }
+      },
+    }
+  }
+}

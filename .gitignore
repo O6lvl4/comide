@@ -1,4 +1,5 @@
 /comide
+/build/
 *.tmp
 .DS_Store
 __pycache__/

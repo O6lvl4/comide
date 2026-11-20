@@ -1,0 +1,89 @@
+// The conversation as data: what the model answered, and the messages it is sent.
+// Nothing here does anything; talk.almd calls the model and errand.almd runs the loop.
+//
+// What the model reasoned before a reply goes back with that reply on the next call, as
+// `reasoning_content`. Without it the model decides each step not knowing what it
+// reasoned on the last. Measured on Workers AI (famulus6 Unit 0.3): glm-5.3 counts the
+// field and can quote from it. Its makers say to send it back (Z.ai's thinking-mode
+// guide; Moonshot says the same of Kimi).
+
+import json
+
+type Call = { id: String, name: String, arguments: String }
+
+type Reply = { content: String, reasoning: String, calls: List[Call], finish: String,
+  usd: Float, input: Int, cached: Int, output: Int }
+
+fn message(role: String, content: String) -> Value = value.object([("role", value.string(role)), ("content", value.string(content))])
+
+fn tool_message(id: String, content: String) -> Value =
+  value.object([("role", value.string("tool")), ("tool_call_id", value.string(id)), ("content", value.string(content))])
+
+// A tool result answers to the id of its call. A provider that leaves the id empty gets
+// one made up here, before the assistant message is recorded.
+fn with_ids(calls: List[Call], step: Int) -> List[Call] = {
+  var out: List[Call] = []
+  var i = 0
+  for c in calls {
+    list.push(out, Call { id: if c.id == "" then "call_" + int.to_string(step) + "_" + int.to_string(i) else c.id, name: c.name,
+      arguments: if string.trim(c.arguments) == "" then "{}" else c.arguments })
+    i = i + 1
+  }
+  out
+}
+
+fn assistant_message(r: Reply, calls: List[Call]) -> Value = {
+  var fields = [("role", value.string("assistant")), ("content", value.string(r.content))]
+  if string.trim(r.reasoning) != "" then list.push(fields, ("reasoning_content", value.string(r.reasoning)))
+  if not list.is_empty(calls) then list.push(fields, ("tool_calls", value.array(list.map(calls, (c) => value.object([
+    ("id", value.string(c.id)), ("type", value.string("function")),
+    ("function", value.object([("name", value.string(c.name)), ("arguments", value.string(c.arguments))])),
+  ])))))
+  value.object(fields)
+}
+
+// A failure worth another try: the provider's or the network's, not the request's.
+fn passing(e: String) -> Bool =
+  string.contains(e, "status 429") or string.contains(e, "status 5") or string.contains(e, "transport") or string.contains(e, "timeout")
+
+// A reply written down by hand, for the stand-in model of ci/check.sh (talk.almd).
+fn written_reply(text: String) -> Result[Reply, String] = match json.parse(text) {
+  err(e) => err("the stand-in reply is not JSON: " + e),
+  ok(d) => ok(Reply { content: value.get_string(d, "content") ?? "", reasoning: value.get_string(d, "reasoning") ?? "",
+    calls: list.map(value.get_array(d, "calls") ?? [], (c) => Call { id: value.get_string(c, "id") ?? "", name: value.get_string(c, "name") ?? "",
+      arguments: value.get_string(c, "arguments") ?? "" }),
+    finish: value.get_string(d, "finish") ?? "stop", usd: 0.01, input: 1000, cached: 0, output: 100 }),
+}
+
+// What a call would have sent, for the stand-in to write down.
+fn request(model: String, messages: List[Value], tools: List[Value], max_tokens: Int, effort: String) -> Value =
+  value.object([("model", value.string(model)), ("effort", value.string(effort)), ("max_tokens", value.int(max_tokens)),
+    ("messages", value.array(messages)), ("tools", value.array(tools))])
+
+test "what the model reasoned goes back with the reply it led to" {
+  let r = Reply { content: "done", reasoning: "the test wants exit 0", calls: [], finish: "stop", usd: 0.0, input: 0, cached: 0, output: 0 }
+  let m = json.stringify(assistant_message(r, []))
+  assert(string.contains(m, "\"reasoning_content\":\"the test wants exit 0\""))
+  assert(string.contains(m, "\"content\":\"done\""))
+  assert(not string.contains(json.stringify(assistant_message({ ...r, reasoning: "  " }, [])), "reasoning_content"))
+}
+
+test "a call with no id gets one, so its result has something to answer to" {
+  let cs = with_ids([Call { id: "", name: "shell", arguments: "" }, Call { id: "x", name: "shell", arguments: "{}" }], 3)
+  assert_eq(list.map(cs, (c) => c.id), ["call_3_0", "x"])
+  assert_eq(list.map(cs, (c) => c.arguments), ["{}", "{}"])
+}
+
+test "a failure of the provider's is tried again, one of the request's is not" {
+  assert(passing("status 429: rate limited"))
+  assert(passing("status 503: unavailable"))
+  assert(passing("transport: connection reset"))
+  assert(not passing("status 400: max_tokens too large"))
+}
+
+test "a reply written by hand reads as a reply" {
+  let r = written_reply("{\"content\":\"hi\",\"calls\":[{\"name\":\"shell\",\"arguments\":\"{}\"}],\"finish\":\"length\"}") ?? Reply { content: "", reasoning: "", calls: [], finish: "", usd: 0.0, input: 0, cached: 0, output: 0 }
+  assert_eq(r.content, "hi")
+  assert_eq(r.finish, "length")
+  assert_eq(list.map(r.calls, (c) => c.name), ["shell"])
+}
