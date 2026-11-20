@@ -22,6 +22,8 @@ import self.model
 import self.options
 import self.rules
 import self.said
+import self.skills
+import self.memory
 import self.shell
 import self.talk
 import self.toolkit
@@ -34,6 +36,22 @@ let UNREAD_ROUNDS = 5
 let CALL_MAX_MS = 930000
 
 fn system_prompt(root: String) -> String = string.trim(charge.written_prompt(root))
+
+// The skills, for a model whose one tool is the terminal: a skill is a file, and is read
+// as one. A line each, as in the conversation's other loop.
+fn skills_section(all: List[skills.Skill]) -> String =
+  if list.is_empty(all) then ""
+  else "Skills: procedures written down for particular kinds of task. When a request matches one, read its file first (cat), and follow what it says. Its other files are beside it.\n"
+    + list.join(list.map(list.take(all, skills.MAX_LISTED), (s) => "- " + s.name + " (" + s.file + "): " + s.about), "\n")
+    + (if list.len(all) > skills.MAX_LISTED then "\n(" + int.to_string(list.len(all) - skills.MAX_LISTED) + " more are not listed)" else "")
+
+// The notes kept between sessions (memory.almd), and how one is added from a terminal: a
+// line at the end of the file. Said even when nothing is kept yet, or nothing ever would be.
+fn memory_section(file: String, text: String) -> String =
+  if file == "" then ""
+  else (if string.trim(text) == "" then "Notes kept between sessions in this project go in " + file + " (nothing is kept yet)."
+      else memory.section(file, text))
+    + "\nTo keep a note for later sessions, append one line to that file (mkdir -p its directory first): `- the fact, in one sentence (YYYY-MM-DD)`. Keep only what a later session could not work out from the project: a correction the user made, a preference they stated, where something is that took steps to find."
 
 // The first request is the task; what the person says after it is said as they said it.
 fn request(messages: List[Value], text: String) -> String =
@@ -243,6 +261,16 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
 test "the first request is the task, and what follows is said as it was" {
   assert_eq(request([exchange.message("system", "s")], "fix it"), "Task Description:\nfix it")
   assert_eq(request([exchange.message("system", "s"), exchange.message("user", "Task Description:\nfix it")], "now the tests"), "now the tests")
+}
+
+test "a skill is listed with the file to read, and the notes with how to add one" {
+  let s = skills_section([skills.Skill { name: "release", about: "cut a release", file: "/p/.comide/skills/release/SKILL.md" }])
+  assert(string.contains(s, "- release (/p/.comide/skills/release/SKILL.md): cut a release"))
+  assert_eq(skills_section([]), "")
+  assert(string.contains(memory_section("/h/MEMORY.md", ""), "nothing is kept yet"))
+  assert(string.contains(memory_section("/h/MEMORY.md", "- use pnpm (2026-11-18)"), "- use pnpm (2026-11-18)"))
+  assert(string.contains(memory_section("/h/MEMORY.md", "- use pnpm (2026-11-18)"), "append one line"))
+  assert_eq(memory_section("", ""), "")
 }
 
 test "a declined command says so, with what the person said" {

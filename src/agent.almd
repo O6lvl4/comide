@@ -162,11 +162,14 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
     options.show(opts0, ui.note_line(opts0.ui, "skills: " + list.join(list.map(known, (k) => k.name), ", ")))!
   // What was kept from earlier sessions here (memory.almd). Last, because it is the part
   // most likely to differ from one session to the next.
-  let remembered = memory.section(setup.memory_file, memory.read(setup.memory_file)!)
+  let kept_notes = memory.read(setup.memory_file)!
+  let remembered = if opts0.written then penned.memory_section(setup.memory_file, kept_notes) else memory.section(setup.memory_file, kept_notes)
+  // Asked in writing, the model has no tool to reach another program's tools with.
+  if opts0.written and not list.is_empty(servers) then options.show(opts0, ui.note_line(opts0.ui, "MCP servers are not reachable with --loop written yet"))!
   // Asked in writing, the model is told the shape of its reply and the terminal's rules
   // (charge.almd), not the tools: it has none but the terminal.
   let opening = if opts0.written then penned.system_prompt(opts0.root) else system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
-  let system = list.join(list.filter([opening, briefed, skills.section(known), mcp.section(servers),
+  let system = list.join(list.filter([opening, briefed, if opts0.written then penned.skills_section(known) else skills.section(known), if opts0.written then "" else mcp.section(servers),
     if at_start.printed == "" then "" else "Said by a check the user set up to run at the start of a session:\n" + at_start.printed, remembered], (part) => part != ""), "\n\n")
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
