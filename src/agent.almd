@@ -413,7 +413,7 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                    `comide run "go ahead" --continue` carries it out
   --read-only      only look, for the whole run: no file changed, no command run
   --loop written   ask the model in writing and give it one terminal that lasts, as
-                   `comide run` does ($COMIDE_LOOP); the default, tools, sends the
+                   `comide errand` does ($COMIDE_LOOP); the default, tools, sends the
                    tools below. Asked in writing the model has the terminal only:
                    no edit, solve, MCP, skill or memory tool yet, and in plan mode or
                    --read-only every command is put to you first

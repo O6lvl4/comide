@@ -1,6 +1,6 @@
 // An errand: one task, worked to the end with no one watching.
 //
-//   comide run TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
+//   comide errand TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
 //
 // The loop: ask the model for its next step, run what it says in the one terminal, send
 // what came back, and stop when it says twice that the task is complete. The model is
@@ -24,7 +24,7 @@ import self.shell
 import self.talk
 
 let USAGE = """
-comide run TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
+comide errand TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
 
   --ask HOW       how the model is asked for its next step (default: writing)
                     writing  every reply is one JSON object: analysis, plan, commands,
@@ -51,7 +51,7 @@ comide run TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
 effect fn record(dir: String, steps: List[Value], spent: Float, messages: List[Value]) -> Unit =
   if dir == "" then ()
   else {
-    let _ = fs.write_text(dir + "/trajectory.json", json.stringify(value.object([("agent", value.string("comide run")), ("steps", value.array(steps))])))
+    let _ = fs.write_text(dir + "/trajectory.json", json.stringify(value.object([("agent", value.string("comide errand")), ("steps", value.array(steps))])))
     let _ = fs.write_text(dir + "/cost.txt", charge.usd(spent) + "\n")
     let _ = fs.write_text(dir + "/transcript.json", json.stringify(value.array(messages)))
   }

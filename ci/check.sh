@@ -1,5 +1,5 @@
 #!/bin/sh
-# comide's errand (`comide run`) checked end to end. No model is called: the model is stood
+# comide's errand (`comide errand`) checked end to end. No model is called: the model is stood
 # in for by replies written by hand (talk.almd, COMIDE_FAKE), and under nautra by
 # ci/fake-model.py. The part under nautra is skipped where there is no nautra.
 #
@@ -48,7 +48,7 @@ replies = [call(command="cd sub && export FOO=bar && echo one"),
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
-COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide run "do the thing" --ask tool --root "$tmp/root" > "$tmp/run.out" 2> "$tmp/run.err"
+COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide errand "do the thing" --ask tool --root "$tmp/root" > "$tmp/run.out" 2> "$tmp/run.err"
 same "exit 0" "0" "$?"
 same "the last answer is what it prints" "Yes, done." "$(cat "$tmp/run.out")"
 python3 - "$tmp/fake" > "$tmp/sent.out" <<'EOF'
@@ -89,7 +89,7 @@ replies = [{"content": "I was thinking and", "finish": "length"},
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{d}/reply-{i}.json", "w"))
 EOF
-COMIDE_FAKE="$tmp/fake" ./comide run "loop" --ask tool --root "$tmp/root" > "$tmp/run2.out" 2> "$tmp/run2.err"
+COMIDE_FAKE="$tmp/fake" ./comide errand "loop" --ask tool --root "$tmp/root" > "$tmp/run2.out" 2> "$tmp/run2.err"
 same "exit 0" "0" "$?"
 has "the model is told its reply was cut off, and goes on" "reached the output limit" "$tmp/run2.err"
 before=$(cat "$tmp/alive" 2>/dev/null); sleep 3; after=$(cat "$tmp/alive" 2>/dev/null)
@@ -113,7 +113,7 @@ replies = [say([{"command": "cd sub && export FOO=bar && echo one", "wait_s": 5}
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
-COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide run "do the thing" --root "$tmp/root" > "$tmp/run3.out" 2> "$tmp/run3.err"
+COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide errand "do the thing" --root "$tmp/root" > "$tmp/run3.out" 2> "$tmp/run3.err"
 same "exit 0" "0" "$?"
 python3 - "$tmp/fake" "$tmp/log" > "$tmp/sent3.out" <<'EOF'
 import json, sys
@@ -156,7 +156,7 @@ def say(commands, done=False):
 for i, r in enumerate([say([{"command": "echo hi"}]), say([], done=True), say([], done=True)], 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
-COMIDE_SURVEY=1 COMIDE_RECALL=1 COMIDE_FAKE="$tmp/fake" ./comide run "write the unusual thing to /app/out.txt" --root "$tmp/root" > "$tmp/run4.out" 2> "$tmp/run4.err"
+COMIDE_SURVEY=1 COMIDE_RECALL=1 COMIDE_FAKE="$tmp/fake" ./comide errand "write the unusual thing to /app/out.txt" --root "$tmp/root" > "$tmp/run4.out" 2> "$tmp/run4.err"
 same "exit 0" "0" "$?"
 python3 - "$tmp/fake" "$tmp/root" > "$tmp/sent4.out" <<'EOF'
 import json, sys
@@ -175,7 +175,7 @@ rm -rf "$tmp/fake"; mkdir -p "$tmp/fake"
 python3 -c "
 import json
 json.dump({'content': json.dumps({'analysis':'a','plan':'p','commands':[],'task_complete':True})}, open('$tmp/fake/reply-1.json','w'))"
-COMIDE_FAKE="$tmp/fake" ./comide run "plain" --root "$tmp/root" > /dev/null 2>&1
+COMIDE_FAKE="$tmp/fake" ./comide errand "plain" --root "$tmp/root" > /dev/null 2>&1
 if grep -q "Environment Snapshot" "$tmp/fake/request-1.json"; then bad "neither is on unless asked for"; else say "ok: neither is on unless asked for"; fi
 
 say "== what the model reasoned is not sent back, when asked not to"
@@ -187,7 +187,7 @@ def say(commands, done=False):
 for i, r in enumerate([say([{"command": "echo hi"}]), say([], done=True), say([], done=True)], 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
-COMIDE_REASONING_BACK=0 COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide run "plain" --root "$tmp/root" > /dev/null 2>&1
+COMIDE_REASONING_BACK=0 COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide errand "plain" --root "$tmp/root" > /dev/null 2>&1
 if grep -q "a long thought" "$tmp/fake/request-3.json"; then bad "the reasoning went back"; else say "ok: no earlier reasoning is in what is sent"; fi
 same "how much it reasoned is still recorded" "14" "$(python3 -c "import json; print(json.load(open('$tmp/log/trajectory.json'))['steps'][0]['reasoning_chars'])")"
 
@@ -202,7 +202,7 @@ replies = [say([{"command": "echo first work"}]), say([], done=True), say([], do
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
-COMIDE_CHECK=1 COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide run "write the unusual thing to /app/out.txt" --root "$tmp/root" > /dev/null 2> "$tmp/run5.err"
+COMIDE_CHECK=1 COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide errand "write the unusual thing to /app/out.txt" --root "$tmp/root" > /dev/null 2> "$tmp/run5.err"
 same "exit 0" "0" "$?"
 python3 - "$tmp/fake" "$tmp/log" > "$tmp/sent5.out" <<'EOF'
 import json, sys
@@ -247,7 +247,7 @@ replies = [say([{"command": "echo plain > kept.txt; cat kept.txt"},
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
-COMIDE_SETTINGS="$tmp/settings.json" COMIDE_FAKE="$tmp/fake" ./comide run "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate.err"
+COMIDE_SETTINGS="$tmp/settings.json" COMIDE_FAKE="$tmp/fake" ./comide errand "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate.err"
 same "exit 0" "0" "$?"
 python3 - "$tmp/fake" "$tmp/gate" > "$tmp/gate.out" <<'EOF'
 import json, os, sys
@@ -264,7 +264,7 @@ has "a command the settings would ask about is not run: nobody is there" "^asked
 has "a hook stops a command before it runs" "^pre hook True False$" "$tmp/gate.out"
 has "a hook's objection goes under what the command printed" "^post hook True$" "$tmp/gate.out"
 printf '{ not json' > "$tmp/broken.json"
-COMIDE_SETTINGS="$tmp/broken.json" COMIDE_FAKE="$tmp/fake" ./comide run "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate2.err"
+COMIDE_SETTINGS="$tmp/broken.json" COMIDE_FAKE="$tmp/fake" ./comide errand "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate2.err"
 same "settings that cannot be read stop the errand before it starts" "1" "$?"
 
 say "== the conversation, with the model asked in writing (--loop written)"
@@ -310,7 +310,7 @@ printf 'again\n' | conv -p "no one here" > /dev/null 2>&1
 if [ -e "$tmp/conv/never.txt" ]; then bad "with nobody to ask and no --yes, no command runs"; else say "ok: with nobody to ask and no --yes, no command runs"; fi
 
 say "== without a task, nothing is started"
-./comide run > /dev/null 2>&1
+./comide errand > /dev/null 2>&1
 same "exit 2" "2" "$?"
 
 

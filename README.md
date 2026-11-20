@@ -12,6 +12,7 @@
 comide                                # a conversation in this directory; /exit to leave
 comide run "fix the flaky tests"      # one request, answered, then exit
 comide --yes --root ../project        # run shell and verify commands without asking
+comide errand "make the build pass"   # one task worked to the end in a terminal, unattended
 ```
 
 comide decides what to look at and what to change. Code changes go to
@@ -175,6 +176,41 @@ plan and carries it out; `/plan off` leaves it. After `comide run "..." --plan`,
 `comide run "go ahead" --continue` carries the plan out.
 
 `--read-only` is the same holding of the tools without the plan: a run that only looks.
+
+## Errands
+
+`comide errand TASK` works one task to the end with nobody watching. It is a different
+loop from the conversation's: the model is sent no tools and answers every step in
+writing, as one JSON object (what it sees, what it plans, the commands to run, whether
+it is done), and it has one terminal that lasts. The directory it changed to and the
+variables it exported are still there for the next command; a command that outlasts its
+wait keeps running and can be waited for again, read on, or stopped. The task is done
+when the model has said so twice.
+
+Every command the model writes is run without asking. The [settings](#settings) are
+heard: a command a `deny` rule names is not run, and neither is one an `ask` rule names,
+since nobody is there to ask; the `shell` hooks run before and after each command. Start
+an errand where its terminal can do no harm: a container, or under
+[nautra](https://github.com/Aid-On/nautra) with `nautra/run.sh TASK --root DIR`, where
+the agent is a WebAssembly component that holds no key (nautra puts the key on the
+request to the model's host) and the terminal is a native tool confined to the one
+directory it was given. `ci/check.sh` tries to get out from inside it.
+
+| | |
+|---|---|
+| `--model M` | as for the conversation (default `cf:glm-5.3`) |
+| `--max-steps N` | model calls before it stops (default 200) |
+| `COMIDE_LOG_DIR` | where the record is written as it goes: `trajectory.json`, `cost.txt`, `transcript.json` |
+| `COMIDE_REASONING_BACK=0` | what the model reasoned is not sent back to it (cheaper; the default sends it) |
+| `COMIDE_CHECK=1` | said complete, the work is checked once more in a new conversation that sees only the task |
+
+The loop was written and measured outside comide first, against Harbor's terminus-2 on
+Terminal-Bench 2 tasks with the same model, and passes about as many.
+
+`comide --loop written` is the same loop inside the conversation: a command no rule
+speaks of is put to you first, Esc stops the model, sessions are kept as before. The
+model then has the terminal only: skills and kept notes are named to it as files, and
+the other tools (edit and solve through golemide, MCP, web) are not there yet.
 
 ## Settings
 
