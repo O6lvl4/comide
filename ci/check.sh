@@ -309,6 +309,54 @@ has "and that the commands after it were not run" "^the rest True$" "$tmp/conv.o
 printf 'again\n' | conv -p "no one here" > /dev/null 2>&1
 if [ -e "$tmp/conv/never.txt" ]; then bad "with nobody to ask and no --yes, no command runs"; else say "ok: with nobody to ask and no --yes, no command runs"; fi
 
+say "== the conversation's tools, written as commands"
+# A tool beside a terminal command in one reply; a tool that is not one; then, in plan
+# mode, a terminal command and a tool that changes things, both held. A question is
+# answered at once, without being asked whether it is done.
+rm -rf "$tmp/fake" "$tmp/tl" "$tmp/home"; mkdir -p "$tmp/fake" "$tmp/tl" "$tmp/home"
+python3 - "$tmp/fake" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+replies = [say([{"tool": "remember", "args": {"note": "the staging db is read-only"}},
+                {"command": "echo ran > ran.txt"},
+                {"tool": "no_such_tool", "args": {}}]),
+           say([], done=True), say([], done=True, analysis="Kept the note."),
+           say([{"command": "echo plan > planned.txt"}, {"tool": "remember", "args": {"note": "not in plan mode"}}]),
+           say([], done=True, analysis="Here is the plan."), say([], done=True, analysis="Here is the plan."),
+           say([], done=True, analysis="It is 42.")]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+tl() { HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_FAKE="$tmp/fake" ./comide "$@" --model local:stand-in --root "$tmp/tl"; }
+tl -p "keep a note" --yes > "$tmp/tl1.out" 2> "$tmp/tl1.err"
+same "exit 0, with the written loop as the default" "0" "$?"
+same "the terminal command beside the tool ran" "ran" "$(cat "$tmp/tl/ran.txt" 2>/dev/null)"
+if grep -rq "the staging db is read-only" "$tmp/home/.comide/memory" 2>/dev/null; then say "ok: the tool ran: the note is kept"; else bad "the tool ran: the note is kept"; fi
+tl -p "plan it" --yes --plan --continue > "$tmp/tl2.out" 2> "$tmp/tl2.err"
+if [ -e "$tmp/tl/planned.txt" ]; then bad "in plan mode the terminal is held"; else say "ok: in plan mode the terminal is held"; fi
+if grep -rq "not in plan mode" "$tmp/home/.comide/memory" 2>/dev/null; then bad "and so is a tool that changes things"; else say "ok: and so is a tool that changes things"; fi
+tl -p "what is six times seven?" --continue > "$tmp/tl3.out" 2> "$tmp/tl3.err"
+same "a question is answered at once" "It is 42." "$(cat "$tmp/tl3.out")"
+python3 - "$tmp/fake" > "$tmp/tl.out" <<'EOF'
+import json, os, sys
+f = sys.argv[1]
+r1 = json.load(open(f + "/request-1.json")); r2 = json.load(open(f + "/request-2.json"))["messages"]; r5 = json.load(open(f + "/request-5.json"))["messages"]
+system = r1["messages"][0]["content"]
+print("told", "- edit: " in system and "- solve: " in system and '{"tool": "NAME", "args": {...}}' in system and len(r1["tools"]) == 0)
+print("results", "Kept in " in r2[-1]["content"] and "$ echo ran > ran.txt" in r2[-1]["content"])
+print("unknown", "no_such_tool" in r2[-1]["content"])
+print("held", r5[-1]["content"].count("plan mode") >= 2)
+print("plan note", "Plan mode" in r5[-2 - 1]["content"] or any("[Plan mode" in m["content"] for m in r5 if m["role"] == "user"))
+print("no eighth call", not os.path.exists(f + "/request-8.json"))
+EOF
+has "the model is told of the tools in writing, and is sent none" "^told True$" "$tmp/tl.out"
+has "a tool's result and a command's are shown together, in order" "^results True$" "$tmp/tl.out"
+has "a tool that does not exist is said back" "^unknown True$" "$tmp/tl.out"
+has "what was held in plan mode is said to the model" "^held True$" "$tmp/tl.out"
+has "a request in plan mode says so" "^plan note True$" "$tmp/tl.out"
+has "an answer with no work behind it is not asked about" "^no eighth call True$" "$tmp/tl.out"
+
 say "== without a task, nothing is started"
 ./comide errand > /dev/null 2>&1
 same "exit 2" "2" "$?"

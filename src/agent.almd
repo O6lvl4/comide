@@ -162,14 +162,12 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
     options.show(opts0, ui.note_line(opts0.ui, "skills: " + list.join(list.map(known, (k) => k.name), ", ")))!
   // What was kept from earlier sessions here (memory.almd). Last, because it is the part
   // most likely to differ from one session to the next.
-  let kept_notes = memory.read(setup.memory_file)!
-  let remembered = if opts0.written then penned.memory_section(setup.memory_file, kept_notes) else memory.section(setup.memory_file, kept_notes)
-  // Asked in writing, the model has no tool to reach another program's tools with.
-  if opts0.written and not list.is_empty(servers) then options.show(opts0, ui.note_line(opts0.ui, "MCP servers are not reachable with --loop written yet"))!
-  // Asked in writing, the model is told the shape of its reply and the terminal's rules
-  // (charge.almd), not the tools: it has none but the terminal.
-  let opening = if opts0.written then penned.system_prompt(opts0.root) else system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
-  let system = list.join(list.filter([opening, briefed, if opts0.written then penned.skills_section(known) else skills.section(known), if opts0.written then "" else mcp.section(servers),
+  let remembered = memory.section(setup.memory_file, memory.read(setup.memory_file)!)
+  // Asked in writing (the default), the model is told the shape of its reply, the
+  // terminal's rules and the tools as things to write (penned.almd); with --loop tools,
+  // the tools are sent and this file's own words say how to use them.
+  let opening = (if opts0.written then penned.system_prompt(opts0.root) else system_prompt(opts0.root)) + "\n" + tools.project_context(setup)!
+  let system = list.join(list.filter([opening, briefed, skills.section(known), mcp.section(servers),
     if at_start.printed == "" then "" else "Said by a check the user set up to run at the start of a session:\n" + at_start.printed, remembered], (part) => part != ""), "\n\n")
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
@@ -412,11 +410,11 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                    command is run. /go in a conversation approves it; after `run`,
                    `comide run "go ahead" --continue` carries it out
   --read-only      only look, for the whole run: no file changed, no command run
-  --loop written   ask the model in writing and give it one terminal that lasts, as
-                   `comide errand` does ($COMIDE_LOOP); the default, tools, sends the
-                   tools below. Asked in writing the model has the terminal only:
-                   no edit, solve, MCP, skill or memory tool yet, and in plan mode or
-                   --read-only every command is put to you first
+  --loop tools     the loop comide had before 0.7: the tools are sent to the model as
+                   tool calls, and its shell starts afresh for every command
+                   ($COMIDE_LOOP). The default, written, asks the model to answer every
+                   step in writing and gives it one terminal that lasts; the tools are
+                   the same ones
   --yes            run shell and verify commands without asking
   --trust-project  use the allow rules and hooks in this project's .comide/settings.json,
                    as the file is now; without it only its ask and deny rules are used
@@ -469,7 +467,7 @@ effect fn cli(raw: List[String]) -> Int = {
       trust_project: has(args, "--trust-project") and not helper,
       plan: has(args, "--plan"),
       read_only: has(args, "--read-only") or helper,
-      written: (opt(args, "--loop") ?? (env.get("COMIDE_LOOP") ?? "")) == "written",
+      written: (opt(args, "--loop") ?? (env.get("COMIDE_LOOP") ?? "")) != "tools",
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }

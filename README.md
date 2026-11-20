@@ -207,10 +207,16 @@ directory it was given. `ci/check.sh` tries to get out from inside it.
 The loop was written and measured outside comide first, against Harbor's terminus-2 on
 Terminal-Bench 2 tasks with the same model, and passes about as many.
 
-`comide --loop written` is the same loop inside the conversation: a command no rule
-speaks of is put to you first, Esc stops the model, sessions are kept as before. The
-model then has the terminal only: skills and kept notes are named to it as files, and
-the other tools (edit and solve through golemide, MCP, web) are not there yet.
+From 0.7 the conversation, `comide run` and `-p` use the same core: the model answers
+every step in writing and has one terminal that lasts from request to request. The
+[tools](#tools) are the same ones, written by the model as commands
+(`{"tool": "edit", "args": {...}}`) beside terminal commands instead of sent as tool
+calls: edit, write and solve still go through golemide, and permissions, hooks, plan
+mode, goals, skills, memory, MCP, helpers and the note that takes a long conversation's
+place work as before. What differs from an errand is that a person is there: a terminal
+command no rule speaks of is put to you first. `--loop tools` (or `COMIDE_LOOP=tools`)
+is the loop comide had before, with the tools sent as tool calls and a shell that
+starts afresh for every command.
 
 ## Settings
 

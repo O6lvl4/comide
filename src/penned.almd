@@ -1,13 +1,22 @@
-// One request of the conversation, worked the errand's way (errand.almd): the model is
-// asked in writing, has one terminal that lasts, and says twice that it is done. What the
-// conversation adds is the person: a command no rule speaks of is put to them, Esc stops
-// the model mid-answer, and the last analysis is shown as the answer.
+// One request of the conversation, worked to an answer with the model asked in writing.
 //
-// Chosen with --loop written (agent.almd). What it does not have yet, of what the
-// conversation's other loop has: the tools beside the terminal (edit and solve through
-// golemide, MCP, skills, memory, web), the note that takes a long conversation's place,
-// and a goal. Plan mode and --read-only cannot tell a command that looks from one that
-// changes, so there every command is put to the person, whatever the rules allow.
+// The core is the errand's (errand.almd, measured against terminus-2): no tool is sent,
+// every reply is one JSON object (analysis, plan, commands, task_complete), and the model
+// has one terminal that lasts from command to command and from request to request. What
+// the conversation adds to it is everything comide could do before this loop:
+//
+//   - comide's tools (tools.almd): a command object may be {"tool": NAME, "args": {...}}
+//     in place of a terminal command. edit, write and solve go through golemide as they
+//     always did; read, outline, search, tree, map, web, skill, explore, MCP and remember
+//     are the same code, with the same permissions and hooks (turn.run_call).
+//   - the person: a command no rule speaks of is put to them, a declined one is said back
+//     with their words, Esc stops the model mid-answer.
+//   - plan mode and --read-only: the tools that change things and the terminal are held.
+//   - the check after a change (watch.almd), a goal (goal.almd), the Stop hook, the note
+//     that takes a long conversation's place (handover.almd), and the look for a model
+//     going round in circles.
+//
+// The loop that sends tools (turn.almd) is still there, as --loop tools.
 
 import env
 import fs
@@ -17,41 +26,62 @@ import self.asking
 import self.charge
 import self.convo
 import self.exchange
+import self.goal
+import self.handover
 import self.hooks
 import self.model
 import self.options
 import self.rules
 import self.said
-import self.skills
-import self.memory
 import self.shell
 import self.talk
 import self.toolkit
+import self.tools
 import self.turn
 import self.ui
 import self.waiting
+import self.watch
 
 let MAX_TOKENS = 65536
 let UNREAD_ROUNDS = 5
 let CALL_MAX_MS = 930000
+let STOP_ROUNDS = 5
 
-fn system_prompt(root: String) -> String = string.trim(charge.written_prompt(root))
+// One tool, as a line the model reads: its name, what it does, and its arguments. The
+// terminal is not among them: it is what a plain command object is.
+fn tool_line(t: Value) -> String = {
+  let f = value.get(t, "function") ?? value.object([])
+  let params = value.get(f, "parameters") ?? value.object([])
+  let required = list.map(value.get_array(params, "required") ?? [], (r) => value.as_string(r) ?? "")
+  let props = value.as_object(value.get(params, "properties") ?? value.object([])) ?? []
+  "- " + (value.get_string(f, "name") ?? "") + ": " + (value.get_string(f, "description") ?? "") + "\n"
+    + list.join(list.map(props, (p) => "    " + p.0 + " (" + (value.get_string(p.1, "type") ?? "string")
+      + (if list.contains(required, p.0) then "" else ", optional") + "): " + (value.get_string(p.1, "description") ?? "")), "\n")
+}
 
-// The skills, for a model whose one tool is the terminal: a skill is a file, and is read
-// as one. A line each, as in the conversation's other loop.
-fn skills_section(all: List[skills.Skill]) -> String =
-  if list.is_empty(all) then ""
-  else "Skills: procedures written down for particular kinds of task. When a request matches one, read its file first (cat), and follow what it says. Its other files are beside it.\n"
-    + list.join(list.map(list.take(all, skills.MAX_LISTED), (s) => "- " + s.name + " (" + s.file + "): " + s.about), "\n")
-    + (if list.len(all) > skills.MAX_LISTED then "\n(" + int.to_string(list.len(all) - skills.MAX_LISTED) + " more are not listed)" else "")
+fn tools_section() -> String =
+  list.join(list.map(list.filter(tools.definitions(), (t) => (value.get_string(value.get(t, "function") ?? value.object([]), "name") ?? "") != "shell"), tool_line), "\n")
 
-// The notes kept between sessions (memory.almd), and how one is added from a terminal: a
-// line at the end of the file. Said even when nothing is kept yet, or nothing ever would be.
-fn memory_section(file: String, text: String) -> String =
-  if file == "" then ""
-  else (if string.trim(text) == "" then "Notes kept between sessions in this project go in " + file + " (nothing is kept yet)."
-      else memory.section(file, text))
-    + "\nTo keep a note for later sessions, append one line to that file (mkdir -p its directory first): `- the fact, in one sentence (YYYY-MM-DD)`. Keep only what a later session could not work out from the project: a correction the user made, a preference they stated, where something is that took steps to find."
+// What the model is told: the errand's words unchanged (charge.written_prompt), then who
+// it is working with and the tools. Nothing here asks it to be brief.
+fn system_prompt(root: String) -> String = string.trim(charge.written_prompt(root)) + """
+
+
+You are comide, a coding assistant, working with a user in the project at ${root}. The terminal starts there. What the user asks may be a task or a question; when you set "task_complete", your "analysis" is what the user reads as your answer: say what you changed and how you know it works, or answer the question, in the language the user wrote in. If nothing checked the work, say so. A question that needs no command is answered at once, with "commands" empty and "task_complete" true.
+
+A command of yours may be put to the user before it runs, and the user may decline it.
+
+Besides the terminal you have comide's tools. A command object may also be:
+- {"tool": "NAME", "args": {...}}: run one of the tools below, with its arguments. It is run by comide, not in the terminal, in the order you wrote it, and its result is shown to you like a command's output.
+
+How the tools and the terminal divide the work:
+- To change a file, use edit, copying old exactly from what read showed, without the line numbers; use write for a new file or a complete rewrite. Every write is syntax-checked first: if one is refused, read the reason, look again, and retry. Do not write files with cat, sed or echo in the terminal when edit or write can do it.
+- When a command can tell whether the work is done (a test suite, a build, a checker), solve is the default way to make the change: it hands the change to golemide, which reads the code, edits it, runs the command and retries. The command must exist as written, run all the tests, and fail when a test fails. When solve reports the command passing, the work is done: do not run it again.
+- To look at code, read, outline, search, tree and map are narrower than cat and grep and never need the user's leave. In a project you have not seen, start with map or tree.
+- Run tests, builds and everything else in the terminal.
+
+The tools:
+""" + tools_section()
 
 // The first request is the task; what the person says after it is said as they said it.
 fn request(messages: List[Value], text: String) -> String =
@@ -108,23 +138,25 @@ effect fn heard(opts: options.Options, scratch: String, n: Int, messages: List[V
   }
 }
 
-// Whether a command may run, and what the model reads if it may not. The hooks first,
-// then the rules, then the person, as for a shell call in the conversation's other loop.
+// Whether a terminal command may run, and what the model reads if it may not. In a
+// session that only looks, the terminal is held like every tool that changes things;
+// then the hooks, the rules, and the person, as for a shell call in the other loop.
 effect fn permitted(opts: options.Options, setup: toolkit.Setup, allow: Bool, command: String) -> (asking.Permission, String) = {
-  let input = value.object([("command", value.string(command))])
-  let pre = turn.hooked(opts, setup, "PreToolUse", "shell", input, "", "")!
   let held = asking.Permission { run: false, allow_from_now: allow, said: "" }
-  if pre.stopped then (held, "[not run: a check the user set up stopped this command:\n" + pre.reason + "]")
-  else match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, "shell", command) {
-    Denied(rule) => (held, "[not run: the settings deny this command (" + rule + "). Do not look for another way to do the same thing; go on without it, or say in your analysis what you need.]"),
-    Asked(rule) => if not opts.live then (held, "[not run: the settings say to ask a person before this command (" + rule + "), and nobody is here to ask.]")
-      else {
-        let a = asking.permitted(opts, false, "The settings ask before this (" + rule + "). Run it?")!
-        (asking.Permission { run: a.run, allow_from_now: allow, said: a.said }, "")
-      },
-    Allowed(_) => if setup.frozen != "" then (asking.permitted(opts, false, "This session only looks. Run this command?")!, "")
-      else (asking.Permission { run: true, allow_from_now: allow, said: "" }, ""),
-    Unsaid => (asking.permitted(opts, allow and setup.frozen == "", "Run this command?")!, ""),
+  if setup.frozen != "" then (held, "[" + tools.frozen_reason(setup.frozen) + " To look at the project, use the tools that read: read, outline, search, tree, map.]")
+  else {
+    let pre = turn.hooked(opts, setup, "PreToolUse", "shell", value.object([("command", value.string(command))]), "", "")!
+    if pre.stopped then (held, "[not run: a check the user set up stopped this command:\n" + pre.reason + "]")
+    else match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, "shell", command) {
+      Denied(rule) => (held, "[not run: the settings deny this command (" + rule + "). Do not look for another way to do the same thing; go on without it, or say in your analysis what you need.]"),
+      Asked(rule) => if not opts.live then (held, "[not run: the settings say to ask a person before this command (" + rule + "), and nobody is here to ask.]")
+        else {
+          let a = asking.permitted(opts, false, "The settings ask before this (" + rule + "). Run it?")!
+          (asking.Permission { run: a.run, allow_from_now: allow, said: a.said }, "")
+        },
+      Allowed(_) => (asking.Permission { run: true, allow_from_now: allow, said: "" }, ""),
+      Unsaid => (asking.permitted(opts, allow, "Run this command?")!, ""),
+    }
   }
 }
 
@@ -132,17 +164,40 @@ fn declined(said_by_person: String) -> String =
   if said_by_person == "" then "[not run: the user declined this command. Do not try it again in another form; go on without it, or say in your analysis what you need.]"
   else "[not run: the user declined this command and said: " + said_by_person + "]"
 
+// Whether a command's output says it failed: its last line is its exit code.
+fn command_failed(text: String) -> Bool = {
+  let last = string.trim(list.last(string.split(string.trim(text), "\n")) ?? "")
+  string.starts_with(last, "[exit code ") and last != "[exit code 0]"
+}
+
+// What the orders of one reply came to.
+type Ran = { sh: shell.Shell, allow: Bool, seen: String, spent: Float, work: watch.Work, sigs: List[String] }
+
 // The orders of one reply, in order. A command the person or the settings stop is not
 // run, and the orders after it in the same reply are not run either: they were written
-// expecting it to have run.
-effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.Shell, allow0: Bool, orders: List[said.Order]) -> (shell.Shell, Bool, String) = {
+// expecting it to have run. A tool is one of comide's (turn.run_call), with its own
+// permissions and hooks, and a refusal there does not stop what follows.
+effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.Shell, allow0: Bool, work0: watch.Work, orders: List[said.Order]) -> Ran = {
   var sh = sh0
   var allow = allow0
+  var work = work0
+  var spent = 0.0
   var parts: List[String] = []
+  var sigs: List[String] = []
   var stopped = false
   for o in orders {
     if stopped then list.push(parts, said.shown(o) + "\n[not run: an earlier command of this reply was not run]")
-    else {
+    else if o.tool != "" and string.trim(o.command) == "" then {
+      list.push(sigs, watch.signature(o.tool, o.args))
+      if o.tool == "shell" then list.push(parts, said.shown(o) + "\n[there is no tool named shell here: a terminal command is {\"command\": \"...\"}]")
+      else {
+        let ran = turn.run_call(opts, setup, model.ToolCall { id: "", name: o.tool, arguments: o.args }, turn.Ran { results: [], allow: allow, spent: 0.0, work: work })!
+        allow = ran.allow
+        work = ran.work
+        spent = spent + ran.spent
+        list.push(parts, said.shown(o) + "\n" + (value.get_string(list.last(ran.results) ?? value.object([]), "content") ?? ""))
+      }
+    } else {
       let command = string.trim(o.command)
       options.show(opts, "\n" + ui.call_line(opts.ui, "shell", if command == "" then string.trim(said.shown(o)) else charge.first_line(command, int.max(20, opts.ui.width - 12))))!
       let (p, refused) = if command == "" then (asking.Permission { run: true, allow_from_now: allow, said: "" }, "") else permitted(opts, setup, allow, o.command)!
@@ -157,16 +212,28 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
         sh = next_sh
         shell.keep(sh)!
         let post = if command == "" then hooks.quiet() else turn.hooked(opts, setup, "PostToolUse", "shell", value.object([("command", value.string(o.command))]), string.take(text, 20000), "")!
+        let bad = command_failed(text)
         options.show(opts, ui.result_line(opts.ui, charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", int.max(20, opts.ui.width - 6))
-          + (if post.stopped then " · a hook objects" else ""), post.stopped))!
+          + (if post.stopped then " · a hook objects" else ""), bad or post.stopped))!
         list.push(parts, said.shown(o) + "\n" + text + (if post.stopped then "\n\n[A check the user set up objects to this:]\n" + post.reason else ""))
+        if command != "" then {
+          let as_call = json.stringify(value.object([("command", value.string(o.command))]))
+          work = watch.after(work, "shell", as_call, bad)
+          list.push(sigs, watch.signature("shell", as_call))
+        }
       }
     }
   }
-  (sh, allow, if list.is_empty(parts) then charge.NOTHING_NOTE else list.join(parts, "\n\n"))
+  Ran { sh: sh, allow: allow, seen: if list.is_empty(parts) then charge.NOTHING_NOTE else list.join(parts, "\n\n"), spent: spent, work: work, sigs: sigs }
+}
+
+effect fn answer(opts: options.Options, text: String) -> Unit = {
+  let said_text = if string.trim(text) == "" then "(done)" else string.trim(text)
+  if opts.live then println("\n" + convo.answer_lines(opts.ui, said_text, true)) else println(said_text)
 }
 
 effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session, user: String) -> options.Session = {
+  // Plan mode is the session's, and can be switched while it runs; --read-only is the run's.
   let setup = if s.plan then { ...setup0, frozen: "plan" } else if opts.read_only then { ...setup0, frozen: "look" } else setup0
   let before = turn.hooked(opts, setup, "UserPromptSubmit", "", value.null(), "", user)!
   if before.stopped then {
@@ -174,7 +241,9 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
     s
   } else {
     let u = opts.ui
-    var messages = s.messages + [exchange.message("user", request(s.messages, user) + (if before.printed == "" then "" else "\n\n[Added by a hook]\n" + before.printed))]
+    var messages = s.messages + [exchange.message("user", request(s.messages, user)
+      + (if before.printed == "" then "" else "\n\n[Added by a hook]\n" + before.printed)
+      + (if s.plan then "\n\n" + turn.PLAN_NOTE else ""))]
     var sh = terminal(setup)!
     var allow = s.allow_shell
     var cost = 0.0
@@ -185,8 +254,37 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
     var last_in = s.last_in
     var unread = 0
     var asked = false
+    var acted = false
     var done = false
+    var work = watch.fresh(s.check)
+    var check_rounds = 0
+    var sigs: List[String] = []
+    var loop_warned = false
+    var stop_rounds = 0
+    // A goal is not pressed in a session that cannot act on it.
+    let aim = if setup.frozen == "" then s.goal else ""
+    var aim_rounds = 0
+    var aim_asked = false
+    var aim_met = false
+    let too_long = handover.limit()!
     while not done {
+      // The conversation has outgrown the model: a note takes its place (handover.almd).
+      if last_in > too_long and list.len(messages) > 4 then {
+        match handover.written(opts.model, opts.effort, setup.scratch, messages, user, aim) {
+          err(e) => {
+            options.show(opts, "\n" + ui.note_line(u, "the conversation is long, and a note could not be written in its place: " + string.take(e, 200)))!
+            last_in = 0
+          },
+          ok(n) => {
+            options.show(opts, "\n" + ui.note_line(u, "the conversation was long; a note now stands in its place (" + int.to_string(n.before / 1000) + "k → "
+              + int.to_string(n.after / 1000) + "k characters, " + convo.usd(n.cost_usd) + "); what it replaced is in " + n.kept_at))!
+            messages = n.messages
+            cost = cost + n.cost_usd
+            last_in = 0
+            aim_asked = false
+          },
+        }
+      }
       if steps >= opts.max_steps then {
         options.show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(steps) + " steps without a final answer; say how to continue"))!
         done = true
@@ -208,7 +306,7 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
           last_in = r.input
           list.push(messages, exchange.assistant_message(r, []))
           turn.record_cost(s.cost + cost)!
-          match said.read(r.content) {
+          match said.read_with(r.content, true) {
             err(reason) => {
               unread = unread + 1
               options.show(opts, "\n" + ui.note_line(u, "the reply could not be read (" + reason + "); nothing was run"))!
@@ -219,30 +317,95 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
             },
             ok(w) => {
               unread = 0
-              let finishing = w.complete and asked
-              if string.trim(w.analysis) != "" and not finishing then options.show(opts, "\n" + ui.note_line(u, charge.first_line(w.analysis, 300)))!
-              let (next_sh, allow_now, seen) = run_orders(opts, setup, sh, allow, w.orders)!
-              sh = next_sh
-              allow = allow_now
-              match said.after(w, asked) {
+              let had_orders = not list.is_empty(w.orders)
+              // The analysis of a step that goes on is shown as a note; the last one is the answer.
+              if string.trim(w.analysis) != "" and (had_orders or not w.complete) then options.show(opts, "\n" + ui.note_line(u, charge.first_line(w.analysis, 300)))!
+              let ran = run_orders(opts, setup, sh, allow, work, w.orders)!
+              sh = ran.sh
+              allow = ran.allow
+              work = ran.work
+              cost = cost + ran.spent
+              sigs = sigs + ran.sigs
+              if had_orders then { acted = true; aim_asked = false }
+              // Complete is asked about once, as in an errand, when work was done in this
+              // request. An answer to a question is not asked about: it is the answer.
+              let next = if w.complete and not acted then said.Done else said.after(w, asked)
+              match next {
                 Work => {
-                  list.push(messages, exchange.message("user", seen))
+                  if not had_orders and not w.complete then {
+                    // Words with nothing to run and not said to be the end: taken as the answer,
+                    // so a model that forgets the flag does not go round until the step limit.
+                    answer(opts, w.analysis)!
+                    done = true
+                  } else if watch.repeating(sigs) then {
+                    if loop_warned then {
+                      options.show(opts, "\n" + ui.note_line(u, "stopped: the same calls kept coming back; say how to continue"))!
+                      list.push(messages, exchange.message("user", ran.seen))
+                      done = true
+                    } else {
+                      options.show(opts, "\n" + ui.note_line(u, "the same calls three times over; comide asks the model to step back"))!
+                      list.push(messages, exchange.message("user", ran.seen + "\n\n" + watch.LOOP_NOTE))
+                      loop_warned = true
+                      sigs = []
+                    }
+                  } else list.push(messages, exchange.message("user", ran.seen))
                   asked = false
                 },
                 AskSure => {
-                  list.push(messages, exchange.message("user", seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
+                  list.push(messages, exchange.message("user", ran.seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
                   asked = true
                 },
                 Done => {
-                  // The work ended on an answer: a Stop hook may say it is not finished.
-                  let at_stop = turn.hooked(opts, setup, "Stop", "", value.null(), "", "")!
-                  if at_stop.stopped then {
-                    options.show(opts, "\n" + ui.note_line(u, "a hook says the work is not finished; comide passes that on"))!
-                    list.push(messages, exchange.message("user", seen + "\n\nA check the user set up says the work is not finished:\n" + at_stop.reason))
-                    asked = false
-                  } else {
-                    println("\n" + convo.answer_lines(u, if string.trim(w.analysis) == "" then "(done)" else string.trim(w.analysis), true))
+                  // Said to be the end. What may still say it is not: the check after a
+                  // change, a goal that stands, and a Stop hook, in that order.
+                  var go_on = ""
+                  match watch.at_finish(work, check_rounds) {
+                    Done => (),
+                    RunCheck(command) => {
+                      let (out, bad, did_run, allow_now) = turn.run_check(opts, setup, command, allow)!
+                      allow = allow_now
+                      check_rounds = check_rounds + 1
+                      if did_run then { work = watch.checked(work, command, bad) }
+                      if did_run and bad then { go_on = watch.check_failed_note(command, out) }
+                    },
+                    Remind(command) => {
+                      options.show(opts, "\n" + ui.note_line(u, "the last run of " + command + " failed; comide asks the model to go on"))!
+                      check_rounds = check_rounds + 1
+                      go_on = watch.still_failing_note(command)
+                    },
+                  }
+                  if go_on == "" and aim != "" then {
+                    match goal.after_answer(aim, w.analysis, aim_asked, aim_rounds) {
+                      Ask => {
+                        options.show(opts, "\n" + ui.note_line(u, "a goal stands; comide asks whether it is met"))!
+                        aim_asked = true
+                        aim_rounds = aim_rounds + 1
+                        go_on = goal.asked(aim)
+                      },
+                      Met => {
+                        options.show(opts, "\n" + ui.note_line(u, "the goal is met, by the model's account, and is cleared"))!
+                        aim_met = true
+                      },
+                      NeedsPerson => (),
+                      Enough => options.show(opts, "\n" + ui.note_line(u, "asked " + int.to_string(aim_rounds) + " times whether the goal is met; say how to continue"))!,
+                    }
+                  }
+                  if go_on == "" and stop_rounds < STOP_ROUNDS then {
+                    let at_stop = turn.hooked(opts, setup, "Stop", "", value.null(), "", "")!
+                    if at_stop.stopped then {
+                      stop_rounds = stop_rounds + 1
+                      options.show(opts, "\n" + ui.note_line(u, "a hook says the work is not finished; comide passes that on"))!
+                      go_on = "A check the user set up says the work is not finished:\n" + at_stop.reason
+                    }
+                  }
+                  if go_on == "" then {
+                    answer(opts, w.analysis)!
                     done = true
+                  } else {
+                    if opts.live and string.trim(w.analysis) != "" then println("\n" + convo.answer_lines(u, string.trim(w.analysis), true))
+                    list.push(messages, exchange.message("user", (if had_orders then ran.seen + "\n\n" else "") + go_on))
+                    asked = false
+                    acted = true
                   }
                 },
               }
@@ -254,7 +417,8 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
     shell.keep(sh)!
     let _ = fs.write_text(setup.scratch + "/transcript.json", json.stringify(value.array(messages)))
     if steps > 0 then options.show(opts, "\n" + ui.footer(u, steps, tin, tcached, tout, convo.usd(cost), convo.usd(s.cost + cost)))!
-    { ...s, messages: messages, cost: s.cost + cost, allow_shell: allow, steps: s.steps + steps, last_in: last_in }
+    { ...s, messages: messages, cost: s.cost + cost, allow_shell: allow, steps: s.steps + steps, check: work.check,
+      goal: if aim_met then "" else s.goal, last_in: last_in }
   }
 }
 
@@ -263,17 +427,26 @@ test "the first request is the task, and what follows is said as it was" {
   assert_eq(request([exchange.message("system", "s"), exchange.message("user", "Task Description:\nfix it")], "now the tests"), "now the tests")
 }
 
-test "a skill is listed with the file to read, and the notes with how to add one" {
-  let s = skills_section([skills.Skill { name: "release", about: "cut a release", file: "/p/.comide/skills/release/SKILL.md" }])
-  assert(string.contains(s, "- release (/p/.comide/skills/release/SKILL.md): cut a release"))
-  assert_eq(skills_section([]), "")
-  assert(string.contains(memory_section("/h/MEMORY.md", ""), "nothing is kept yet"))
-  assert(string.contains(memory_section("/h/MEMORY.md", "- use pnpm (2026-11-18)"), "- use pnpm (2026-11-18)"))
-  assert(string.contains(memory_section("/h/MEMORY.md", "- use pnpm (2026-11-18)"), "append one line"))
-  assert_eq(memory_section("", ""), "")
-}
-
 test "a declined command says so, with what the person said" {
   assert(string.contains(declined(""), "declined"))
   assert(string.contains(declined("use make instead"), "use make instead"))
+}
+
+test "the model is told of every tool but the terminal, with its arguments, and is not asked to be brief" {
+  let p = system_prompt("/p")
+  assert(string.contains(p, "- edit: "))
+  assert(string.contains(p, "- solve: "))
+  assert(string.contains(p, "- mcp_call: "))
+  assert(string.contains(p, "    path (string): "))
+  assert(string.contains(p, ", optional): "))
+  assert(not string.contains(p, "- shell: "))
+  assert(string.contains(p, "{\"tool\": \"NAME\", \"args\": {...}}"))
+  assert(not string.contains(string.to_lower(p), "be brief"))
+  assert(not string.contains(string.to_lower(p), "concise"))
+}
+
+test "a command failed when its last line is an exit code that is not zero" {
+  assert(command_failed("boom\n[exit code 2]"))
+  assert(not command_failed("fine\n[exit code 0]"))
+  assert(not command_failed("[still running after 5 s, as job 3]"))
 }

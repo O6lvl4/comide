@@ -16,14 +16,19 @@
 import json
 
 // One thing to do in the terminal: a command, or a job to wait for or stop (shell.almd).
-type Order = { command: String, job: Int, wait_s: Int, stop: Bool }
+// In the conversation (penned.almd) an order may instead name one of comide's tools, with
+// its arguments as JSON text: {"tool": "edit", "args": {...}}. An errand has no tools, and
+// reads such an order as the mistake it is there.
+type Order = { command: String, job: Int, wait_s: Int, stop: Bool, tool: String = "", args: String = "" }
 
 type Said = { analysis: String, plan: String, orders: List[Order], complete: Bool }
 
 fn int_of(v: Value, k: String) -> Int = value.get_int(v, k) ?? (int.parse(value.get_string(v, k) ?? "") ?? 0)
 
 fn order_of(v: Value) -> Order =
-  Order { command: value.get_string(v, "command") ?? "", job: int_of(v, "job"), wait_s: int_of(v, "wait_s"), stop: value.get_bool(v, "stop") ?? false }
+  Order { command: value.get_string(v, "command") ?? "", job: int_of(v, "job"), wait_s: int_of(v, "wait_s"), stop: value.get_bool(v, "stop") ?? false,
+    tool: string.trim(value.get_string(v, "tool") ?? ""),
+    args: match value.get(v, "args") { some(a) => json.stringify(a), none => "{}" } }
 
 // The object in a reply: from its first brace to its last.
 fn object_in(text: String) -> String? = match string.index_of(text, "{") {
@@ -34,14 +39,17 @@ fn object_in(text: String) -> String? = match string.index_of(text, "{") {
   },
 }
 
-fn read(text: String) -> Result[Said, String] = match object_in(text) {
+fn read(text: String) -> Result[Said, String] = read_with(text, false)
+
+// `tools`: whether an order may name a tool (the conversation) or not (an errand).
+fn read_with(text: String, tools: Bool) -> Result[Said, String] = match object_in(text) {
   none => err("there is no JSON object in the reply"),
   some(body) => match json.parse(body) {
     err(e) => err("the reply is not valid JSON: " + e),
     ok(d) => {
       let orders = list.map(value.get_array(d, "commands") ?? [], (c) => order_of(c))
-      let empty = list.filter(orders, (o) => string.trim(o.command) == "" and o.job <= 0)
-      if not list.is_empty(empty) then err("a command has neither \"command\" nor \"job\"")
+      let empty = list.filter(orders, (o) => string.trim(o.command) == "" and o.job <= 0 and not (tools and o.tool != ""))
+      if not list.is_empty(empty) then err(if tools then "a command has none of \"command\", \"job\" and \"tool\"" else "a command has neither \"command\" nor \"job\"")
       else ok(Said { analysis: value.get_string(d, "analysis") ?? "", plan: value.get_string(d, "plan") ?? "",
         orders: orders, complete: value.get_bool(d, "task_complete") ?? false })
     },
@@ -55,6 +63,7 @@ fn arguments(o: Order) -> Value =
 // How an order is shown above its result.
 fn shown(o: Order) -> String =
   if string.trim(o.command) != "" then "$ " + o.command
+  else if o.tool != "" then "(tool " + o.tool + " " + o.args + ")"
   else if o.stop then "(stop job " + int.to_string(o.job) + ")"
   else "(job " + int.to_string(o.job) + ")"
 
