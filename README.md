@@ -218,6 +218,11 @@ command no rule speaks of is put to you first. `--loop tools` (or `COMIDE_LOOP=t
 is the loop comide had before, with the tools sent as tool calls and a shell that
 starts afresh for every command.
 
+A file's contents do not go well inside a JSON string, so the model may write a long
+text after the object, as it is, between a `<<<BODY NAME` line and a `>>>BODY NAME`
+line, and name it where it is meant (`"content": "@body:NAME"`). `web_search` is offered
+only when a search engine answers at the start.
+
 ## Settings
 
 What may run without asking, and what may not run at all, is written as rules in JSON:
