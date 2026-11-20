@@ -11,6 +11,8 @@ cd "$here" || exit 1
 fails=0
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# The person's own settings and keys are not part of what is checked.
+export XDG_CONFIG_HOME="$tmp/config"
 
 say()  { printf '%s\n' "$*"; }
 bad()  { say "FAIL: $*"; fails=$((fails + 1)); }
@@ -221,6 +223,49 @@ has "the first conversation is kept" "^kept True$" "$tmp/sent5.out"
 has "where the check began is written down" "^mark the check began after step 3$" "$tmp/sent5.out"
 has "its commands are run" "looked again" "$tmp/run5.err"
 [ ! -f "$tmp/fake/request-7.json" ] && say "ok: it is checked once, not again and again" || bad "a seventh call was made"
+
+say "== the settings are heard before and after every command of an errand"
+# A deny rule, an ask rule, a hook that stops one command and a hook that objects to what
+# another printed. Three replies: the five commands, then "complete" twice.
+rm -rf "$tmp/fake" "$tmp/gate"; mkdir -p "$tmp/fake" "$tmp/gate"
+cat > "$tmp/settings.json" <<EOF
+{ "permissions": { "deny": ["shell(rm -rf*)"], "ask": ["shell(git push*)"], "allow": ["shell(echo*)"] },
+  "hooks": {
+    "PreToolUse":  [ { "matcher": "shell", "hooks": [ { "type": "command", "command": "grep -q forbidden-word && { echo 'that word is not used here' >&2; exit 2; }; exit 0" } ] } ],
+    "PostToolUse": [ { "matcher": "shell", "hooks": [ { "type": "command", "command": "grep -q leaked-thing && { echo 'that should not have been printed' >&2; exit 2; }; exit 0" } ] } ] } }
+EOF
+python3 - "$tmp/fake" <<'EOF'
+import json, sys
+def say(commands, done=False):
+    return {"content": json.dumps({"analysis": "a", "plan": "p", "commands": commands, "task_complete": done})}
+replies = [say([{"command": "echo plain > kept.txt; cat kept.txt"},
+                {"command": "touch doomed.txt; cd . && rm -rf doomed.txt"},
+                {"command": "git push origin main"},
+                {"command": "echo forbidden-word > hooked.txt"},
+                {"command": "echo leaked-th''ing"}]),
+           say([], done=True), say([], done=True)]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+COMIDE_SETTINGS="$tmp/settings.json" COMIDE_FAKE="$tmp/fake" ./comide run "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate.err"
+same "exit 0" "0" "$?"
+python3 - "$tmp/fake" "$tmp/gate" > "$tmp/gate.out" <<'EOF'
+import json, os, sys
+said = [m["content"] for m in json.load(open(sys.argv[1] + "/request-2.json"))["messages"] if m["role"] == "user"][-1]
+print("plain ran", "plain\n[exit code 0]" in said)
+print("denied", "the settings deny this command (shell(rm -rf*))" in said, os.path.exists(sys.argv[2] + "/doomed.txt"))
+print("asked", "nobody is here to ask" in said)
+print("pre hook", "that word is not used here" in said, os.path.exists(sys.argv[2] + "/hooked.txt"))
+print("post hook", "leaked-thing\n" in said and "that should not have been printed" in said)
+EOF
+has "a command no rule stops runs" "^plain ran True$" "$tmp/gate.out"
+has "a denied command is not run, though it is the second half of a chain, and the model is told" "^denied True False$" "$tmp/gate.out"
+has "a command the settings would ask about is not run: nobody is there" "^asked True$" "$tmp/gate.out"
+has "a hook stops a command before it runs" "^pre hook True False$" "$tmp/gate.out"
+has "a hook's objection goes under what the command printed" "^post hook True$" "$tmp/gate.out"
+printf '{ not json' > "$tmp/broken.json"
+COMIDE_SETTINGS="$tmp/broken.json" COMIDE_FAKE="$tmp/fake" ./comide run "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate2.err"
+same "settings that cannot be read stop the errand before it starts" "1" "$?"
 
 say "== without a task, nothing is started"
 ./comide run > /dev/null 2>&1

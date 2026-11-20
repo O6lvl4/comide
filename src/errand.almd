@@ -15,7 +15,9 @@
 import env
 import fs
 import json
+import self.envfile
 import self.exchange
+import self.gate
 import self.charge
 import self.said
 import self.shell
@@ -31,6 +33,10 @@ comide run TASK [--ask writing|tool] [--model M] [--root DIR] [--max-steps N]
   --model M       the model, as almai names it (default: cf:glm-5.3)
   --root DIR      where the terminal starts (default: this directory)
   --max-steps N   model calls before it stops (default: 200)
+
+  Every command the model writes is run without asking, unless the settings deny it or
+  say to ask (then it is not run: nobody is here). Start an errand where its terminal can
+  do no harm: a container, or nautra/run.sh.
 
   COMIDE_MAX_TOKENS       output tokens a reply may take (default: 65536)
   COMIDE_LOG_DIR          where the record of the run is written as it goes:
@@ -50,20 +56,38 @@ effect fn record(dir: String, steps: List[Value], spent: Float, messages: List[V
     let _ = fs.write_text(dir + "/transcript.json", json.stringify(value.array(messages)))
   }
 
-effect fn run_tool(sh: shell.Shell, c: exchange.Call) -> (shell.Shell, String) =
+// One call of the terminal, with the settings heard before and after it (gate.almd). A
+// command the settings stop is not run, and what the model reads in its place is why.
+effect fn guarded(g: gate.Gate, sh: shell.Shell, a: Value) -> (shell.Shell, String) = {
+  let command = value.get_string(a, "command") ?? ""
+  if string.trim(command) == "" then shell.call(sh, a)!
+  else {
+    let (stopped, heard) = gate.before(g, command)!
+    for f in heard { eprintln("  " + f) }
+    if stopped != "" then (sh, stopped)
+    else {
+      let (next_sh, text) = shell.call(sh, a)!
+      let (objection, failures) = gate.after(g, command, text)!
+      for f in failures { eprintln("  " + f) }
+      (next_sh, text + objection)
+    }
+  }
+}
+
+effect fn run_tool(g: gate.Gate, sh: shell.Shell, c: exchange.Call) -> (shell.Shell, String) =
   if c.name != "shell" then (sh, "[there is no tool named " + c.name + ": the one tool is shell]")
   else match json.parse(c.arguments) {
     err(e) => (sh, "[the arguments of this call are not JSON (" + charge.first_line(e, 120) + "). If the reply was cut off, send a shorter command: write long files in parts.]"),
     ok(a) => {
       let command = value.get_string(a, "command") ?? ""
       eprintln("\n⏺ shell(" + (if string.trim(command) == "" then "job " + int.to_string(shell.int_arg(a, "job")) else charge.first_line(command, 110)) + ")")
-      let (after, text) = shell.call(sh, a)!
+      let (after, text) = guarded(g, sh, a)!
       eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
       (after, text)
     },
   }
 
-effect fn work(sh0: shell.Shell, task: String, model: String, root: String, max_steps: Int, max_tokens: Int, log_dir: String) -> Int = {
+effect fn work(g: gate.Gate, sh0: shell.Shell, task: String, model: String, root: String, max_steps: Int, max_tokens: Int, log_dir: String) -> Int = {
   var sh = sh0
   let tools = [shell.definition()]
   var messages = [exchange.message("system", string.trim(charge.system_prompt(root))), exchange.message("user", task)]
@@ -111,7 +135,7 @@ effect fn work(sh0: shell.Shell, task: String, model: String, root: String, max_
           Act => {
             if string.trim(r.content) != "" then eprintln("\n" + string.trim(r.content))
             for c in calls {
-              let (after, text) = run_tool(sh, c)!
+              let (after, text) = run_tool(g, sh, c)!
               sh = after
               list.push(messages, exchange.tool_message(c.id, text))
             }
@@ -147,12 +171,12 @@ effect fn on(name: String) -> Bool = string.trim(env.get(name) ?? "") == "1"
 effect fn as_kept(r: exchange.Reply) -> exchange.Reply =
   if string.trim(env.get("COMIDE_REASONING_BACK") ?? "") == "0" then { ...r, reasoning: "" } else r
 
-effect fn run_orders(sh0: shell.Shell, orders: List[said.Order]) -> (shell.Shell, String) = {
+effect fn run_orders(g: gate.Gate, sh0: shell.Shell, orders: List[said.Order]) -> (shell.Shell, String) = {
   var sh = sh0
   var parts: List[String] = []
   for o in orders {
     eprintln("\n⏺ " + charge.first_line(said.shown(o), 110))
-    let (next_sh, text) = shell.call(sh, said.arguments(o))!
+    let (next_sh, text) = guarded(g, sh, said.arguments(o))!
     sh = next_sh
     eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
     list.push(parts, said.shown(o) + "\n" + text)
@@ -160,7 +184,7 @@ effect fn run_orders(sh0: shell.Shell, orders: List[said.Order]) -> (shell.Shell
   (sh, if list.is_empty(parts) then charge.NOTHING_NOTE else list.join(parts, "\n\n"))
 }
 
-effect fn work_written(sh0: shell.Shell, task: String, model: String, root: String, max_steps: Int, max_tokens: Int, log_dir: String) -> Int = {
+effect fn work_written(g: gate.Gate, sh0: shell.Shell, task: String, model: String, root: String, max_steps: Int, max_tokens: Int, log_dir: String) -> Int = {
   var sh = sh0
   var survey = ""
   if on("COMIDE_SURVEY")! then {
@@ -216,7 +240,7 @@ effect fn work_written(sh0: shell.Shell, task: String, model: String, root: Stri
           ok(s) => {
             unread = 0
             if string.trim(s.analysis) != "" then eprintln("\n" + charge.first_line(s.analysis, 300))
-            let (next_sh, seen) = run_orders(sh, s.orders)!
+            let (next_sh, seen) = run_orders(g, sh, s.orders)!
             sh = next_sh
             match said.after(s, asked) {
               Work => {
@@ -255,6 +279,16 @@ effect fn work_written(sh0: shell.Shell, task: String, model: String, root: Stri
   code
 }
 
+// The terminal and the gate of an errand in `root`. A settings file that cannot be read
+// stops the errand before it starts: running without the person's deny rules is not a
+// way to go on.
+effect fn open(root: String) -> Result[(shell.Shell, gate.Gate), String] = {
+  let sh = shell.open(root)!
+  let (g, notes) = gate.load(root, list.last(string.split(sh.dir, "/")) ?? "")!
+  for n in notes { eprintln("  " + n) }
+  ok((sh, g))
+}
+
 // `args` is what followed `run`: the task, then its options. The exit code is the answer:
 // 0 done, 1 the model could not be reached, 2 a mistake in the call, 3 out of steps, 4 replies
 // that could not be read.
@@ -266,19 +300,21 @@ effect fn cli(args: List[String]) -> Int = {
     2
   } else {
     let root = charge.opt(rest, "--root") ?? (env.cwd() ?? ".")
-    match shell.open(root) {
+    // The keys, where the conversation finds them (envfile.almd), and the settings.
+    let _ = envfile.load(envfile.dirs_for(root)!)
+    match open(root) {
       err(e) => {
-        eprintln("no directory to keep the terminal's state in: " + e)
+        eprintln("the errand could not start: " + e)
         1
       },
-      ok(sh) => {
+      ok((sh, g)) => {
         let model = charge.opt(rest, "--model") ?? "cf:glm-5.3"
         let max_steps = int.parse(charge.opt(rest, "--max-steps") ?? "") ?? 200
         let max_tokens = int.parse(string.trim(env.get("COMIDE_MAX_TOKENS") ?? "")) ?? 65536
         let log_dir = string.trim(env.get("COMIDE_LOG_DIR") ?? "")
         let ask = charge.opt(rest, "--ask") ?? "writing"
-        if ask == "tool" then work(sh, task, model, root, max_steps, max_tokens, log_dir)!
-        else if ask == "writing" then work_written(sh, task, model, root, max_steps, max_tokens, log_dir)!
+        if ask == "tool" then work(g, sh, task, model, root, max_steps, max_tokens, log_dir)!
+        else if ask == "writing" then work_written(g, sh, task, model, root, max_steps, max_tokens, log_dir)!
         else {
           eprintln("no way of asking named " + ask + ": writing or tool")
           2

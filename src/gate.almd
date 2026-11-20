@@ -1,0 +1,74 @@
+// The settings, heard before and after every command of an errand (errand.almd).
+//
+// An errand has one tool, the terminal, and nobody is there to ask. So of the three lists
+// (rules.almd, as rules on `shell`):
+//
+//   deny    the command is not run, and the model is told so
+//   ask     the same: there is no one to ask, and an errand does not take that as a yes
+//   allow   says nothing new: a command no rule speaks of runs too
+//
+// That last line is the difference from the conversation, where a command no rule speaks
+// of is put to the person. An errand that asked could not be left alone; it is meant to be
+// started where its terminal can do no harm (a container, or nautra/run.sh), and the lists
+// are a guard rail there, not the wall (rules.almd says what they do not see through).
+//
+// The hooks are the same ones (hooks.almd), for the tool `shell`: PreToolUse can stop a
+// command, PostToolUse can object to what it did. A wait for a job already running is not
+// a command and passes neither.
+
+import json
+import self.hooks
+import self.rules
+import self.settings
+
+type Gate = { allow: List[String], ask: List[String], deny: List[String], hooks: Value, root: String, session: String }
+
+fn open_gate(root: String) -> Gate = Gate { allow: [], ask: [], deny: [], hooks: value.object([]), root: root, session: "" }
+
+// The gate of a project: its settings and the person's, read once at the start. The notes
+// are for the person (a project's settings not in use, a rule that cannot be read).
+effect fn load(root: String, session: String) -> Result[(Gate, List[String]), String] = {
+  let loaded = settings.load(root, false)!
+  let s = loaded.settings
+  ok((Gate { allow: s.allow, ask: s.ask, deny: s.deny, hooks: s.hooks, root: root, session: session },
+    loaded.notes + rules.problems(s.allow + s.ask + s.deny)))
+}
+
+// Why a command is not run, or "" when it may run.
+fn refusal(g: Gate, command: String) -> String =
+  match rules.decide(g.allow, g.ask, g.deny, "shell", command) {
+    Denied(rule) => "[not run: the settings deny this command (" + rule + "). Do not look for another way to do the same thing; go on without it, or say in your analysis what you need.]",
+    Asked(rule) => "[not run: the settings say to ask a person before this command (" + rule + "), and nobody is here to ask. Go on without it.]",
+    Allowed(_) => "",
+    Unsaid => "",
+  }
+
+fn tool_input(command: String) -> Value = value.object([("command", value.string(command))])
+
+// Before a command: the hooks first, as in the conversation (a hook can stop what the
+// rules would allow), then the rules. The second part is what the person should hear of.
+effect fn before(g: Gate, command: String) -> (String, List[String]) = {
+  let pre = hooks.run(g.hooks, "PreToolUse", "shell", g.root, hooks.input("PreToolUse", g.session, g.root, "shell", tool_input(command), "", ""))!
+  if pre.stopped then ("[not run: a check the user set up stopped this command:\n" + pre.reason + "]", pre.failures)
+  else (refusal(g, command), pre.failures)
+}
+
+// After a command: what a PostToolUse hook objects to, to go under what the command printed.
+effect fn after(g: Gate, command: String, response: String) -> (String, List[String]) = {
+  let post = hooks.run(g.hooks, "PostToolUse", "shell", g.root, hooks.input("PostToolUse", g.session, g.root, "shell", tool_input(command), string.take(response, 20000), ""))!
+  (if post.stopped then "\n\n[A check the user set up objects to this:]\n" + post.reason else "", post.failures)
+}
+
+test "a denied command is not run, and neither is one the settings would ask about" {
+  let g = { ...open_gate("/p"), deny: ["shell(rm -rf*)"], ask: ["shell(git push*)"], allow: ["shell(git status*)"] }
+  assert(string.contains(refusal(g, "rm -rf build"), "deny"))
+  assert(string.contains(refusal(g, "cd x && /bin/rm -rf build"), "deny"))
+  assert(string.contains(refusal(g, "git push origin main"), "nobody is here to ask"))
+}
+
+test "a command no rule speaks of runs, as one that is allowed does" {
+  let g = { ...open_gate("/p"), deny: ["shell(rm -rf*)"], allow: ["shell(git status*)"] }
+  assert_eq(refusal(g, "git status"), "")
+  assert_eq(refusal(g, "make test"), "")
+  assert_eq(refusal(open_gate("/p"), "rm -rf build"), "")
+}
