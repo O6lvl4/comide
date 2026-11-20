@@ -22,10 +22,12 @@ fn dir_for(home: String, root: String) -> String = home + "/.comide/sessions/" +
 
 fn role_of(m: Value) -> String = value.get_string(m, "role") ?? ""
 
-// What the person first asked, cut to a line: the name a session is listed by.
+// What the person first asked, cut to a line: the name a session is listed by. Asked in
+// writing (penned.almd), the first request goes under a heading, which is not the name.
 fn title_of(messages: List[Value]) -> String = {
   let first = list.find(messages, (m) => role_of(m) == "user")
-  let text = string.trim(list.first(string.split(string.trim(option.map(first, (m) => value.get_string(m, "content") ?? "") ?? ""), "\n")) ?? "")
+  let said = string.trim(option.map(first, (m) => value.get_string(m, "content") ?? "") ?? "")
+  let text = string.trim(list.first(string.split(string.trim(string.strip_prefix(said, "Task Description:") ?? said), "\n")) ?? "")
   if string.len(text) > 80 then string.take(text, 80) + "…" else text
 }
 
@@ -120,6 +122,7 @@ test "a project's sessions live under its path" {
 
 test "a session is listed by what was first asked" {
   assert_eq(title_of([msg("system", "S"), msg("user", "fix the flaky tests\nand more"), msg("user", "second")]), "fix the flaky tests")
+  assert_eq(title_of([msg("system", "S"), msg("user", "Task Description:\nfix the flaky tests\nand more")]), "fix the flaky tests")
   assert_eq(title_of([msg("system", "S")]), "")
   assert_eq(string.len(title_of([msg("user", string.repeat("x", 200))])), 81)
 }

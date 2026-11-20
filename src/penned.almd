@@ -1,0 +1,251 @@
+// One request of the conversation, worked the errand's way (errand.almd): the model is
+// asked in writing, has one terminal that lasts, and says twice that it is done. What the
+// conversation adds is the person: a command no rule speaks of is put to them, Esc stops
+// the model mid-answer, and the last analysis is shown as the answer.
+//
+// Chosen with --loop written (agent.almd). What it does not have yet, of what the
+// conversation's other loop has: the tools beside the terminal (edit and solve through
+// golemide, MCP, skills, memory, web), the note that takes a long conversation's place,
+// and a goal. Plan mode and --read-only cannot tell a command that looks from one that
+// changes, so there every command is put to the person, whatever the rules allow.
+
+import env
+import fs
+import io
+import json
+import self.asking
+import self.charge
+import self.convo
+import self.exchange
+import self.hooks
+import self.model
+import self.options
+import self.rules
+import self.said
+import self.shell
+import self.talk
+import self.toolkit
+import self.turn
+import self.ui
+import self.waiting
+
+let MAX_TOKENS = 65536
+let UNREAD_ROUNDS = 5
+let CALL_MAX_MS = 930000
+
+fn system_prompt(root: String) -> String = string.trim(charge.written_prompt(root))
+
+// The first request is the task; what the person says after it is said as they said it.
+fn request(messages: List[Value], text: String) -> String =
+  if list.any(messages, (m) => (value.get_string(m, "role") ?? "") == "user") then text else "Task Description:\n" + text
+
+// The conversation's terminal: its state is in the session's scratch directory, so it is
+// the same one from request to request.
+effect fn terminal(setup: toolkit.Setup) -> shell.Shell = {
+  let dir = setup.scratch + "/terminal"
+  let _ = fs.mkdir_p(dir)
+  shell.at(dir, setup.root)!
+}
+
+// Ends what the conversation's terminal left running. Called when the conversation ends.
+effect fn close(setup: toolkit.Setup) -> Unit =
+  if fs.exists(setup.scratch + "/terminal/cwd") then shell.close(terminal(setup)!)! else ()
+
+// One model call, watched: a spinner, and Esc to stop it. The reply is JSON and is not
+// shown as it arrives. `none` is the person stopping it.
+effect fn heard(opts: options.Options, scratch: String, n: Int, messages: List[Value], tries: Int) -> Result[exchange.Reply?, String] = {
+  let fake = string.trim(env.get("COMIDE_FAKE") ?? "")
+  if fake != "" then ok(some(talk.ask(n, opts.model, messages, [], MAX_TOKENS)!))
+  else {
+    let once: Result[exchange.Reply?, String] = match model.start(opts.model, messages, [], MAX_TOKENS, "", scratch) {
+      err(e) => err(e),
+      ok(c) => {
+        let t0 = datetime.now_ms()
+        var frame = 0
+        var interrupted = false
+        while not model.is_done(c)! and datetime.now_ms() - t0 <= CALL_MAX_MS and not interrupted {
+          interrupted = waiting.pause(opts)!
+          if opts.live and opts.ui.color then io.print(ui.waiting(opts.ui, frame / 3, (datetime.now_ms() - t0) / 1000, "Working", if opts.tui then "esc to interrupt" else ""))
+          frame = frame + 1
+        }
+        if opts.live and opts.ui.color then io.print(ui.clear_line(opts.ui))
+        if interrupted then { model.abandon(c)!; ok(none) }
+        else if not model.is_done(c)! then { model.abandon(c)!; err("request timeout: no complete answer within 930s") }
+        else match model.settle(c) {
+          err(e) => err(e),
+          ok(r) => ok(some(exchange.Reply { content: r.content, reasoning: r.reasoning, calls: [], finish: r.finish,
+            usd: r.cost_usd, input: r.input_tokens, cached: r.cached_tokens, output: r.output_tokens })),
+        }
+      },
+    }
+    match once {
+      ok(r) => ok(r),
+      err(e) => if tries + 1 < convo.MODEL_TRIES and convo.retryable(e) then {
+        let wait = convo.retry_wait_ms(tries) + datetime.now_ms() % 1000
+        options.show(opts, ui.note_line(opts.ui, string.take(e, 120) + "; trying again in " + int.to_string(wait / 1000) + "s"))!
+        env.sleep_ms(wait)
+        heard(opts, scratch, n, messages, tries + 1)
+      } else err(e),
+    }
+  }
+}
+
+// Whether a command may run, and what the model reads if it may not. The hooks first,
+// then the rules, then the person, as for a shell call in the conversation's other loop.
+effect fn permitted(opts: options.Options, setup: toolkit.Setup, allow: Bool, command: String) -> (asking.Permission, String) = {
+  let input = value.object([("command", value.string(command))])
+  let pre = turn.hooked(opts, setup, "PreToolUse", "shell", input, "", "")!
+  let held = asking.Permission { run: false, allow_from_now: allow, said: "" }
+  if pre.stopped then (held, "[not run: a check the user set up stopped this command:\n" + pre.reason + "]")
+  else match rules.decide(setup.allow_rules, setup.ask_rules, setup.deny_rules, "shell", command) {
+    Denied(rule) => (held, "[not run: the settings deny this command (" + rule + "). Do not look for another way to do the same thing; go on without it, or say in your analysis what you need.]"),
+    Asked(rule) => if not opts.live then (held, "[not run: the settings say to ask a person before this command (" + rule + "), and nobody is here to ask.]")
+      else {
+        let a = asking.permitted(opts, false, "The settings ask before this (" + rule + "). Run it?")!
+        (asking.Permission { run: a.run, allow_from_now: allow, said: a.said }, "")
+      },
+    Allowed(_) => if setup.frozen != "" then (asking.permitted(opts, false, "This session only looks. Run this command?")!, "")
+      else (asking.Permission { run: true, allow_from_now: allow, said: "" }, ""),
+    Unsaid => (asking.permitted(opts, allow and setup.frozen == "", "Run this command?")!, ""),
+  }
+}
+
+fn declined(said_by_person: String) -> String =
+  if said_by_person == "" then "[not run: the user declined this command. Do not try it again in another form; go on without it, or say in your analysis what you need.]"
+  else "[not run: the user declined this command and said: " + said_by_person + "]"
+
+// The orders of one reply, in order. A command the person or the settings stop is not
+// run, and the orders after it in the same reply are not run either: they were written
+// expecting it to have run.
+effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.Shell, allow0: Bool, orders: List[said.Order]) -> (shell.Shell, Bool, String) = {
+  var sh = sh0
+  var allow = allow0
+  var parts: List[String] = []
+  var stopped = false
+  for o in orders {
+    if stopped then list.push(parts, said.shown(o) + "\n[not run: an earlier command of this reply was not run]")
+    else {
+      let command = string.trim(o.command)
+      options.show(opts, "\n" + ui.call_line(opts.ui, "shell", if command == "" then string.trim(said.shown(o)) else charge.first_line(command, int.max(20, opts.ui.width - 12))))!
+      let (p, refused) = if command == "" then (asking.Permission { run: true, allow_from_now: allow, said: "" }, "") else permitted(opts, setup, allow, o.command)!
+      allow = p.allow_from_now
+      if not p.run then {
+        let why = if refused != "" then refused else declined(p.said)
+        options.show(opts, ui.result_line(opts.ui, "not run", true))!
+        list.push(parts, said.shown(o) + "\n" + why)
+        stopped = true
+      } else {
+        let (next_sh, text) = shell.call(sh, said.arguments(o))!
+        sh = next_sh
+        shell.keep(sh)!
+        let post = if command == "" then hooks.quiet() else turn.hooked(opts, setup, "PostToolUse", "shell", value.object([("command", value.string(o.command))]), string.take(text, 20000), "")!
+        options.show(opts, ui.result_line(opts.ui, charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", int.max(20, opts.ui.width - 6))
+          + (if post.stopped then " · a hook objects" else ""), post.stopped))!
+        list.push(parts, said.shown(o) + "\n" + text + (if post.stopped then "\n\n[A check the user set up objects to this:]\n" + post.reason else ""))
+      }
+    }
+  }
+  (sh, allow, if list.is_empty(parts) then charge.NOTHING_NOTE else list.join(parts, "\n\n"))
+}
+
+effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session, user: String) -> options.Session = {
+  let setup = if s.plan then { ...setup0, frozen: "plan" } else if opts.read_only then { ...setup0, frozen: "look" } else setup0
+  let before = turn.hooked(opts, setup, "UserPromptSubmit", "", value.null(), "", user)!
+  if before.stopped then {
+    options.show(opts, "\n" + ui.result_line(opts.ui, "not sent: a hook stopped this request: " + before.reason, true))!
+    s
+  } else {
+    let u = opts.ui
+    var messages = s.messages + [exchange.message("user", request(s.messages, user) + (if before.printed == "" then "" else "\n\n[Added by a hook]\n" + before.printed))]
+    var sh = terminal(setup)!
+    var allow = s.allow_shell
+    var cost = 0.0
+    var steps = 0
+    var tin = 0
+    var tcached = 0
+    var tout = 0
+    var last_in = s.last_in
+    var unread = 0
+    var asked = false
+    var done = false
+    while not done {
+      if steps >= opts.max_steps then {
+        options.show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(steps) + " steps without a final answer; say how to continue"))!
+        done = true
+      } else match heard(opts, setup.scratch, s.steps + steps + 1, messages, 0) {
+        err(e) => {
+          options.show(opts, "\n" + ui.result_line(u, "the model could not be reached: " + string.take(e, 300), true))!
+          done = true
+        },
+        ok(none) => {
+          options.show(opts, ui.result_line(u, "Interrupted · what should comide do instead?", true))!
+          done = true
+        },
+        ok(some(r)) => {
+          steps = steps + 1
+          cost = cost + r.usd
+          tin = tin + r.input
+          tcached = tcached + r.cached
+          tout = tout + r.output
+          last_in = r.input
+          list.push(messages, exchange.assistant_message(r, []))
+          turn.record_cost(s.cost + cost)!
+          match said.read(r.content) {
+            err(reason) => {
+              unread = unread + 1
+              options.show(opts, "\n" + ui.note_line(u, "the reply could not be read (" + reason + "); nothing was run"))!
+              if unread >= UNREAD_ROUNDS then {
+                options.show(opts, "\n" + ui.result_line(u, int.to_string(unread) + " replies in a row could not be read; say how to continue", true))!
+                done = true
+              } else list.push(messages, exchange.message("user", if r.finish == "length" then charge.WRITTEN_CUT_NOTE else charge.unread_note(reason)))
+            },
+            ok(w) => {
+              unread = 0
+              let finishing = w.complete and asked
+              if string.trim(w.analysis) != "" and not finishing then options.show(opts, "\n" + ui.note_line(u, charge.first_line(w.analysis, 300)))!
+              let (next_sh, allow_now, seen) = run_orders(opts, setup, sh, allow, w.orders)!
+              sh = next_sh
+              allow = allow_now
+              match said.after(w, asked) {
+                Work => {
+                  list.push(messages, exchange.message("user", seen))
+                  asked = false
+                },
+                AskSure => {
+                  list.push(messages, exchange.message("user", seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
+                  asked = true
+                },
+                Done => {
+                  // The work ended on an answer: a Stop hook may say it is not finished.
+                  let at_stop = turn.hooked(opts, setup, "Stop", "", value.null(), "", "")!
+                  if at_stop.stopped then {
+                    options.show(opts, "\n" + ui.note_line(u, "a hook says the work is not finished; comide passes that on"))!
+                    list.push(messages, exchange.message("user", seen + "\n\nA check the user set up says the work is not finished:\n" + at_stop.reason))
+                    asked = false
+                  } else {
+                    println("\n" + convo.answer_lines(u, if string.trim(w.analysis) == "" then "(done)" else string.trim(w.analysis), true))
+                    done = true
+                  }
+                },
+              }
+            },
+          }
+        },
+      }
+    }
+    shell.keep(sh)!
+    let _ = fs.write_text(setup.scratch + "/transcript.json", json.stringify(value.array(messages)))
+    if steps > 0 then options.show(opts, "\n" + ui.footer(u, steps, tin, tcached, tout, convo.usd(cost), convo.usd(s.cost + cost)))!
+    { ...s, messages: messages, cost: s.cost + cost, allow_shell: allow, steps: s.steps + steps, last_in: last_in }
+  }
+}
+
+test "the first request is the task, and what follows is said as it was" {
+  assert_eq(request([exchange.message("system", "s")], "fix it"), "Task Description:\nfix it")
+  assert_eq(request([exchange.message("system", "s"), exchange.message("user", "Task Description:\nfix it")], "now the tests"), "now the tests")
+}
+
+test "a declined command says so, with what the person said" {
+  assert(string.contains(declined(""), "declined"))
+  assert(string.contains(declined("use make instead"), "use make instead"))
+}

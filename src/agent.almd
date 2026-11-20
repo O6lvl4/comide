@@ -31,6 +31,7 @@ import self.editor
 import self.convo
 import self.options
 import self.turn
+import self.penned
 import self.briefing
 import self.skills
 import self.handover
@@ -162,7 +163,10 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   // What was kept from earlier sessions here (memory.almd). Last, because it is the part
   // most likely to differ from one session to the next.
   let remembered = memory.section(setup.memory_file, memory.read(setup.memory_file)!)
-  let system = list.join(list.filter([system_prompt(opts0.root) + "\n" + tools.project_context(setup)!, briefed, skills.section(known), mcp.section(servers),
+  // Asked in writing, the model is told the shape of its reply and the terminal's rules
+  // (charge.almd), not the tools: it has none but the terminal.
+  let opening = if opts0.written then penned.system_prompt(opts0.root) else system_prompt(opts0.root) + "\n" + tools.project_context(setup)!
+  let system = list.join(list.filter([opening, briefed, skills.section(known), mcp.section(servers),
     if at_start.printed == "" then "" else "Said by a check the user set up to run at the start of a session:\n" + at_start.printed, remembered], (part) => part != ""), "\n\n")
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
@@ -186,7 +190,8 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
     history_file: home + "/.comide/history", home: home,
     session_id: match kept { some(k) => if k.id == "" then int.to_string(datetime.now_ms()) else k.id, none => int.to_string(datetime.now_ms()) } }
   if not opts0.live then {
-    let after = turn.turn(opts0, setup, start, opts0.prompt)!
+    let after = one_turn(opts0, setup, start, opts0.prompt)!
+    penned.close(setup)!
     // A helper's conversation is not the person's: kept, it would be the one --continue finds.
     if setup.depth == 0 then sessions.save(home, opts0.root, opts0.model, place.session_id, after)!
     eprintln(ui.note_line(opts0.ui, "transcript: " + place.transcript + " · go on with: comide --continue"))
@@ -201,6 +206,8 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
       err(e) => err(e),
     }
     match saved { some(sv) => term.leave_raw(sv)!, none => () }
+    // What the conversation's terminal left running ends with the conversation.
+    penned.close(setup)!
     outcome
   }
 }
@@ -251,7 +258,7 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
         if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
         t = match command_of(text) {
           some(c) => slash(t, place, c)!,
-          none => if string.trim(text) == "" then t else { ...t, s: turn.turn(t.opts, place.setup, t.s, text)! },
+          none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, place.setup, t.s, text)! },
         }
         if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, place.session_id, t.s)!
       },
@@ -260,6 +267,10 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
   println(ui.note_line(u, "transcript: " + place.transcript + " · session " + convo.usd(t.s.cost) + " · go on with: comide --continue"))
   ok(0)
 }
+
+// One request, worked by the loop the session was started with.
+effect fn one_turn(opts: options.Options, setup: toolkit.Setup, s: options.Session, text: String) -> options.Session =
+  if opts.written then penned.turn(opts, setup, s, text)! else turn.turn(opts, setup, s, text)!
 
 // A slash command, done.
 effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
@@ -282,7 +293,7 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
     if not s.plan then { println(ui.note_line(u, "there is no plan waiting: /plan starts one")); t }
     else {
       println(ui.note_line(u, "the plan is approved; comide carries it out"))
-      { ...t, s: turn.turn(t.opts, place.setup, { ...s, plan: false }, "The plan is approved. Carry it out now." + (if c.arg == "" then "" else " " + c.arg))! }
+      { ...t, s: one_turn(t.opts, place.setup, { ...s, plan: false }, "The plan is approved. Carry it out now." + (if c.arg == "" then "" else " " + c.arg))! }
     }
   }
   else if c.name == "/cost" then { println(ui.note_line(u, "this session: " + convo.usd(s.cost) + " over " + int.to_string(s.steps) + " model calls")); t }
@@ -312,7 +323,7 @@ effect fn aim(t: Talk, place: Place, arg: String) -> Talk = {
     { ...t, s: { ...t.s, goal: "" } }
   } else {
     println(ui.note_line(u, "goal: " + arg))
-    { ...t, s: turn.turn(t.opts, place.setup, { ...t.s, goal: arg }, goal.opening(arg))! }
+    { ...t, s: one_turn(t.opts, place.setup, { ...t.s, goal: arg }, goal.opening(arg))! }
   }
 }
 
@@ -345,7 +356,7 @@ effect fn switch_model(t: Talk, to: String) -> Talk = {
 // the list by asking "is --x anywhere in it" let the request itself be an option: a
 // request that was the text `--trust-project` trusted the project (found in review,
 // 2026-11-18; the explore tool passes a model's words as the request).
-let TAKES_VALUE = ["-p", "--root", "--model", "--effort", "--max-steps", "--golemide", "--runner", "--resume", "--goal"]
+let TAKES_VALUE = ["-p", "--root", "--model", "--effort", "--max-steps", "--golemide", "--runner", "--resume", "--goal", "--loop"]
 
 type Args = { flags: List[String], values: List[(String, String)] }
 
@@ -398,6 +409,11 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                    command is run. /go in a conversation approves it; after `run`,
                    `comide run "go ahead" --continue` carries it out
   --read-only      only look, for the whole run: no file changed, no command run
+  --loop written   ask the model in writing and give it one terminal that lasts, as
+                   `comide run` does ($COMIDE_LOOP); the default, tools, sends the
+                   tools below. Asked in writing the model has the terminal only:
+                   no edit, solve, MCP, skill or memory tool yet, and in plan mode or
+                   --read-only every command is put to you first
   --yes            run shell and verify commands without asking
   --trust-project  use the allow rules and hooks in this project's .comide/settings.json,
                    as the file is now; without it only its ask and deny rules are used
@@ -450,6 +466,7 @@ effect fn cli(raw: List[String]) -> Int = {
       trust_project: has(args, "--trust-project") and not helper,
       plan: has(args, "--plan"),
       read_only: has(args, "--read-only") or helper,
+      written: (opt(args, "--loop") ?? (env.get("COMIDE_LOOP") ?? "")) == "written",
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }

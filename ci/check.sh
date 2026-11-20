@@ -267,6 +267,48 @@ printf '{ not json' > "$tmp/broken.json"
 COMIDE_SETTINGS="$tmp/broken.json" COMIDE_FAKE="$tmp/fake" ./comide run "gate" --root "$tmp/gate" > /dev/null 2> "$tmp/gate2.err"
 same "settings that cannot be read stop the errand before it starts" "1" "$?"
 
+say "== the conversation, with the model asked in writing (--loop written)"
+# One request with --yes, then the session taken up again by a person who is asked about
+# a command and says yes, and about another and says what to do instead.
+rm -rf "$tmp/fake" "$tmp/conv"; mkdir -p "$tmp/fake" "$tmp/conv" "$tmp/home"
+python3 - "$tmp/fake" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done}), "reasoning": "thought"}
+replies = [say([{"command": "echo hi > made.txt && cat made.txt"}]),
+           say([], done=True), say([], done=True, analysis="Wrote made.txt; it says hi."),
+           say([{"command": "echo more >> made.txt"}, {"command": "echo never > never.txt"}, {"command": "echo after > after.txt"}]),
+           say([], done=True), say([], done=True, analysis="Added a line.")]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+conv() { HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_FAKE="$tmp/fake" ./comide "$@" --loop written --model local:stand-in --root "$tmp/conv"; }
+conv -p "make the file" --yes > "$tmp/conv1.out" 2> "$tmp/conv1.err"
+same "exit 0" "0" "$?"
+has "the last analysis is the answer" "Wrote made.txt; it says hi." "$tmp/conv1.out"
+same "the command ran" "hi" "$(cat "$tmp/conv/made.txt")"
+printf 'add a line\n1\nuse printf instead\n' | conv --continue > "$tmp/conv2.out" 2> "$tmp/conv2.err"
+same "exit 0" "0" "$?"
+same "a command the person said yes to ran" "hi more" "$(tr '\n' ' ' < "$tmp/conv/made.txt" | sed 's/ $//')"
+if [ -e "$tmp/conv/never.txt" ] || [ -e "$tmp/conv/after.txt" ]; then bad "a declined command, and the one after it, are not run"; else say "ok: a declined command, and the one after it, are not run"; fi
+python3 - "$tmp/fake" > "$tmp/conv.out" <<'EOF'
+import json, sys
+r4 = json.load(open(sys.argv[1] + "/request-4.json"))["messages"]
+r5 = json.load(open(sys.argv[1] + "/request-5.json"))["messages"]
+print("system", "Format your response as JSON" in r4[0]["content"], len(json.load(open(sys.argv[1] + "/request-4.json"))["tools"]))
+print("kept", [m["role"] for m in r4[1:3]] == ["user", "assistant"] and r4[1]["content"].startswith("Task Description:\nmake the file"))
+print("said plainly", r4[-1]["content"] == "add a line")
+print("declined", "the user declined this command and said: use printf instead" in r5[-1]["content"])
+print("the rest", "an earlier command of this reply was not run" in r5[-1]["content"])
+EOF
+has "the model is told the shape of its reply, and is sent no tool" "^system True 0$" "$tmp/conv.out"
+has "the session taken up again has what was said before" "^kept True$" "$tmp/conv.out"
+has "what the person says next is said as they said it" "^said plainly True$" "$tmp/conv.out"
+has "the model reads what the person said in place of the command" "^declined True$" "$tmp/conv.out"
+has "and that the commands after it were not run" "^the rest True$" "$tmp/conv.out"
+printf 'again\n' | conv -p "no one here" > /dev/null 2>&1
+if [ -e "$tmp/conv/never.txt" ]; then bad "with nobody to ask and no --yes, no command runs"; else say "ok: with nobody to ask and no --yes, no command runs"; fi
+
 say "== without a task, nothing is started"
 ./comide run > /dev/null 2>&1
 same "exit 2" "2" "$?"
