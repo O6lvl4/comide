@@ -317,7 +317,7 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
           last_in = r.input
           list.push(messages, exchange.assistant_message(r, []))
           turn.record_cost(s.cost + cost)!
-          match said.read_with(r.content, true) {
+          match said.read_reply(r.content, true, r.finish != "length") {
             err(reason) => {
               unread = unread + 1
               options.show(opts, "\n" + ui.note_line(u, "the reply could not be read (" + reason + "); nothing was run"))!

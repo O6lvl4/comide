@@ -39,8 +39,10 @@ let BODY_CLOSE = ">>>BODY "
 let BODY_REF = "@body:"
 
 // A reply as the object's part and the texts after it, by name. Each text ends with a
-// newline, as a file does.
-fn bodies_in(text: String) -> Result[(String, List[(String, String)]), String] = {
+// newline, as a file does. `whole`: the reply was not cut off, so a last text with no
+// closing line runs to the reply's end (the model forgets the line; seen twice in one
+// task). In a reply that was cut off it is an error: half a file is not written.
+fn bodies_in(text: String, whole: Bool) -> Result[(String, List[(String, String)]), String] = {
   var head: List[String] = []
   var found: List[(String, String)] = []
   var name = ""
@@ -57,8 +59,11 @@ fn bodies_in(text: String) -> Result[(String, List[(String, String)]), String] =
       name = ""
     } else list.push(lines, l)
   }
-  if name != "" then err("the text " + name + " has no closing line (" + BODY_CLOSE + name + ")")
-  else ok((list.join(head, "\n"), found))
+  if name != "" and not whole then err("the text " + name + " has no closing line (" + BODY_CLOSE + name + ")")
+  else {
+    if name != "" then list.push(found, (name, string.trim_end(list.join(lines, "\n")) + "\n")) else ()
+    ok((list.join(head, "\n"), found))
+  }
 }
 
 // A value that names a text after the object becomes that text.
@@ -97,7 +102,10 @@ fn object_in(text: String) -> String? = match string.index_of(text, "{") {
 fn read(text: String) -> Result[Said, String] = read_with(text, false)
 
 // `tools`: whether an order may name a tool (the conversation) or not (an errand).
-fn read_with(text: String, tools: Bool) -> Result[Said, String] = match bodies_in(text) {
+fn read_with(text: String, tools: Bool) -> Result[Said, String] = read_reply(text, tools, false)
+
+// `whole`: the model ended the reply itself (it was not cut off at the output limit).
+fn read_reply(text: String, tools: Bool, whole: Bool) -> Result[Said, String] = match bodies_in(text, whole) {
   err(e) => err(e),
   ok(parts) => match object_in(parts.0) {
     none => err("there is no JSON object in the reply"),
@@ -165,6 +173,8 @@ test "a long text is written after the object and named where it is meant" {
   assert_eq(list.map(s.orders, (o) => o.command), ["", "python3 a.py\n"])
   assert(string.starts_with(match read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}}]}", true) { ok(_) => "", err(e) => e }, "a command names a text"))
   assert(string.starts_with(match read_with("{\"commands\":[]}\n<<<BODY a\nx\n", true) { ok(_) => "", err(e) => e }, "the text a has no closing line"))
+  let open = read_reply("{\"commands\":[{\"command\":\"@body:a\"}]}\n<<<BODY a\necho x\n\n", true, true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(list.map(open.orders, (o) => o.command), ["echo x\n"])
 }
 
 test "complete twice in a row ends it; once is asked about" {
