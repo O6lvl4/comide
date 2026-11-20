@@ -59,12 +59,16 @@ fn tool_line(t: Value) -> String = {
       + (if list.contains(required, p.0) then "" else ", optional") + "): " + (value.get_string(p.1, "description") ?? "")), "\n")
 }
 
-fn tools_section() -> String =
-  list.join(list.map(list.filter(tools.definitions(), (t) => (value.get_string(value.get(t, "function") ?? value.object([]), "name") ?? "") != "shell"), tool_line), "\n")
+fn name_of(t: Value) -> String = value.get_string(value.get(t, "function") ?? value.object([]), "name") ?? ""
+
+// `without`: tools that cannot work here (a search with no engine to ask), left unsaid so
+// that no step is spent finding it out.
+fn tools_section(without: List[String]) -> String =
+  list.join(list.map(list.filter(tools.definitions(), (t) => name_of(t) != "shell" and not list.contains(without, name_of(t))), tool_line), "\n")
 
 // What the model is told: the errand's words unchanged (charge.written_prompt), then who
 // it is working with and the tools. Nothing here asks it to be brief.
-fn system_prompt(root: String) -> String = string.trim(charge.written_prompt(root)) + """
+fn system_prompt(root: String, without: List[String]) -> String = string.trim(charge.written_prompt(root)) + """
 
 
 You are comide, a coding assistant, working with a user in the project at ${root}. The terminal starts there. What the user asks may be a task or a question; when you set "task_complete", your "analysis" is what the user reads as your answer: say what you changed and how you know it works, or answer the question, in the language the user wrote in. If nothing checked the work, say so. A question that needs no command is answered at once, with "commands" empty and "task_complete" true.
@@ -74,14 +78,21 @@ A command of yours may be put to the user before it runs, and the user may decli
 Besides the terminal you have comide's tools. A command object may also be:
 - {"tool": "NAME", "args": {...}}: run one of the tools below, with its arguments. It is run by comide, not in the terminal, in the order you wrote it, and its result is shown to you like a command's output.
 
+A text of more than a few lines (a file's contents, a script) is not written inside the JSON. Write "@body:NAME" where it is meant, as a tool argument or as a "command", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`:
+
+{"analysis": "...", "plan": "...", "commands": [{"tool": "write", "args": {"path": "hello.py", "content": "@body:hello"}}, {"command": "python3 hello.py\n", "wait_s": 5}], "task_complete": false}
+<<<BODY hello
+print("as it is, quotes and all")
+>>>BODY hello
+
 How the tools and the terminal divide the work:
 - To change a file, use edit, copying old exactly from what read showed, without the line numbers; use write for a new file or a complete rewrite. Every write is syntax-checked first: if one is refused, read the reason, look again, and retry. Do not write files with cat, sed or echo in the terminal when edit or write can do it.
-- When a command can tell whether the work is done (a test suite, a build, a checker), solve is the default way to make the change: it hands the change to golemide, which reads the code, edits it, runs the command and retries. The command must exist as written, run all the tests, and fail when a test fails. When solve reports the command passing, the work is done: do not run it again.
+- solve is for one case only: code that is already there, and a command that already exists and tells whether the change is right (the project's test suite, its build). It hands the change to golemide, which reads the code, edits it, runs the command and retries, and it can take minutes. The command must exist as written, run all the tests, and fail when a test fails. When solve reports the command passing, the work is done: do not run it again. Do not use solve to create files, in an empty directory, or with a check you have yet to write: there it fails or runs out of time. Write the file yourself.
 - To look at code, read, outline, search, tree and map are narrower than cat and grep and never need the user's leave. In a project you have not seen, start with map or tree.
 - Run tests, builds and everything else in the terminal.
 
 The tools:
-""" + tools_section()
+""" + tools_section(without)
 
 // The first request is the task; what the person says after it is said as they said it.
 fn request(messages: List[Value], text: String) -> String =
@@ -433,7 +444,10 @@ test "a declined command says so, with what the person said" {
 }
 
 test "the model is told of every tool but the terminal, with its arguments, and is not asked to be brief" {
-  let p = system_prompt("/p")
+  let p = system_prompt("/p", [])
+  assert(string.contains(p, "- web_search: "))
+  assert(not string.contains(system_prompt("/p", ["web_search"]), "- web_search: "))
+  assert(string.contains(p, "<<<BODY hello"))
   assert(string.contains(p, "- edit: "))
   assert(string.contains(p, "- solve: "))
   assert(string.contains(p, "- mcp_call: "))

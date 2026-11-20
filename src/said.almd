@@ -25,10 +25,65 @@ type Said = { analysis: String, plan: String, orders: List[Order], complete: Boo
 
 fn int_of(v: Value, k: String) -> Int = value.get_int(v, k) ?? (int.parse(value.get_string(v, k) ?? "") ?? 0)
 
-fn order_of(v: Value) -> Order =
-  Order { command: value.get_string(v, "command") ?? "", job: int_of(v, "job"), wait_s: int_of(v, "wait_s"), stop: value.get_bool(v, "stop") ?? false,
+// A long text (a file's contents) does not go well inside a JSON string: on the first real
+// run with tools, one task's replies broke 13 times in 28 on a quote, a newline or a
+// bracket lost in a file being written. So a text may be written after the object, as it
+// is, between two marker lines, and named where it is meant:
+//
+//   {"commands": [{"tool": "write", "args": {"path": "a.py", "content": "@body:a"}}], ...}
+//   <<<BODY a
+//   print("as it is")
+//   >>>BODY a
+let BODY_OPEN = "<<<BODY "
+let BODY_CLOSE = ">>>BODY "
+let BODY_REF = "@body:"
+
+// A reply as the object's part and the texts after it, by name. Each text ends with a
+// newline, as a file does.
+fn bodies_in(text: String) -> Result[(String, List[(String, String)]), String] = {
+  var head: List[String] = []
+  var found: List[(String, String)] = []
+  var name = ""
+  var lines: List[String] = []
+  var began = false
+  for l in string.split(text, "\n") {
+    if name == "" then {
+      match string.strip_prefix(l, BODY_OPEN) {
+        some(n) => { name = string.trim(n); began = true; lines = [] },
+        none => if not began then list.push(head, l) else (),
+      }
+    } else if string.trim(l) == BODY_CLOSE + name then {
+      list.push(found, (name, list.join(lines, "\n") + "\n"))
+      name = ""
+    } else list.push(lines, l)
+  }
+  if name != "" then err("the text " + name + " has no closing line (" + BODY_CLOSE + name + ")")
+  else ok((list.join(head, "\n"), found))
+}
+
+// A value that names a text after the object becomes that text.
+fn filled(v: Value, bodies: List[(String, String)]) -> Value = match value.as_string(v) {
+  err(_) => v,
+  ok(s) => match string.strip_prefix(s, BODY_REF) {
+    none => v,
+    some(n) => match list.get(list.filter(bodies, (b) => b.0 == string.trim(n)), 0) {
+      some(b) => value.string(b.1),
+      none => v,
+    },
+  },
+}
+
+fn order_of(v: Value, bodies: List[(String, String)]) -> Order =
+  Order { command: value.as_string(filled(value.get(v, "command") ?? value.string(""), bodies)) ?? "",
+    job: int_of(v, "job"), wait_s: int_of(v, "wait_s"), stop: value.get_bool(v, "stop") ?? false,
     tool: string.trim(value.get_string(v, "tool") ?? ""),
-    args: match value.get(v, "args") { some(a) => json.stringify(a), none => "{}" } }
+    args: match value.get(v, "args") {
+      some(a) => match value.as_object(a) {
+        ok(rows) => json.stringify(value.object(list.map(rows, (r) => (r.0, filled(r.1, bodies))))),
+        err(_) => json.stringify(a),
+      },
+      none => "{}",
+    } }
 
 // The object in a reply: from its first brace to its last.
 fn object_in(text: String) -> String? = match string.index_of(text, "{") {
@@ -42,16 +97,21 @@ fn object_in(text: String) -> String? = match string.index_of(text, "{") {
 fn read(text: String) -> Result[Said, String] = read_with(text, false)
 
 // `tools`: whether an order may name a tool (the conversation) or not (an errand).
-fn read_with(text: String, tools: Bool) -> Result[Said, String] = match object_in(text) {
-  none => err("there is no JSON object in the reply"),
-  some(body) => match json.parse(body) {
-    err(e) => err("the reply is not valid JSON: " + e),
-    ok(d) => {
-      let orders = list.map(value.get_array(d, "commands") ?? [], (c) => order_of(c))
-      let empty = list.filter(orders, (o) => string.trim(o.command) == "" and o.job <= 0 and not (tools and o.tool != ""))
-      if not list.is_empty(empty) then err(if tools then "a command has none of \"command\", \"job\" and \"tool\"" else "a command has neither \"command\" nor \"job\"")
-      else ok(Said { analysis: value.get_string(d, "analysis") ?? "", plan: value.get_string(d, "plan") ?? "",
-        orders: orders, complete: value.get_bool(d, "task_complete") ?? false })
+fn read_with(text: String, tools: Bool) -> Result[Said, String] = match bodies_in(text) {
+  err(e) => err(e),
+  ok(parts) => match object_in(parts.0) {
+    none => err("there is no JSON object in the reply"),
+    some(body) => match json.parse(body) {
+      err(e) => err("the reply is not valid JSON: " + e),
+      ok(d) => {
+        let orders = list.map(value.get_array(d, "commands") ?? [], (c) => order_of(c, parts.1))
+        let empty = list.filter(orders, (o) => string.trim(o.command) == "" and o.job <= 0 and not (tools and o.tool != ""))
+        let unnamed = list.filter(orders, (o) => string.starts_with(o.command, BODY_REF) or string.contains(o.args, "\"" + BODY_REF))
+        if not list.is_empty(empty) then err(if tools then "a command has none of \"command\", \"job\" and \"tool\"" else "a command has neither \"command\" nor \"job\"")
+        else if not list.is_empty(unnamed) then err("a command names a text (" + BODY_REF + "NAME) that is not written after the object between " + BODY_OPEN + "NAME and " + BODY_CLOSE + "NAME lines")
+        else ok(Said { analysis: value.get_string(d, "analysis") ?? "", plan: value.get_string(d, "plan") ?? "",
+          orders: orders, complete: value.get_bool(d, "task_complete") ?? false })
+      },
     },
   },
 }
@@ -96,6 +156,15 @@ test "what cannot be read is an error, with the reason" {
   assert_eq(read("I will list the files now."), err("there is no JSON object in the reply"))
   assert(string.starts_with(match read("{\"analysis\": \"a\", \"commands\": [") { ok(_) => "", err(e) => e }, "there is no JSON object") or string.starts_with(match read("{\"analysis\": \"a\", \"commands\": [}") { ok(_) => "", err(e) => e }, "the reply is not valid JSON"))
   assert_eq(read("{\"commands\":[{\"wait_s\":5}]}"), err("a command has neither \"command\" nor \"job\""))
+}
+
+test "a long text is written after the object and named where it is meant" {
+  let reply = "{\"analysis\":\"a\",\"plan\":\"p\",\"commands\":[{\"tool\":\"write\",\"args\":{\"path\":\"a.py\",\"content\":\"@body:a\"}},{\"command\":\"@body:run\"}],\"task_complete\":false}\n<<<BODY a\nd = {\"k\": [1]}\nprint(\"}\")\n>>>BODY a\n<<<BODY run\npython3 a.py\n>>>BODY run\n"
+  let s = read_with(reply, true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(list.map(s.orders, (o) => o.args), ["{\"path\":\"a.py\",\"content\":\"d = {\\\"k\\\": [1]}\\nprint(\\\"}\\\")\\n\"}", "{}"])
+  assert_eq(list.map(s.orders, (o) => o.command), ["", "python3 a.py\n"])
+  assert(string.starts_with(match read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}}]}", true) { ok(_) => "", err(e) => e }, "a command names a text"))
+  assert(string.starts_with(match read_with("{\"commands\":[]}\n<<<BODY a\nx\n", true) { ok(_) => "", err(e) => e }, "the text a has no closing line"))
 }
 
 test "complete twice in a row ends it; once is asked about" {

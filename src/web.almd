@@ -88,6 +88,13 @@ effect fn hop(address: String, accept: String, public_only: Bool, left: Int) -> 
     },
   }
 
+// Whether anything answers where the searches go: asked once at the start, briefly, so
+// that a model with no search engine is not told it has one.
+effect fn search_answers(searx: String) -> Bool = {
+  env.set("ALMIDE_HTTP_TIMEOUT_SECS", "3")!
+  match http.send(http.new_request("GET", searx + "/", "", [("User-Agent", UA)])) { ok(_) => true, err(_) => false }
+}
+
 effect fn web_search(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   let g = get(search_url(s.searx, toolkit.str_arg(a, "query")), "application/json", false)!
   if g.error != "" then toolkit.failed("the search engine did not answer: " + g.error + ". It is the SearXNG at " + s.searx

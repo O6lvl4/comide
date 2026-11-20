@@ -357,6 +357,38 @@ has "what was held in plan mode is said to the model" "^held True$" "$tmp/tl.out
 has "a request in plan mode says so" "^plan note True$" "$tmp/tl.out"
 has "an answer with no work behind it is not asked about" "^no eighth call True$" "$tmp/tl.out"
 
+say "== a long text, written after the object"
+# A script with quotes, braces and newlines in it, written as it is after the JSON and
+# named in a command; and no search engine answering, so the search is not offered.
+rm -rf "$tmp/fake" "$tmp/bd"; mkdir -p "$tmp/fake" "$tmp/bd"
+python3 - "$tmp/fake" <<'EOF'
+import json, sys
+def say(commands, done=False, tail=""):
+    return {"content": json.dumps({"analysis": "a", "plan": "p", "commands": commands, "task_complete": done}) + tail}
+body = "\n<<<BODY make\ncat > made.py <<'PY'\nd = {\"k\": [1, 2]}\nprint(\"}\" + str(d[\"k\"][1]))\nPY\npython3 made.py > made.out\n>>>BODY make\n"
+replies = [say([{"command": "@body:make", "wait_s": 10}], tail=body),
+           say([{"command": "@body:missing"}]),
+           say([], done=True), say([], done=True)]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake" \
+  ./comide -p "make it" --yes --model local:stand-in --root "$tmp/bd" > "$tmp/bd.out" 2> "$tmp/bd.err"
+same "exit 0" "0" "$?"
+same "the text ran as it was written" "}2" "$(cat "$tmp/bd/made.out" 2>/dev/null)"
+python3 - "$tmp/fake" > "$tmp/bd.sent" <<'EOF'
+import json, sys
+f = sys.argv[1]
+system = json.load(open(f + "/request-1.json"))["messages"][0]["content"]
+r3 = json.load(open(f + "/request-3.json"))["messages"]
+print("told", "<<<BODY NAME" in system)
+print("no search", "- web_search: " not in system and "- web_fetch: " in system)
+print("missing", "names a text" in r3[-1]["content"])
+EOF
+has "the model is told how to write a long text" "^told True$" "$tmp/bd.sent"
+has "with no search engine answering, the search is not offered" "^no search True$" "$tmp/bd.sent"
+has "a text named and not written is said back, and nothing runs" "^missing True$" "$tmp/bd.sent"
+
 say "== without a task, nothing is started"
 ./comide errand > /dev/null 2>&1
 same "exit 2" "2" "$?"
