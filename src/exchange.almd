@@ -3,7 +3,7 @@
 //
 // What the model reasoned before a reply goes back with that reply on the next call, as
 // `reasoning_content`. Without it the model decides each step not knowing what it
-// reasoned on the last. Measured on Workers AI (famulus6 Unit 0.3): glm-5.3 counts the
+// reasoned on the last. Measured on Workers AI: glm-5.3 counts the
 // field and can quote from it. Its makers say to send it back (Z.ai's thinking-mode
 // guide; Moonshot says the same of Kimi).
 

@@ -97,8 +97,7 @@ fn recall_note(task: String) -> String =
 
 // 3. The check by someone who was not there (COMIDE_CHECK=1). The tasks comide fails
 //    end the same way: the model writes a check of its own, the check passes, and it says
-//    complete; asking it again in the same conversation does not change its mind (measured,
-//    famulus6 Unit 0.3). So when it has said complete, the conversation is put away and a
+//    complete; asking it again in the same conversation does not change its mind (measured). So when it has said complete, the conversation is put away and a
 //    new one begins in the same terminal, holding only the task and this note: a reader
 //    with nothing invested in the work. It may fix what it finds, for at most CHECK_STEPS
 //    replies. It is told to leave the rest in place: a directive to clean up was what sank
@@ -122,13 +121,12 @@ fn check_task(task: String) -> String =
     + "When every requirement holds, include \"task_complete\": true in your JSON response."
 
 // terminus-2 asks this once when its model says it is done, and comide is held against
-// terminus-2. Asking was measured not to change results on its own (famulus6 Unit 0.3;
-// arXiv 2610.00917); it is here so the two differ in one thing less.
+// terminus-2. Asking was measured not to change results on its own (// arXiv 2610.00917); it is here so the two differ in one thing less.
 let CONFIRM_NOTE = "Are you sure the task is complete? Your work will be graded as it stands now and you will not be able to correct anything afterwards. If there is anything left to do or to check, do it. If you are sure, reply again without calling the tool."
 
 // A reply that reached the output limit with no tool call is not an answer: the model
-// was stopped while thinking, or mid-sentence. famulus6 took it as the final answer and
-// ended tasks with nothing written (its Unit 0.3). The model is told and goes on; after
+// was stopped while thinking, or mid-sentence. An earlier harness took it as the final answer and
+// ended tasks with nothing written. The model is told and goes on; after
 // this many in a row the run ends.
 let CUT_ROUNDS = 3
 let CUT_NOTE = "Your last reply reached the output limit before it finished, and no tool was called. Nothing was lost but that reply. Go on with the work: decide the next step and call the tool. Write long files in parts."

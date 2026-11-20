@@ -1,13 +1,13 @@
 // The one tool: a terminal that keeps its state and never holds the model up.
 //
 // Keeps its state: the working directory and the exported variables a command leaves
-// behind are there for the next one, as in a terminal a person types into. famulus6 gave
+// behind are there for the next one, as in a terminal a person types into. An earlier harness gave
 // every command a new shell, and a model that had run `cd build` or activated an
 // environment found itself somewhere else on the next call.
 //
 // Never holds the model up: a command gets `wait_s` seconds. When they pass it is not
 // killed; what it has printed so far goes back with a job number, and it runs on. The
-// model can wait for it again, read on, or stop it. famulus6 killed a command at 300 s
+// model can wait for it again, read on, or stop it. An earlier harness killed a command at 300 s
 // and had no way to leave one running. terminus-2, which comide is held against, sends
 // keystrokes with a duration and reads the screen whatever state it is in; this is that,
 // for a tool call. (An independent study of four harnesses found a shell that returns a
@@ -19,8 +19,8 @@
 //
 // Before the command, the model writes what it sees and what it means to do (`analysis`,
 // `plan`). They are read by nobody here; writing them is the point. terminus-2 asks the
-// same of every reply, and with the same model wrote 5 to 50 times what famulus6 did on
-// a task and passed more of them (famulus6 Unit 0.3).
+// same of every reply, and with the same model wrote 5 to 50 times what an earlier harness did on
+// a task and passed more of them.
 
 import fs
 import env

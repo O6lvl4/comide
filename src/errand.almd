@@ -5,7 +5,7 @@
 // The loop: ask the model for its next step, run what it says in the one terminal, send
 // what came back, and stop when it says twice that the task is complete. The model is
 // asked in writing by default (said.almd): no tool is sent and every reply is one JSON
-// object. This loop was first written and measured outside comide, as famulus7, against
+// object. This loop was first written and measured outside comide, against
 // Harbor's terminus-2 on the same model and tasks; the comments that speak of a measured
 // run speak of those.
 //

@@ -2,9 +2,9 @@
 //
 // Nothing is set that would make the model do less than it can:
 //
-//   - no reasoning effort is sent. The model reasons as its maker set it to; famulus6
+//   - no reasoning effort is sent. The model reasons as its maker set it to; an earlier harness
 //     sent `low` and the model wrote 5 to 50 times less than it did for terminus-2,
-//     which sends none (famulus6 Unit 0.3)
+//     which sends none
 //   - the output limit is the caller's and is large (errand.almd), because a model
 //     reasoning at its hardest spends most of a small one before it writes a word
 //
