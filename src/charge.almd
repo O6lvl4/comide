@@ -121,7 +121,8 @@ fn check_task(task: String) -> String =
     + "When every requirement holds, include \"task_complete\": true in your JSON response."
 
 // terminus-2 asks this once when its model says it is done, and comide is held against
-// terminus-2. Asking was measured not to change results on its own (// arXiv 2610.00917); it is here so the two differ in one thing less.
+// terminus-2. Asking was measured not to change results on its own
+// (arXiv 2610.00917); it is here so the two differ in one thing less.
 let CONFIRM_NOTE = "Are you sure the task is complete? Your work will be graded as it stands now and you will not be able to correct anything afterwards. If there is anything left to do or to check, do it. If you are sure, reply again without calling the tool."
 
 // A reply that reached the output limit with no tool call is not an answer: the model
