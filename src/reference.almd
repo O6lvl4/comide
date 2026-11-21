@@ -29,7 +29,8 @@ let ALMIDE_NOTE = "Almide (.almd files) is a language you may not know well, and
   + "`if` always has `then` and `else`; there is no `return`: a function's value is its last expression. "
   + "For the standard library: `almide query stdlib` prints the common modules' functions with their signatures, and `almide query outline @stdlib/MODULE` (string, list, int, map, fs, json, ...) one module's; both work in any directory. "
   + "`almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test FILE` runs its tests, and `almide explain E041` explains an error code. "
-  + "Check what you wrote with `almide check` before saying it works. To try a snippet that is not part of the project, write it under a temporary directory (mktemp -d), not into the project: inside a project `almide run` builds the whole project."
+  + "Check what you wrote with `almide check` before saying it works. To try a snippet that is not part of the project, write it under a temporary directory (mktemp -d), not into the project: inside a project `almide run` builds the whole project. "
+  + "If `almide run` refuses because the machine's rustc is too old, that is the machine and not your code: run it with `almide run FILE --target wasm`, which needs no rustc, and do not try to update the toolchain."
 
 // language, the program that must be on PATH, and what is said when no module is named.
 let LANGUAGES: List[(String, String, String)] = [("almide", "almide", ALMIDE_NOTE)]
