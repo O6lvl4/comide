@@ -6,6 +6,7 @@
 import json
 import env
 import fs
+import process
 import self.model
 import self.tools
 import self.toolkit
@@ -235,6 +236,34 @@ effect fn run_calls(opts: options.Options, setup: toolkit.Setup, calls: List[mod
   ran
 }
 
+// A tool holds this program until it is done (a map of a large directory, a solve of
+// minutes), and nothing could be drawn meanwhile: the first person to use 0.7.0 typed
+// "what is happening now?" into a silent screen. So a small program beside the tool
+// writes one line to the terminal, rewritten in place: that the tool is running and for
+// how long. It ends when the file named here appears, and says so by a second file, so
+// that its last write is never after the result's. "" when nothing is drawn.
+let TICKER = "s=$SECONDS; f=0; while [ ! -e \"$1\" ]; do case $((f % 4)) in 0) m='✻';; 1) m='✦';; 2) m='✧';; *) m='✶';; esac; "
+  + "printf '\\r\\033[33m%s Running %s…\\033[0m\\033[2m %ss\\033[0m\\033[K' \"$m\" \"$2\" $((SECONDS - s)) > /dev/tty; f=$((f + 1)); sleep 0.3; done; "
+  + "printf '\\r\\033[K' > /dev/tty; : > \"$1.gone\""
+
+effect fn ticking(opts: options.Options, setup: toolkit.Setup, what: String) -> String =
+  if not (opts.live and opts.ui.color) then ""
+  else {
+    let stop = setup.scratch + "/tick-" + int.to_string(datetime.now_ms())
+    match process.start(process.ProcessCommand { cmd: "bash", args: ["-c", TICKER, "tick", stop, what] }) {
+      ok(_) => stop,
+      err(_) => "",
+    }
+  }
+
+effect fn ticked(stop: String) -> Unit =
+  if stop == "" then ()
+  else {
+    let _ = fs.write_text(stop, "")
+    let t0 = datetime.now_ms()
+    while not fs.exists(stop + ".gone") and datetime.now_ms() - t0 < 1500 { env.sleep_ms(20) }
+  }
+
 effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCall, ran: Ran) -> Ran = {
   let u = opts.ui
   options.show(opts, "\n" + ui.call_line(u, c.name, tools.call_label(c.name, c.arguments)))!
@@ -266,7 +295,10 @@ effect fn run_call(opts: options.Options, setup: toolkit.Setup, c: model.ToolCal
       none => asking.Permission { run: true, allow_from_now: ran.allow, said: "" },
     }, ""),
   }
-  let r0 = if p.run then tools.run(setup, c.name, c.arguments)!
+  let tick = if p.run then ticking(opts, setup, c.name)! else ""
+  let ran0 = if p.run then some(tools.run(setup, c.name, c.arguments)!) else none
+  ticked(tick)!
+  let r0 = if p.run then (ran0 ?? toolkit.failed("", "not run"))
     else if refused != "" then toolkit.failed(refused, if held then (if setup.frozen == "plan" then "not run: plan mode" else "not run: this session only looks")
       else if pre.stopped then "not run: a hook" else "not run: the settings")
     else toolkit.failed(asking.declined(opts, p.said), if p.said == "" then "not run" else "not run: " + p.said)

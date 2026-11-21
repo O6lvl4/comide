@@ -20,6 +20,8 @@
 
 import process
 import io
+import env
+import fs
 
 type Key = { kind: String, text: String }
 
@@ -28,18 +30,30 @@ fn none_key() -> Key = key("none")
 
 // The arguments are this file's own constants and a `stty -g` string, which is letters,
 // digits, `:` and `=`; nothing here needs quoting.
-effect fn stty(args: List[String]) -> (Int, String) =
-  match process.output(process.ProcessCommand { cmd: "sh", args: ["-c", "stty " + list.join(args, " ") + " < /dev/tty"] }) {
-    ok(st) => (st.code, string.trim(st.stdout)),
+//
+// Since the epoch 15 stdlib the call that keeps the child on the terminal is
+// `process.run`: `process.output` puts it in a group of its own and a `stty` that sets
+// anything is stopped by SIGTTOU (seen 2026-11-21: the box was drawn over a terminal still
+// in line mode, echoing, and no key reached it). `run` captures nothing, so what stty
+// prints goes to a file of this process's own and is read from there.
+effect fn stty(args: List[String]) -> (Int, String) = {
+  let out = (env.get("TMPDIR") ?? "/tmp") + "/comide-stty-" + int.to_string(process.pid())
+  let line = "stty " + list.join(args, " ") + " < /dev/tty > '" + string.replace(out, "'", "'\\''") + "' 2> /dev/null"
+  match process.run(process.ProcessCommand { cmd: "sh", args: ["-c", line] }) {
+    ok(code) => (code, string.trim(fs.read_text(out) ?? "")),
     err(e) => (-1, e),
   }
+}
 
 // Whether stdin is a terminal at all. A pipe gets the line reader, not this. This one
-// does use `exec_status_timeout`, because it is the call that passes stdin on, and
-// `test -t` only looks.
+// uses `process.run`, because it is the call that passes stdin on, and `test -t` only
+// looks. (`process.output` gives the child a stdin of its own: with it this said "not a
+// terminal" on every terminal, and from the move to the epoch 15 stdlib until 0.7.1 the
+// conversation had no input box, no Esc and a line reader that cannot erase a wide
+// character.)
 effect fn is_tty() -> Bool =
-  match process.output(process.ProcessCommand { cmd: "sh", args: ["-c", "test -t 0"], timeout_ms: 3000 }) {
-    ok(st) => st.code == 0,
+  match process.run(process.ProcessCommand { cmd: "sh", args: ["-c", "test -t 0"], timeout_ms: 3000 }) {
+    ok(code) => code == 0,
     err(_) => false,
   }
 
