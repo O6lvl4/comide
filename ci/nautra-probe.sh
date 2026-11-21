@@ -39,6 +39,8 @@ tools = [
     # golemide's edit, there when it is here as a component: a passage quoted with the
     # wrong indentation still lands.
     {"tool": "edit", "args": {"path": "hewn.py", "old": "def unusual_name():\n  return 41 + 1", "new": "def unusual_name():\n    return 40 + 2"}},
+    # and a file that does not parse is refused by the grammars linked into the component.
+    {"tool": "write", "args": {"path": "broken.py", "content": "def f(a, b:\n    return (a + b\n"}},
 ]
 probe = tools + [
     {"command": f"cat {P}/keys/.env; echo keyfile=$?"},
@@ -75,7 +77,7 @@ LOCAL_API_KEY=the-real-key-777 READS=$reads DENY_READ="$P/keys" RUNS="$P/runs" M
   PROVIDER_NET="127.0.0.1:$port" sh "$here/nautra/run.sh" "probe" --root "$P/root" > "$P/out.txt" 2>&1 || code=$?
 echo "run=$code"
 python3 - "$P" <<'EOF'
-import json, re, sys
+import json, os, re, sys
 P = sys.argv[1]
 sent = json.load(open(P + "/fake/request-2.json"))
 said = sent["messages"][-1]["content"]
@@ -87,6 +89,7 @@ system = json.load(open(P + "/fake/request-1.json"))["messages"][0]["content"]
 print("tools-told=" + str("- read: " in system and "- write: " in system and "- reference: " in system and "- shell: " not in system))
 print("tool-wrote=" + str("wrote tooled/note.txt: 2 lines" in said or '"ok":true,"path":"tooled/note.txt"' in said))
 if "- edit: " in system:
+    print("golemide-gate=" + str("refused by the syntax gate" in said and not os.path.exists(P + "/root/broken.py") and "gramide (linked)" in said))
     print("golemide-edit=" + str("return 40 + 2" in open(P + "/root/hewn.py").read() and "matched ignoring" in said))
 first_read = said.split("(tool read")[1].split("(tool ")[0]
 print("tool-read=" + str("line one" in first_read and '"quoted" {braces}' in first_read))

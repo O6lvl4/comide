@@ -209,8 +209,8 @@ nautra の上では、エージェントは鍵を持たない WebAssembly コン
 読み取り専用で渡されるだけです。[golemide](https://github.com/O6lvl4/golemide) の編集が
 コンポーネントとしてあれば（`GOLEMIDE_EDIT_WASM`、または隣の golemide の
 `build/golemide-edit.wasm`）、`edit` と `write` は golemide のものになります。うろ覚えの引用にも
-合わせ、ファイルを空にしません。コンポーネントは検査のプログラムを起こせないので、そこでは
-構文は確かめず、答えにそう書かれます。
+合わせ、ファイルを空にしません。コンポーネントは検査のプログラムを起こせないので、自分に
+組み込んだ文法で読み、構文の通らない書き込みは断ります。
 
 このループは先に comide の外で書いて測りました。同じモデルで Terminal-Bench 2 のタスクを
 解かせると、Harbor の terminus-2 とほぼ同じ数が通ります。

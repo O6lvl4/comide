@@ -217,8 +217,8 @@ symbol, range or match, `outline`, `search` and `tree`, each started with the pr
 read-only and nothing else. When [golemide](https://github.com/O6lvl4/golemide)'s edit is
 there as a component (`GOLEMIDE_EDIT_WASM`, or `build/golemide-edit.wasm` in a golemide
 beside comide), `edit` and `write` are golemide's: a passage quoted from memory is found,
-a file is not blanked. As a component it starts no checker, so syntax is not checked
-there and its answer says so.
+a file is not blanked. As a component it starts no checker; it reads a write with the
+grammars linked into it and refuses one that does not parse.
 
 The loop was written and measured outside comide first, against Harbor's terminus-2 on
 Terminal-Bench 2 tasks with the same model, and passes about as many.

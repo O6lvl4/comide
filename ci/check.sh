@@ -512,6 +512,7 @@ else
   # golemide's edit as a component (golemide's ci/build-wasm.sh), when it is here.
   if grep -q '^golemide-edit=' "$tmp/probe.out"; then
     has "golemide edits a file from inside its sandbox, the passage quoted loosely" "^golemide-edit=True$" "$tmp/probe.out"
+    has "and refuses a file that does not parse, with no checker program to run" "^golemide-gate=True$" "$tmp/probe.out"
   else
     say "skipped: no golemide edit component (GOLEMIDE_EDIT_WASM, or ../golemide/build/golemide-edit.wasm)"
   fi

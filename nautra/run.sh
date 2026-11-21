@@ -159,21 +159,21 @@ done
     # Changing a file is golemide's when its edit is here as a component
     # (GOLEMIDE_EDIT_WASM, or build/golemide-edit.wasm in a golemide beside comide): an
     # edit that finds a passage quoted from memory, and a write that will not blank a
-    # file. As a component it starts no checker, so it says nothing was checked.
+    # file. As a component it starts no checker; it reads with the grammars linked into it.
     gol=${GOLEMIDE_EDIT_WASM-$here/../golemide/build/golemide-edit.wasm}
     if [ -n "$gol" ] && [ -f "$gol" ]; then
       gol=$(cd "$(dirname "$gol")" && pwd)/$(basename "$gol")
       echo
       echo "[tools.edit]"
       echo "image = $(quoted "$gol")"
-      echo 'description = "Change part of a file of the project: old is the passage as it is now, new what replaces it. Copy old from what read showed, without the line numbers; indentation need not be exact. For passages of more than a few lines give old and new as texts after the object (@body:NAME). The answer is JSON: ok, a diff, or the reason it was refused. Syntax is not checked here (checked_by is empty): run the project'"'"'s own check after."'
+      echo 'description = "Change part of a file of the project: old is the passage as it is now, new what replaces it. Copy old from what read showed, without the line numbers; indentation need not be exact. For passages of more than a few lines give old and new as texts after the object (@body:NAME). The answer is JSON: ok, a diff and what checked the result (checked_by), or the reason it was refused. A result that does not parse is refused (Almide, Go, Rust, Python, JavaScript, TypeScript; brackets for the C family); an empty checked_by means nothing checked it."'
       echo 'input = { type = "object", properties = { path = { type = "string" }, old = { type = "string" }, new = { type = "string" } }, required = ["path", "old", "new"] }'
       echo "mounts = [$(list "$root:/work")]"
       echo "env = [$(list "GOLEMIDE_ROOT=/work" "GOLEMIDE_HOST_ROOT=$root")]"
       echo
       echo "[tools.write]"
       echo "image = $(quoted "$gol")"
-      echo 'description = "Write a file of the project, whole: a new file, or a complete rewrite. Give the content as a text after the object (@body:NAME). It writes nowhere but the project and will not blank a file. The answer is JSON: ok, a diff, or the reason it was refused. Syntax is not checked here."'
+      echo 'description = "Write a file of the project, whole: a new file, or a complete rewrite. Give the content as a text after the object (@body:NAME). It writes nowhere but the project and will not blank a file. The answer is JSON: ok, a diff and what checked the file (checked_by), or the reason it was refused. A file that does not parse is refused (Almide, Go, Rust, Python, JavaScript, TypeScript; brackets for the C family); an empty checked_by means nothing checked it."'
       echo 'input = { type = "object", properties = { path = { type = "string" }, content = { type = "string" } }, required = ["path", "content"] }'
       echo "mounts = [$(list "$root:/work")]"
       echo "env = [$(list "GOLEMIDE_ROOT=/work" "GOLEMIDE_HOST_ROOT=$root" "GOLEMIDE_CREATE=1")]"
