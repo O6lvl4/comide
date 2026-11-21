@@ -13,6 +13,27 @@ import self.briefing
 // run went and why it stopped instead of a killed process (O6lvl4/comide#3).
 let REPORT_MARGIN_S = 30
 
+// golemide's answer in what a run printed: the first line that is a JSON object. The
+// output is stdout and then stderr, and a runner may say things of its own on either
+// (porta, with no user namespace to use, says so on every call). Reading the whole output
+// as JSON took such a line for a failure: inside a container every edit was written and
+// then reported as failed, and the model wrote it again on top of itself.
+fn answer_of(out: String) -> Result[Value, String] =
+  match list.find(list.filter_map(string.split(out, "\n"), (l) => match json.parse(string.trim(l)) { ok(v) => some(v), err(_) => none }),
+    (v) => result.is_ok(value.as_object(v))) {
+    some(v) => ok(v),
+    none => err("no JSON object in the output"),
+  }
+
+test "golemide's answer is found among what a runner says around it" {
+  let answer = "{\"ok\":true,\"path\":\"a.py\",\"bytes\":3}"
+  assert_eq(result.map(answer_of(answer), (v) => value.get_bool(v, "ok")), ok(some(true)))
+  assert_eq(result.map(answer_of(answer + "\n[porta] no user namespace here: confining with Landlock alone"), (v) => value.get_string(v, "path")), ok(some("a.py")))
+  assert_eq(result.map(answer_of("[porta] note\n" + answer + "\nprogress 1/3"), (v) => value.get_int(v, "bytes")), ok(some(3)))
+  assert(result.is_err(answer_of("golemide: not found")))
+  assert(result.is_err(answer_of("3\n\"text\"\n")))
+}
+
 // golemide edit reads its request on stdin; the request goes through a file so the
 // timeout-bounded runner, which has no stdin, can still be used.
 effect fn golemide_edit(s: toolkit.Setup, request: Value, create: Bool) -> toolkit.ToolResult = {
@@ -21,7 +42,7 @@ effect fn golemide_edit(s: toolkit.Setup, request: Value, create: Bool) -> toolk
   let script = "exec \"$0\" edit --root \"$1\"" + (if create then " --create" else "") + " < \"$2\""
   let (code, out) = toolkit.run_in(s, "solve", "bash", ["-c", script, s.golemide, s.root, req_path], 60)!
   let _ = fs.remove(req_path)
-  match json.parse(out) {
+  match answer_of(out) {
     err(_) => toolkit.failed("golemide edit failed (exit " + int.to_string(code) + "): " + string.take(out, 2000), "golemide edit failed (exit " + int.to_string(code) + ")"),
     ok(r) => if value.get_bool(r, "ok") ?? false then written(s, r)!
       else toolkit.failed(toolkit.capped(s, "Not written: " + toolkit.str_arg(r, "error"))!, "refused: " + toolkit.first_line_of(toolkit.str_arg(r, "error"), 90)),
@@ -116,15 +137,31 @@ effect fn solve(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
     + ["--deadline", int.to_string(int.max(s.solve_timeout_s - REPORT_MARGIN_S, REPORT_MARGIN_S))]
   let (code, out) = toolkit.run_in(s, "solve", s.golemide, args, s.solve_timeout_s)!
   // stdout is one JSON object; stderr, which run_program appends, is progress.
-  let first_line = list.first(string.split(out, "\n")) ?? ""
-  let parsed = json.parse(first_line)
+  let parsed = answer_of(out)
   let text = match parsed {
     ok(doc) => solve_summary(doc),
-    err(_) => "golemide solve failed (exit " + int.to_string(code) + "):\n" + out,
+    err(_) => no_answer(code, out, s.solve_timeout_s),
   }
   let spent = match parsed { ok(doc) => value.get_float(doc, "cost_usd") ?? 0.0, err(_) => 0.0 }
   let solved = match parsed { ok(doc) => value.get_bool(doc, "ok") ?? false, err(_) => false }
   toolkit.ToolResult { text: toolkit.capped(s, text)!, brief: toolkit.first_line_of(text, 90), failed: not solved, cost_usd: spent }
+}
+
+// What the model is told when solve came back with no report. A run that was stopped for
+// time (exit -1, nothing printed) used to read "golemide solve failed (exit -1):" and
+// nothing else: the model could not tell a crash from a slow test suite, and did not know
+// that the files may have been changed.
+fn no_answer(code: Int, out: String, timeout_s: Int) -> String =
+  if code == -1 and string.trim(out) == "" then
+    "solve was stopped after " + int.to_string(timeout_s) + " s without finishing, and gave no report. "
+      + "Whatever it had written is still in the files: read them before changing anything, and run the verify command yourself with shell to see where things stand and how long it takes. "
+      + "If the command alone takes more than a minute or two, give solve a faster one (fewer tests, a smaller input) or make the remaining changes yourself."
+  else "golemide solve failed (exit " + int.to_string(code) + "):\n" + out
+
+test "a solve stopped for time says so, and that the files may have changed" {
+  assert(string.starts_with(no_answer(-1, "", 300), "solve was stopped after 300 s"))
+  assert(string.contains(no_answer(-1, "", 300), "still in the files"))
+  assert_eq(no_answer(2, "golemide: no key", 300), "golemide solve failed (exit 2):\ngolemide: no key")
 }
 
 // The golemide this was built against: `edit` and `solve --json` arrived in 0.2.0, and
