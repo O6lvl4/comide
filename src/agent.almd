@@ -101,7 +101,7 @@ let COMMANDS = [
 ]
 
 let KEYS_HELP = """
-  enter send · alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
+  enter send · shift+enter, alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
   esc or ctrl+c while comide works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
 """
 
