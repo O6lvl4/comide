@@ -239,6 +239,25 @@ text after the object, as it is, between a `<<<BODY NAME` line and a `>>>BODY NA
 line, and name it where it is meant (`"content": "@body:NAME"`). `web_search` is offered
 only when a search engine answers at the start.
 
+What the model reads is material, not orders: a file, a README, a command's output, an
+issue quoted in the task. The model is told so, and told to leave undone what such a
+text asks for beyond the task, and to say that it did. Under nautra there is a check
+besides the telling. Whoever gives the task can mark what is quoted in it:
+
+```
+Fix the crash described below.
+<<<QUOTED k3f9
+(the issue, as it was filed)
+>>>QUOTED k3f9
+```
+
+The name is yours; one the quoted text could not have guessed keeps that text from
+closing the mark itself. A command the model then writes is compared with the quoted
+part and with everything it has been shown since: a command line found there letter for
+letter, and not in your own words, is not run, and the model is told why. A command the
+model wrote in other words passes: this stops an order carried out as it was written,
+not every way of following one.
+
 ## A confined terminal
 
 `comide --confined` keeps the conversation where it is and puts the terminal somewhere it
