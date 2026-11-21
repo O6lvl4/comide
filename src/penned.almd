@@ -73,7 +73,7 @@ fn system_prompt(root: String, without: List[String]) -> String = string.trim(ch
 
 You are comide, a coding assistant, working with a user in the project at ${root}. The terminal starts there. What the user asks may be a task or a question; when you set "task_complete", your "analysis" is what the user reads as your answer: say what you changed and how you know it works, or answer the question, in the language the user wrote in. If nothing checked the work, say so. A question that needs no command is answered at once, with "commands" empty and "task_complete" true.
 
-A command of yours may be put to the user before it runs, and the user may decline it.
+A command of yours may be put to the user before it runs, and the user may decline it. The user sees each command and the first lines of what it printed, not all of it: when the user asked for a result, put the result itself in your answer, not a report that it was printed.
 
 Besides the terminal you have comide's tools. A command object may also be:
 - {"tool": "NAME", "args": {...}}: run one of the tools below, with its arguments. It is run by comide, not in the terminal, in the order you wrote it, and its result is shown to you like a command's output.
@@ -181,8 +181,22 @@ fn command_failed(text: String) -> Bool = {
   string.starts_with(last, "[exit code ") and last != "[exit code 0]"
 }
 
+// What a command printed, as the person sees it: its first lines, and how many more there
+// were. The last line (the exit code, or that it is still running) is the result line's.
+// Without this the person saw `[exit code 0]` and nothing of what they had asked to see.
+let OUTPUT_LINES = 10
+
+fn output_shown(u: ui.Ui, text: String) -> String = {
+  let all = string.split(string.trim(text), "\n")
+  let body = list.take(all, int.max(0, list.len(all) - 1))
+  let first = list.take(body, OUTPUT_LINES)
+  let more = list.len(body) - list.len(first)
+  let lines = list.map(first, (l) => "    " + ui.dim(u, string.take(l, int.max(20, u.width - 6))))
+  list.join(if more > 0 then lines + ["    " + ui.dim(u, "… " + int.to_string(more) + " more lines")] else lines, "\n")
+}
+
 // What the orders of one reply came to.
-type Ran = { sh: shell.Shell, allow: Bool, seen: String, spent: Float, work: watch.Work, sigs: List[String] }
+type Ran ={ sh: shell.Shell, allow: Bool, seen: String, spent: Float, work: watch.Work, sigs: List[String] }
 
 // The orders of one reply, in order. A command the person or the settings stop is not
 // run, and the orders after it in the same reply are not run either: they were written
@@ -224,6 +238,8 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
         shell.keep(sh)!
         let post = if command == "" then hooks.quiet() else turn.hooked(opts, setup, "PostToolUse", "shell", value.object([("command", value.string(o.command))]), string.take(text, 20000), "")!
         let bad = command_failed(text)
+        let printed = output_shown(opts.ui, text)
+        if printed != "" then options.show(opts, printed)! else ()
         options.show(opts, ui.result_line(opts.ui, charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", int.max(20, opts.ui.width - 6))
           + (if post.stopped then " · a hook objects" else ""), bad or post.stopped))!
         list.push(parts, said.shown(o) + "\n" + text + (if post.stopped then "\n\n[A check the user set up objects to this:]\n" + post.reason else ""))

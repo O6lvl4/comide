@@ -208,7 +208,12 @@ effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResul
 // conversation without it: asked to run the tests of a Python project, the model's
 // first command was `npm test`.
 effect fn project_context(s: toolkit.Setup) -> String = {
-  let (_, tree) = toolkit.run_in(s, "read", "hew", ["tree", s.root, "--depth", "2"], 30)!
+  // The tree is given three seconds. In a directory of many repositories it took thirty
+  // and more, and that was the wait before the first prompt; there the top level is
+  // listed in its place.
+  let (tree_code, deep) = toolkit.run_in(s, "read", "hew", ["tree", s.root, "--depth", "2"], 3)!
+  let tree = if tree_code == 0 and string.trim(deep) != "" then deep
+    else toolkit.run_in(s, "read", "bash", ["-c", "cd " + toolkit.shell_quote(s.root) + " && ls -p | head -80"], 5)!.1
   let (git_code, git) = toolkit.run_in(s, "read", "bash", ["-c", "cd " + toolkit.shell_quote(s.root) + " && git branch --show-current && git status --short | head -20"], 30)!
   let tree_part = string.take(toolkit.relative(s, tree), 3000)
   let git_part = if git_code == 0 then "\n\ngit branch and uncommitted changes:\n" + git else "\n\nnot a git repository"
