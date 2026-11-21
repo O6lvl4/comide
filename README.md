@@ -140,17 +140,26 @@ prompt left out. It goes to `~/.comide/exports/`, or to the file you name.
 
 ## Going back to before a request
 
-Before each request comide keeps the project's files as they are, and `/rewind` puts them
-back: pick a request of this run, and then the conversation, the files, or both. What
-the request changed is as it was, what it removed is back, what it made is gone.
+`/rewind` goes back to before a request of the conversation: pick the request, and then
+the conversation, the files, or both. When the conversation goes back, the request is
+put in the input box again, to send as it was or to write anew.
 
-The files are kept with git, in a repository of comide's own under
-`~/.comide/checkpoints/`: your project's repository is not touched, and nothing is
-committed or staged there. What your `.gitignore` leaves out is neither kept nor put
-back. Two things to know: what a command did outside the project (a database, a remote,
-an installed package) is not undone, and files you changed yourself since that request
-go back with the rest. `COMIDE_CHECKPOINTS=0` keeps nothing; a project that is your
-home directory is never kept.
+The files are copies. The moment before comide first changes a file in a request, it
+copies the file as it is: before `edit` and `write`, the file they name; before a
+terminal command, the files the command names (`rm notes.txt`, `sed -i … src/a.py`,
+`echo x > out.txt`). Going back writes the copies over what is there and removes what
+was made. Nothing is copied until something is about to change, so a request that only
+reads costs nothing, in a project of any size. The copies are under
+`~/.comide/checkpoints/`, by project and conversation, readable by you only, kept for
+two weeks, and they have nothing to do with version control: no repository is read,
+written or made, yours included. Because they are kept under the conversation's name, a
+conversation taken up again (`--continue`, `/resume`) can still go back.
+
+What does not go back, and `/rewind` lists what it can see of it: a file a command
+changed without naming it (a formatter run over a directory, a build, a script that
+writes files), what `solve` changed, and anything outside the project (a database, a
+remote, an installed package). A file you changed yourself after comide did goes back
+with the rest. `COMIDE_CHECKPOINTS=0` keeps nothing.
 
 ## Commands
 

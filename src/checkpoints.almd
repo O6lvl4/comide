@@ -1,57 +1,134 @@
-// The project's files as they stood before a request, so that /rewind can put them back.
+// The files comide is about to change, kept as they were, so that /rewind can put them back.
 //
-// Kept with git, in a repository of comide's own beside the sessions
-// (~/.comide/checkpoints/<project>), whose work tree is the project. The project's own
-// repository, if it has one, is not touched: nothing is committed, staged or stashed
-// there. What the project's .gitignore leaves out is left out here too, so a build
-// directory or node_modules is neither kept nor put back.
+// A copy of each file, taken the moment before comide first changes it in a request:
 //
-//   COMIDE_CHECKPOINTS=0   keep none (and /rewind then goes back in the conversation only)
+//   - before `edit` and `write`, the file they name;
+//   - before a terminal command, the files the command names (`rm notes.txt`,
+//     `sed -i … src/a.py`, `echo x > out.txt`), as far as its words can be read.
 //
-// Not kept: a project that is the home directory or the root of the disk (the first
-// snapshot would read everything there), and anything when git is not installed.
+// Nothing is kept until something is about to change, so a request that only reads
+// costs nothing, in a project of any size. The copies are under
+// ~/.comide/checkpoints/<project>/<run>/<request>/, readable by the person only, and
+// have nothing to do with the project's version control: no repository is read, written
+// or made.
+//
+// What this cannot put back, and /rewind says so: what a command changed without naming
+// it (a formatter run over a directory, a build, a script that writes files), what
+// `solve` changed, and anything outside the project.
+//
+//   COMIDE_CHECKPOINTS=0   keep nothing (/rewind then goes back in the conversation only)
 
 import env
 import process
 import self.place
 
-// A snapshot may take this long; a project too big for it gets no checkpoint, said once.
-let LIMIT_MS = 20000
+// A file larger than this is not copied.
+let LARGEST = 20000000
+// How many of a command's words are looked at.
+let WORDS = 60
 
-fn dir_for(home: String, root: String) -> String = home + "/.comide/checkpoints/" + place.key_of(root)
+fn base_for(home: String, root: String, run: String) -> String = home + "/.comide/checkpoints/" + place.key_of(root) + "/" + run
 
-effect fn wanted(home: String, root: String) -> Bool =
-  string.trim(env.get("COMIDE_CHECKPOINTS") ?? "") != "0" and home != "" and root != home and root != "/" and root != ""
+effect fn wanted(home: String) -> Bool = string.trim(env.get("COMIDE_CHECKPOINTS") ?? "") != "0" and home != ""
 
-// $1 the repository, $2 the project. The index is the project as it is now.
-let PREPARE = "set -e; G=\"$1\"; R=\"$2\"; export GIT_DIR=\"$G\" GIT_WORK_TREE=\"$R\"; cd \"$R\"; "
-  + "[ -f \"$G/HEAD\" ] || { mkdir -p \"$G\"; git init -q; git config gc.auto 0; git config core.autocrlf false; }; "
-  + "git add -A . > /dev/null 2>&1; "
-
-effect fn git(script: String, args: List[String]) -> (Int, String) =
-  match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", PREPARE + script, "comide"] + args, timeout_ms: LIMIT_MS }) {
-    ok(st) => (st.code, string.trim(st.stdout)),
+effect fn sh(script: String, args: List[String], timeout_ms: Int) -> (Int, String) =
+  match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", script, "comide"] + args, timeout_ms: timeout_ms }) {
+    ok(st) => (st.code, string.trim_end(st.stdout)),
     err(_) => (1, ""),
   }
 
-// The project as it is now, kept: the name of the snapshot, or "" when none could be made.
-effect fn take(home: String, root: String) -> String =
-  if not wanted(home, root)! then ""
+// A request begins: the place its copies go, with the moment written down. "" when
+// nothing is kept. Runs of this project older than two weeks are cleared away first.
+effect fn begin(home: String, root: String, run: String, n: Int) -> String =
+  if not wanted(home)! then ""
   else {
-    let (code, out) = git("git -c user.name=comide -c user.email=comide@localhost commit-tree -m checkpoint \"$(git write-tree)\"", [dir_for(home, root), root])!
-    if code == 0 then out else ""
+    let dir = base_for(home, root, run) + "/" + int.to_string(n)
+    let (code, _) = sh("umask 077; find \"$2\" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2> /dev/null; mkdir -p \"$1/files\" && : > \"$1/stamp\" && : >> \"$1/made\"",
+      [dir, home + "/.comide/checkpoints/" + place.key_of(root)], 10000)!
+    if code == 0 then dir else ""
   }
 
-// What differs now from a snapshot, a line each: `M path` changed, `A path` not there
-// then, `D path` gone since.
-effect fn changed(home: String, root: String, snapshot: String) -> List[String] = {
-  let (code, out) = git("git diff --cached --name-status \"$3\"", [dir_for(home, root), root, snapshot])!
-  if code != 0 or out == "" then [] else list.map(string.split(out, "\n"), (l) => string.replace(l, "\t", " "))
+// $1 the request's place, $2 the project; then the files, each a full path. One that
+// begins with `+` is kept as "not there" when it is not there, so that it can be removed
+// again; without it, only a file that exists is copied. A file kept once in a request is
+// not kept again: the first copy is the one from before the request.
+let KEEP = "umask 077; d=\"$1\"; r=\"$2\"; shift 2; for item in \"$@\"; do "
+  + "new=0; case \"$item\" in +*) new=1; p=$(printf '%s' \"$item\" | cut -c2-);; *) p=\"$item\";; esac; "
+  + "case \"$p\" in \"$r\"/*) rel=$(printf '%s' \"$p\" | awk -v r=\"$r/\" '{ print substr($0, length(r) + 1) }');; *) continue;; esac; "
+  + "case \"/$rel/\" in */../*|*/./*) continue;; esac; "
+  + "[ -e \"$d/files/$rel\" ] && continue; grep -qxF -- \"$rel\" \"$d/made\" 2> /dev/null && continue; "
+  + "if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then [ \"$(wc -c < \"$p\")\" -le \"$LARGEST\" ] && mkdir -p \"$(dirname \"$d/files/$rel\")\" && cp -p \"$p\" \"$d/files/$rel\"; "
+  + "elif [ $new = 1 ] && [ ! -e \"$p\" ]; then printf '%s\\n' \"$rel\" >> \"$d/made\"; fi; done; exit 0"
+
+effect fn keep(dir: String, root: String, items: List[String]) -> Unit =
+  if dir == "" or list.is_empty(items) then ()
+  else { let _ = sh("LARGEST=" + int.to_string(LARGEST) + "; " + KEEP, [dir, root] + items, 20000)!; () }
+
+// Before `edit` or `write`: the file it names, as it is, or noted as not there yet.
+effect fn before_write(dir: String, root: String, path: String) -> Unit = keep(dir, root, ["+" + full(root, path)])!
+
+// Before a terminal command: the files its words name.
+effect fn before_command(dir: String, root: String, command: String) -> Unit = keep(dir, root, list.map(named_in(command), (w) => marked(root, w)))!
+
+fn full(root: String, path: String) -> String = if string.starts_with(path, "/") then path else root + "/" + (string.strip_prefix(path, "./") ?? path)
+
+fn marked(root: String, word: String) -> String = match string.strip_prefix(word, "+") {
+  some(w) => "+" + full(root, w),
+  none => full(root, word),
 }
 
-// The project put back as the snapshot has it: what was made since is removed, what was
-// changed or removed is written again. Files the snapshot never saw (ignored ones) stay.
-effect fn restore(home: String, root: String, snapshot: String) -> Result[Unit, String] = {
-  let (code, _) = git("git diff --cached --name-only --diff-filter=A -z \"$3\" | xargs -0 rm -f --; git checkout -q \"$3\" -- .", [dir_for(home, root), root, snapshot])!
-  if code == 0 then ok(()) else err("the files could not be put back (git said no); nothing else was changed")
+// The words of a command that may be files: every word that is not an option, and with
+// a `+` before it the one a `>` writes to (a file that may not be there yet).
+fn named_in(command: String) -> List[String] = {
+  var flat = command
+  for sep in ["\n", "\t", ";", "|", "&", "(", ")", "\"", "'", "=", "<", "`", "$", "{", "}"] { flat = string.replace(flat, sep, " ") }
+  let words = list.filter(string.split(string.replace(flat, ">", " > "), " "), (w) => w != "")
+  var out: List[String] = []
+  var written = false
+  for w in words {
+    if w == ">" then { written = true }
+    else {
+      let item = (if written then "+" else "") + w
+      if not string.starts_with(w, "-") and not string.starts_with(w, "~") and not list.contains(out, item) then list.push(out, item)
+      written = false
+    }
+  }
+  list.take(out, WORDS)
+}
+
+// What a request's place holds, a line each: `M path` copied as it was, `A path` not
+// there then.
+effect fn kept(dir: String) -> List[String] = {
+  let (_, out) = sh("cd \"$1/files\" 2> /dev/null && find . -type f | sed 's|^\\./|M |'; sed 's|^|A |' \"$1/made\" 2> /dev/null", [dir], 10000)!
+  list.filter(string.split(out, "\n"), (l) => string.trim(l) != "")
+}
+
+// The files as they were before the oldest of these requests. `dirs` is the requests to
+// go back over, the latest first: each is undone in turn, so the oldest copy of a file
+// is the one that stays.
+effect fn restore(dirs: List[String], root: String) -> Result[Unit, String] = {
+  var failed = false
+  for d in dirs {
+    let (code, _) = sh("d=\"$1\"; r=\"$2\"; cd \"$d/files\" || exit 1; find . -type f | sed 's|^\\./||' | while IFS= read -r f; do mkdir -p \"$(dirname \"$r/$f\")\" && cp -p \"$f\" \"$r/$f\" || exit 1; done || exit 1; "
+      + "while IFS= read -r f; do [ -n \"$f\" ] && rm -f -- \"$r/$f\"; done < \"$d/made\"; exit 0", [d, root], 60000)!
+    if code != 0 then { failed = true }
+  }
+  if failed then err("some files could not be put back; the copies are still in " + (list.last(dirs) ?? "")) else ok(())
+}
+
+// Files in the project changed after a request began that were not kept: changed by a
+// command that did not name them, or by the person. They are not put back. Version
+// control's own directory and the usual places for what is built are not looked in.
+effect fn loose(dir: String, root: String, have: List[String]) -> List[String] = {
+  let (_, out) = sh("find \"$2\" \\( -name .git -o -name node_modules -o -name target -o -name .venv -o -name __pycache__ \\) -prune -o -type f -newer \"$1/stamp\" -print 2> /dev/null | head -400", [dir, root], 5000)!
+  let names = list.map(have, (l) => string.drop(l, 2))
+  list.filter(list.filter_map(string.split(out, "\n"), (p) => string.strip_prefix(p, root + "/")), (rel) => not list.contains(names, rel))
+}
+
+test "the words of a command that may be files" {
+  assert_eq(named_in("rm -f keep.txt && sed -i 's/a/b/' src/a.py"), ["rm", "keep.txt", "sed", "s/a/b/", "src/a.py"])
+  assert_eq(named_in("echo two > a.txt; cat b.txt >> log.txt"), ["echo", "two", "+a.txt", "cat", "b.txt", "+log.txt"])
+  assert_eq(marked("/p", "+a.txt"), "+/p/a.txt")
+  assert_eq(marked("/p", "./src/a.py"), "/p/src/a.py")
+  assert_eq(marked("/p", "/p/x"), "/p/x")
 }

@@ -24,6 +24,7 @@ import io
 import json
 import self.asking
 import self.charge
+import self.checkpoints
 import self.convo
 import self.exchange
 import self.goal
@@ -231,8 +232,11 @@ fn output_shown(u: ui.Ui, text: String) -> String = {
 // One call of the terminal, with the wait shown: a line rewritten in place that says the
 // command is running, for how long, and the last thing it printed. Esc stops the command.
 // Where nothing is drawn (a run with nobody there) it is shell.call.
-effect fn watched_call(opts: options.Options, setup: toolkit.Setup, sh: shell.Shell, a: Value) -> (shell.Shell, String) =
+effect fn watched_call(opts: options.Options, setup: toolkit.Setup, sh: shell.Shell, a: Value) -> (shell.Shell, String) = {
+  // The files the command names are kept as they are first (checkpoints.almd).
+  checkpoints.before_command(setup.keep_dir, setup.root, value.get_string(a, "command") ?? "")!
   if setup.door_url != "" then confined_call(opts, setup, a)! else local_call(opts, sh, a)!
+}
 
 // The same order, carried out behind nautra's door (confined.almd). The terminal's state
 // is in the same directory, written there by the confined program; it is read again

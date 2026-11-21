@@ -103,8 +103,9 @@ type Prompted = { kind: String, text: String }
 
 type Box = { ed: Ed, above: Int, history_at: Int, draft: String, armed: Bool }
 
-effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: String, commands: List[Command]) -> Prompted = {
-  var b = Box { ed: textbox.empty(), above: 0, history_at: list.len(history), draft: "", armed: false }
+// `initial` is what the box holds when it opens, "" for nothing.
+effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: String, commands: List[Command], initial: String) -> Prompted = {
+  var b = Box { ed: if initial == "" then textbox.empty() else textbox.of(initial), above: 0, history_at: list.len(history), draft: "", armed: false }
   var result: Prompted? = none
   // Only while the box is read: a program run in a turn must not be left with keys told
   // in a way it does not know.

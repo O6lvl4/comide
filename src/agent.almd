@@ -279,12 +279,14 @@ fn status_of(opts: options.Options, place: Place, s: options.Session) -> String 
 
 // One line of the conversation from the person: the input box on a terminal, a plain
 // line from a pipe. `none` is the end of the conversation.
-effect fn next_line(opts: options.Options, place: Place, s: options.Session, history: List[String]) -> String? =
+// `draft` is what the box starts with: the request /rewind went back to before, to be
+// sent again or written anew.
+effect fn next_line(opts: options.Options, place: Place, s: options.Session, history: List[String], draft: String) -> String? =
   if opts.tui then {
     var got: String? = none
     var asking = true
     while asking {
-      let p = editor.prompt(opts.ui, history, "ask, or tell comide what to change  ·  / for commands", status_of(opts, place, s), COMMANDS)!
+      let p = editor.prompt(opts.ui, history, "ask, or tell comide what to change  ·  / for commands", status_of(opts, place, s), COMMANDS, draft)!
       if p.kind == "send" then { got = some(p.text); asking = false }
       else if p.kind == "leave" then asking = false
     }
@@ -296,15 +298,43 @@ effect fn next_line(opts: options.Options, place: Place, s: options.Session, his
   }
 
 // Where a conversation stands between two lines from the person.
-// `marks` are the requests of this run, oldest first, each with where the conversation
-// stood and the files as they were (checkpoints.almd): what /rewind goes back to. `id`
-// names the file the conversation is kept in, which /resume changes.
-type Talk = { opts: options.Options, s: options.Session, open: Bool, marks: List[Mark] = [], id: String = "" }
+// `marks` are the conversation's requests, oldest first, each with where the conversation
+// stood and where the files it changed are kept as they were (checkpoints.almd): what
+// /rewind goes back to. They are written beside the copies, under the conversation's
+// name, so a conversation taken up again can still go back. `id` names the file the
+// conversation is kept in, which /resume changes. `keep` is where the request now being
+// worked keeps its copies, `made` how many requests have been marked, and `draft` what
+// the input box starts with next.
+type Talk = { opts: options.Options, s: options.Session, open: Bool, marks: List[Mark] = [], id: String = "", keep: String = "", made: Int = 0, draft: String = "" }
 
 // `at` is how many messages there were before the request, -1 when the conversation has
-// since been replaced (/clear, /compact, /resume) and only the files can go back.
-// `snapshot` is "" when the files could not be kept.
-type Mark = { at: Int, snapshot: String, said: String }
+// since been replaced (/clear, /compact) and only the files can go back. `dir` is where
+// the request's copies are, "" when nothing is kept. `said` is the request's first line,
+// `text` all of it.
+type Mark = { at: Int, dir: String, said: String, text: String = "" }
+
+fn marks_file(home: String, root: String, id: String) -> String = checkpoints.base_for(home, root, id) + "/marks.json"
+
+effect fn marks_saved(place: Place, t: Talk) -> Unit =
+  if list.is_empty(list.filter(t.marks, (m) => m.dir != "")) then ()
+  else {
+    let _ = fs.write_text(marks_file(place.home, t.opts.root, t.id), json.stringify(value.array(list.map(t.marks, (m) =>
+      value.object([("at", value.int(m.at)), ("dir", value.string(m.dir)), ("said", value.string(m.said)), ("text", value.string(m.text))])))))
+    ()
+  }
+
+// The marks a conversation was left with. A place that is no longer there is dropped
+// from a mark, not the mark: the conversation can still go back.
+effect fn marks_of(home: String, root: String, id: String) -> List[Mark] = {
+  let doc = json.parse(fs.read_text(marks_file(home, root, id)) ?? "[]") ?? value.array([])
+  list.map(value.as_array(doc) ?? [], (m) => {
+    let dir = value.get_string(m, "dir") ?? ""
+    Mark { at: value.get_int(m, "at") ?? -1, dir: if dir != "" and fs.is_dir(dir) then dir else "", said: value.get_string(m, "said") ?? "", text: value.get_string(m, "text") ?? "" }
+  })
+}
+
+// What the tools work with while a request is worked: the setup, with where to keep.
+fn setup_now(t: Talk, place: Place) -> toolkit.Setup = { ...place.setup, keep_dir: t.keep }
 
 // The commands that start a request of their own, as a line of plain words does.
 let TURNING = ["/go", "/goal", "/init", "/review"]
@@ -319,19 +349,25 @@ fn canonical(name: String) -> String = match list.find(ALIASES, (a) => a.0 == na
   none => name,
 }
 
-// The files kept as they are now, and the place in the conversation marked.
+// A request begins: the place in the conversation is marked, and a place is made for the
+// files it will change.
 effect fn marked(t: Talk, place: Place, text: String) -> Talk = {
-  let snapshot = checkpoints.take(place.home, t.opts.root)!
+  let dir = if place.setup.depth == 0 then checkpoints.begin(place.home, t.opts.root, t.id, t.made)! else ""
   let said = list.first(string.split(string.trim(text), "\n")) ?? ""
-  { ...t, marks: t.marks + [Mark { at: list.len(t.s.messages), snapshot: snapshot, said: if string.len(said) > 70 then string.take(said, 70) + "…" else said }] }
+  let next = { ...t, keep: dir, made: t.made + 1,
+    marks: t.marks + [Mark { at: list.len(t.s.messages), dir: dir, said: if string.len(said) > 70 then string.take(said, 70) + "…" else said, text: string.trim(text) }] }
+  marks_saved(place, next)!
+  next
 }
 
 // The conversation was replaced: the marks can still put files back, nothing else.
-fn files_only(marks: List[Mark]) -> List[Mark] = list.map(marks, (m) => Mark { at: -1, snapshot: m.snapshot, said: m.said })
+fn files_only(marks: List[Mark]) -> List[Mark] = list.map(marks, (m) => Mark { at: -1, dir: m.dir, said: m.said, text: m.text })
 
 effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
   let u = opts0.ui
-  var t = Talk { opts: opts0, s: place.start, open: true, marks: [], id: place.session_id }
+  // A conversation taken up again comes back with its marks.
+  let kept_marks = if opts0.take_up then marks_of(place.home, opts0.root, place.session_id)! else []
+  var t = Talk { opts: opts0, s: place.start, open: true, marks: kept_marks, id: place.session_id, keep: "", made: list.len(kept_marks), draft: "" }
   var history = if opts0.tui then editor.load_history(place.history_file)! else []
   println(ui.banner(u, opts0.model, place.shown_root))
   while t.open {
@@ -342,14 +378,16 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
       let (_, cols) = term.size()!
       t = { ...t, opts: options.with_terminal(t.opts, true, ui.Ui { color: t.opts.ui.color, width: int.max(40, int.min(160, cols)) }) }
     }
-    match next_line(t.opts, place, t.s, history)! {
+    let draft = t.draft
+    t = { ...t, draft: "" }
+    match next_line(t.opts, place, t.s, history, draft)! {
       none => { t = { ...t, open: false } },
       some(text) => {
         if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
         if starts_turn(text) then { t = marked(t, place, text)! }
         t = match command_of(text) {
           some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
-          none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, place.setup, t.s, text)! },
+          none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, setup_now(t, place), t.s, text)! },
         }
         if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, t.id, t.s)!
       },
@@ -371,9 +409,15 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
   else if c.name == "/help" then { println(ui.help(u) + (if t.opts.tui then "\n\n" + ui.dim(u, KEYS_HELP) else "")); t }
   else if c.name == "/clear" then {
     println(ui.note_line(u, "the conversation is cleared; the project and the cost so far are kept"))
-    { ...t, s: { ...s, messages: place.fresh.messages, check: "" }, marks: files_only(t.marks) }
+    let cleared = { ...t, s: { ...s, messages: place.fresh.messages, check: "" }, marks: files_only(t.marks) }
+    marks_saved(place, cleared)!
+    cleared
   }
-  else if c.name == "/compact" then { ...compact(t, place)!, marks: files_only(t.marks) }
+  else if c.name == "/compact" then {
+    let noted = { ...compact(t, place)!, marks: files_only(t.marks) }
+    marks_saved(place, noted)!
+    noted
+  }
   else if c.name == "/goal" then aim(t, place, c.arg)!
   else if c.name == "/plan" then {
     let on = if c.arg == "off" then false else if c.arg == "on" then true else not s.plan
@@ -384,7 +428,7 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
     if not s.plan then { println(ui.note_line(u, "there is no plan waiting: /plan starts one")); t }
     else {
       println(ui.note_line(u, "the plan is approved; comide carries it out"))
-      { ...t, s: one_turn(t.opts, place.setup, { ...s, plan: false }, "The plan is approved. Carry it out now." + (if c.arg == "" then "" else " " + c.arg))! }
+      { ...t, s: one_turn(t.opts, setup_now(t, place), { ...s, plan: false }, "The plan is approved. Carry it out now." + (if c.arg == "" then "" else " " + c.arg))! }
     }
   }
   else if c.name == "/cost" then { println(ui.note_line(u, "this session: " + convo.usd(s.cost) + " over " + int.to_string(s.steps) + " model calls")); t }
@@ -404,8 +448,8 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
   else if c.name == "/resume" then resume(t, place, c.arg)!
   else if c.name == "/export" then { export(t, place, c.arg)!; t }
   else if c.name == "/copy" then { copy(t)!; t }
-  else if c.name == "/init" then { ...t, s: one_turn(t.opts, place.setup, s, INIT_REQUEST + (if c.arg == "" then "" else "\n\n" + c.arg))! }
-  else if c.name == "/review" then { ...t, s: one_turn(t.opts, place.setup, s, REVIEW_REQUEST + (if c.arg == "" then "" else "\n\nWhat to look at in particular: " + c.arg))! }
+  else if c.name == "/init" then { ...t, s: one_turn(t.opts, setup_now(t, place), s, INIT_REQUEST + (if c.arg == "" then "" else "\n\n" + c.arg))! }
+  else if c.name == "/review" then { ...t, s: one_turn(t.opts, setup_now(t, place), s, REVIEW_REQUEST + (if c.arg == "" then "" else "\n\nWhat to look at in particular: " + c.arg))! }
   else { told(t, place, c)!; t }
 }
 
@@ -470,7 +514,6 @@ effect fn doctor(t: Talk, place: Place) -> List[String] = {
    line("golemide", golemide_problem == "", if golemide_problem == "" then "" else golemide_problem),
    line("hew", there("hew"), "reading falls back to plain files"),
    line("gramide", there("gramide"), "golemide checks syntax with less"),
-   line("git", there("git"), "no checkpoints: /rewind cannot put files back"),
    line("ctxgate", place.setup.ctxgate, "long command output is cut, not summarised"),
    line("nautra", there("nautra") or string.trim(env.get("NAUTRA") ?? "") != "", "--confined cannot be used"),
    line("a search engine at " + place.setup.searx, web.search_answers(place.setup.searx)!, "web_search is not offered"),
@@ -523,7 +566,7 @@ effect fn rewind(t: Talk, place: Place, arg: String) -> Talk = {
   let words = list.filter(string.split(arg, " "), (w) => w != "")
   let count = list.len(t.marks)
   let recent = list.take(list.reverse(t.marks), 9)
-  if count == 0 then { println(ui.note_line(u, "there is nothing to go back to yet: /rewind goes back to before a request made in this run")); t }
+  if count == 0 then { println(ui.note_line(u, "there is nothing to go back to yet: /rewind goes back to before a request of this conversation")); t }
   else {
     let named = int.parse(list.first(words) ?? "") ?? 0
     let n = if named > 0 then named else 1 + chosen(t, "Go back to before which request?", list.map(recent, (m) => m.said))!
@@ -535,11 +578,19 @@ effect fn rewind(t: Talk, place: Place, arg: String) -> Talk = {
       } else if named > count then println(ui.note_line(u, "there are only " + int.to_string(count) + " requests to go back over"))
       t
     } else {
-      let mark = list.get(t.marks, count - n) ?? Mark { at: -1, snapshot: "", said: "" }
-      let differ = if mark.snapshot == "" then [] else checkpoints.changed(place.home, t.opts.root, mark.snapshot)!
+      let mark = list.get(t.marks, count - n) ?? Mark { at: -1, dir: "", said: "", text: "" }
+      // The requests to go back over, the latest first, and what they kept: a file kept
+      // by more than one is named once.
+      let dirs = list.filter(list.map(list.reverse(list.drop(t.marks, count - n)), (m) => m.dir), (d) => d != "")
+      var differ: List[String] = []
+      for d in list.reverse(dirs) {
+        for line in checkpoints.kept(d)! { if not list.any(differ, (have) => string.drop(have, 2) == string.drop(line, 2)) then list.push(differ, line) }
+      }
+      // Changed since by something that did not name them: said, not put back.
+      let loose = if mark.dir == "" then [] else checkpoints.loose(mark.dir, t.opts.root, differ)!
       let can_talk = mark.at >= 0 and mark.at <= list.len(t.s.messages)
-      let can_files = mark.snapshot != ""
-      let files_label = "the files (" + (if not can_files then "none were kept" else int.to_string(list.len(differ)) + " differ") + ")"
+      let can_files = not list.is_empty(differ)
+      let files_label = "the files (" + (if not can_files then "none were kept" else int.to_string(list.len(differ)) + " kept") + ")"
       let word = list.get(words, 1) ?? ""
       let what = if word == "conversation" or word == "files" or word == "both" then word
         else if not t.opts.tui then "both"
@@ -548,24 +599,33 @@ effect fn rewind(t: Talk, place: Place, arg: String) -> Talk = {
       else {
         let do_files = (what == "both" or what == "files") and can_files
         let do_talk = (what == "both" or what == "conversation") and can_talk
-        let restored = if do_files then checkpoints.restore(place.home, t.opts.root, mark.snapshot) else ok(())
+        let restored = if do_files then checkpoints.restore(dirs, t.opts.root) else ok(())
         match restored {
           err(e) => { println(ui.note_line(u, e)); t },
           ok(_) => {
             if do_files then {
-              println(ui.note_line(u, if list.is_empty(differ) then "the files were already as they were then" else "the files are as they were before that request:"))
+              println(ui.note_line(u, "put back as they were before that request (M changed, A made since and now removed):"))
               for d in list.take(differ, 12) { println(ui.note_line(u, "  " + d)) }
               if list.len(differ) > 12 then println(ui.note_line(u, "  … and " + int.to_string(list.len(differ) - 12) + " more"))
-            } else if what != "conversation" then println(ui.note_line(u, "the files were not kept for that request (no git, or COMIDE_CHECKPOINTS=0); they stay as they are"))
+            } else if what != "conversation" then println(ui.note_line(u, "no files were kept for that request: comide changed none it could name, or COMIDE_CHECKPOINTS=0"))
+            if what != "conversation" and not list.is_empty(loose) then {
+              println(ui.note_line(u, "changed since and not kept, so left as they are (a command changed them without naming them, or you did):"))
+              for l in list.take(loose, 8) { println(ui.note_line(u, "  " + l)) }
+              if list.len(loose) > 8 then println(ui.note_line(u, "  … and " + int.to_string(list.len(loose) - 8) + " more"))
+            }
             if do_talk then println(ui.note_line(u, "the conversation is back to before: " + mark.said))
-            else if what != "files" then println(ui.note_line(u, "the conversation has been replaced since (/clear, /compact or /resume) and cannot go back; it stays as it is"))
+            else if what != "files" then println(ui.note_line(u, "the conversation has been replaced since (/clear or /compact) and cannot go back; it stays as it is"))
             if do_talk then {
               let back = list.take(t.s.messages, mark.at)
               // Back before the first request there is nothing to keep, and a conversation
               // with nothing asked is not saved over the old file: the file goes, or
               // --continue would bring back what was just undone.
               if not list.any(back, (m) => (value.get_string(m, "role") ?? "") == "user") then { let _ = fs.remove(sessions.dir_for(place.home, t.opts.root) + "/" + t.id + ".json") }
-              { ...t, s: { ...t.s, messages: back, check: "", last_in: 0 }, marks: list.take(t.marks, count - n) }
+              // The request comes back to the input box, to be sent again or written anew.
+              if not t.opts.tui and mark.text != "" then println(ui.note_line(u, "the request was: " + mark.said))
+              let back_to = { ...t, s: { ...t.s, messages: back, check: "", last_in: 0 }, marks: list.take(t.marks, count - n), draft: mark.text }
+              marks_saved(place, back_to)!
+              back_to
             } else t
           },
         }
@@ -594,7 +654,10 @@ effect fn resume(t: Talk, place: Place, arg: String) -> Talk = {
       },
       some(k) => {
         println(ui.note_line(u, "going on with the conversation of " + label(k) + " · " + int.to_string(list.len(k.session.messages)) + " messages · " + convo.usd(k.session.cost)))
-        { ...t, s: sessions.taken_up(place.fresh.messages, k.session, t.s.allow_shell), id: if k.id == "" then t.id else k.id, marks: files_only(t.marks) }
+        // It comes back with its own marks; this conversation's stay with its own name.
+        let id = if k.id == "" then t.id else k.id
+        let its = if k.id == "" then [] else marks_of(place.home, t.opts.root, id)!
+        { ...t, s: sessions.taken_up(place.fresh.messages, k.session, t.s.allow_shell), id: id, marks: its, made: list.len(its), keep: "" }
       },
     }
   }
@@ -611,7 +674,7 @@ effect fn aim(t: Talk, place: Place, arg: String) -> Talk = {
     { ...t, s: { ...t.s, goal: "" } }
   } else {
     println(ui.note_line(u, "goal: " + arg))
-    { ...t, s: one_turn(t.opts, place.setup, { ...t.s, goal: arg }, goal.opening(arg))! }
+    { ...t, s: one_turn(t.opts, setup_now(t, place), { ...t.s, goal: arg }, goal.opening(arg))! }
   }
 }
 

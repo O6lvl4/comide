@@ -41,7 +41,7 @@ effect fn chosen(opts: options.Options, question: String) -> Permission = {
   if pick == 0 then yes_once()
   else if pick == 1 then yes_always()
   else if pick == 2 then {
-    let p = editor.prompt(opts.ui, [], "what should comide do instead?  (esc to skip)", "", [])!
+    let p = editor.prompt(opts.ui, [], "what should comide do instead?  (esc to skip)", "", [], "")!
     no(if p.kind == "send" then p.text else "")
   }
   else no("")

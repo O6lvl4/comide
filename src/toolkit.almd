@@ -28,6 +28,8 @@ import process
 // `door_url` and `door_token` are where the confined terminal is (confined.almd), "" when
 // the terminal is this machine's own.
 // `mcp_json` is the settings' `mcpServers` object as JSON text (mcp.almd), "" for none.
+// `keep_dir` is where the request now being worked keeps files as they were before it
+// changed them (checkpoints.almd), "" when nothing is kept.
 // `solve_timeout_s` is how long one solve may hold the conversation (COMIDE_SOLVE_TIMEOUT_S).
 // It was 1800: a solve slowed by a rate limit then outlasted a 600 s task budget with the
 // model never getting a turn to try another way.
@@ -35,7 +37,7 @@ type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, s
   solve_timeout_s: Int = 300, solve_notes: String = "", skills: List[(String, String)] = [],
   memory_file: String = "", allow_rules: List[String] = [], ask_rules: List[String] = [], deny_rules: List[String] = [],
   hooks_json: String = "", frozen: String = "", depth: Int = 0, self_bin: String = "comide", explore_model: String = "",
-  mcp_json: String = "", door_url: String = "", door_token: String = "" }
+  mcp_json: String = "", door_url: String = "", door_token: String = "", keep_dir: String = "" }
 
 // What goes back to the model; the one line the person watching sees under the call;
 // whether that line is bad news; and what the tool spent on a model of its own (solve

@@ -492,8 +492,12 @@ python3 - "$tmp/cfake" <<'EOF'
 import json, sys
 def say(commands, done=False, analysis="a"):
     return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
-r = [say([{"command": "echo two > a.txt; echo new > b.txt; rm keep.txt; echo y > ignored/i.txt"}]), say([], True, "First done."), say([], True, "First done."),
-     say([{"command": "echo three > a.txt"}]), say([], True, "Second done."), say([], True, "Second done.")]
+# The first request changes a file with a tool, makes one and removes one in the terminal
+# by name, and makes one without naming it in a way that can be read (the name is put
+# together by the program). The second changes the first file again.
+r = [say([{"tool": "write", "args": {"path": "a.txt", "content": "two\n"}}, {"command": "echo new > b.txt; rm keep.txt"},
+          {"command": "python3 -c \"open('gen' + chr(46) + 'txt', 'w').write('g')\""}]), say([], True, "First done."), say([], True, "First done."),
+     say([{"tool": "write", "args": {"path": "a.txt", "content": "three\n"}}]), say([], True, "Second done."), say([], True, "Second done.")]
 for i, x in enumerate(r, 1):
     json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
@@ -502,7 +506,7 @@ talk() { ( cd "$tmp/cproj" && HOME="$tmp/chome" XDG_CONFIG_HOME="$tmp/chome/.con
 printf '%s\n' 'change the files' 'change again' '/rewind' '/rewind 1 files' '/export' '/export out.md' '/context' '/status' '/permissions' '/mcp' '/hooks' '/skills' '/agents' '/doctor' '/login' '/usage' '/nope' '/exit' | talk > "$tmp/c1.txt"
 has "/rewind lists the requests of the run, the last first" "1\. change again" "$tmp/c1.txt"
 has "the files go back to before a request" "M a.txt" "$tmp/c1.txt"
-[ "$(cat "$tmp/cproj/a.txt")" = two ] && [ -f "$tmp/cproj/b.txt" ] && good "back before the second request: its change is undone, the first request's stay" || bad "the files after /rewind 1 files: a.txt=$(cat "$tmp/cproj/a.txt")"
+[ "$(cat "$tmp/cproj/a.txt")" = two ] && [ -f "$tmp/cproj/b.txt" ] && [ ! -e "$tmp/cproj/keep.txt" ] && good "back before the second request: its change is undone, the first request's stay" || bad "the files after /rewind 1 files: a.txt=$(cat "$tmp/cproj/a.txt")"
 has "/export writes the conversation where comide keeps its own" "written to .*/\.comide/exports/[0-9]*\.md" "$tmp/c1.txt"
 exported=$(ls "$tmp"/chome/.comide/exports/*.md 2>/dev/null | head -1)
 grep -q '^## You' "$exported" && grep -q 'change the files' "$exported" && grep -q 'Second done\.' "$exported" && ! grep -q 'You are comide' "$exported" \
@@ -512,7 +516,7 @@ has "/context says how big the conversation is" "messages, about .*k characters"
 has "/status says where things are kept" "settings: .*settings\.json" "$tmp/c1.txt"
 has "/permissions says what runs without asking" "run without asking: " "$tmp/c1.txt"
 has "/mcp, /hooks and /skills say what is set up" "no MCP servers are set" "$tmp/c1.txt"
-has "/doctor says which programs are there" "^ *ok  *git$" "$tmp/c1.txt"
+has "/doctor says which programs are there" "^ *ok  *golemide$" "$tmp/c1.txt"
 has "a command from habit that comide has no use for is answered with what to do" "/login is not a command here" "$tmp/c1.txt"
 has "another name for a command works" "this session: .* model calls" "$tmp/c1.txt"
 has "a command that is nothing is said to be" "no command /nope" "$tmp/c1.txt"
@@ -523,11 +527,25 @@ rm -rf "$tmp/chome"; mkdir -p "$tmp/chome"
 printf '%s\n' 'change the files' 'change again' '/rewind 2' '/exit' | talk > "$tmp/c2.txt"
 has "back before the first request, the conversation goes back too" "the conversation is back to before: change the files" "$tmp/c2.txt"
 [ "$(cat "$tmp/cproj/a.txt")" = one ] && [ "$(cat "$tmp/cproj/keep.txt" 2>/dev/null)" = keep ] && [ ! -e "$tmp/cproj/b.txt" ] \
-  && good "what was changed is as it was, what was removed is back, what was made is gone" || bad "the files after /rewind 2: $(ls "$tmp/cproj")"
-[ "$(cat "$tmp/cproj/ignored/i.txt")" = y ] && good "what the project's .gitignore leaves out is not kept and not put back" || bad "an ignored file was put back"
-[ -z "$(cd "$tmp/cproj" && git log --oneline 2>/dev/null)" ] && [ -z "$(cd "$tmp/cproj" && git diff --cached --name-only)" ] \
-  && good "the project's own repository has no commit and nothing staged" || bad "the project's repository was touched"
+  && good "what a tool changed is as it was, what a command removed by name is back, what it made by name is gone" || bad "the files after /rewind 2: $(ls "$tmp/cproj")"
+[ -f "$tmp/cproj/gen.txt" ] && grep -q "changed since and not kept" "$tmp/c2.txt" && grep -q "^ *gen\.txt$" "$tmp/c2.txt" \
+  && good "what a command made without naming it is left, and said to be" || bad "the unnamed file: $(ls "$tmp/cproj"); $(grep -c 'not kept' "$tmp/c2.txt") notes"
+[ -z "$(cd "$tmp/cproj" && git log --oneline 2>/dev/null)" ] && [ -z "$(cd "$tmp/cproj" && git diff --cached --name-only)" ] && [ -z "$(find "$tmp/chome/.comide" -name HEAD)" ] \
+  && good "no repository is touched or made: the project's has no commit and nothing staged, and comide keeps none" || bad "a repository was touched or made"
 [ -z "$(ls "$tmp"/chome/.comide/sessions/*/ 2>/dev/null)" ] && good "a conversation gone back to its start is not kept for --continue" || bad "the undone conversation is still kept"
+
+# A conversation taken up again can still go back: the copies and the marks are kept under
+# its name, not the run's.
+rm -f "$tmp"/cfake/request-* "$tmp/cproj/gen.txt"
+( cd "$tmp/cproj" && echo one > a.txt && echo keep > keep.txt && rm -f b.txt )
+rm -rf "$tmp/chome"; mkdir -p "$tmp/chome"
+printf '%s\n' 'change the files' '/exit' | talk > /dev/null
+rm -f "$tmp"/cfake/request-*
+printf '%s\n' '/rewind 1' '/exit' | ( cd "$tmp/cproj" && HOME="$tmp/chome" XDG_CONFIG_HOME="$tmp/chome/.config" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/cfake" \
+  "$here/comide" --continue --yes --model local:stand-in > "$tmp/c4.txt" 2>&1 )
+[ "$(cat "$tmp/cproj/a.txt")" = one ] && [ "$(cat "$tmp/cproj/keep.txt" 2>/dev/null)" = keep ] && [ ! -e "$tmp/cproj/b.txt" ] \
+  && good "taken up again in a new run, the conversation's last request can still be gone back over" || bad "/rewind after --continue: a.txt=$(cat "$tmp/cproj/a.txt"); $(ls "$tmp/cproj")"
+rm -f "$tmp/cproj/gen.txt"
 
 rm -f "$tmp"/cfake/request-*
 printf '%s\n' 'change the files' '/exit' | talk > /dev/null

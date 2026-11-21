@@ -19,6 +19,7 @@ import self.skills
 import self.memory
 import self.exploring
 import self.mcp
+import self.checkpoints
 import fs
 
 let SHELL_TIMEOUT_S = 300
@@ -196,10 +197,12 @@ effect fn skill(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
 }
 
 // The tools that change something, run something, or reach outside.
+// Before a file is changed, or a command that names files is run, they are kept as they
+// are (checkpoints.almd), so that /rewind can put them back.
 effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult =
-  if name == "edit" then solving.edit(s, a)!
-  else if name == "write" then solving.write(s, a)!
-  else if name == "shell" then shell(s, a)!
+  if name == "edit" then { checkpoints.before_write(s.keep_dir, s.root, toolkit.str_arg(a, "path"))!; solving.edit(s, a)! }
+  else if name == "write" then { checkpoints.before_write(s.keep_dir, s.root, toolkit.str_arg(a, "path"))!; solving.write(s, a)! }
+  else if name == "shell" then { checkpoints.before_command(s.keep_dir, s.root, toolkit.str_arg(a, "command"))!; shell(s, a)! }
   else if name == "solve" then solving.solve(s, a)!
   else if name == "reference" then reference.look(a)!
   else if name == "web_search" then web.web_search(s, a)!
