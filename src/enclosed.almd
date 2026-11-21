@@ -127,10 +127,21 @@ effect fn offered() -> String = {
 
 // What is added to the errand's words when there are tools: how one is written, how a
 // long text is written, and which there are.
+// Which tool is for what, said only of the tools that are there. Without it the first real
+// run under nautra read its file with `cat` beside a reader that was offered.
+fn division(listed: String) -> String = {
+  let has = (name: String) => string.contains(listed, "- " + name + ": ")
+  let looking = list.filter(["read", "outline", "search", "tree"], has)
+  let changing = list.filter(["edit", "write"], has)
+  (if list.is_empty(looking) then "" else "To look at code, use " + list.join(looking, ", ") + ", not cat, head, grep or find in the terminal. ")
+    + (if list.is_empty(changing) then "" else "To change a file, use " + list.join(changing, " or ") + ", not sed, cat > or echo in the terminal. ")
+    + "Run programs, tests and everything else in the terminal."
+}
+
 fn tools_note(listed: String) -> String = if listed == "" then "" else "\n\nBesides the terminal you have tools. A command object may also be:\n"
   + "- {\"tool\": \"NAME\", \"args\": {...}}: run one of the tools below, with its arguments. It runs in the order you wrote it, and its result is shown to you like a command's output.\n\n"
   + "A text of more than a few lines (a file's contents) is not written inside the JSON. Write \"@body:NAME\" where it is meant, as a tool argument or as a \"command\", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`.\n\n"
-  + "Each tool can do only what it says: a tool that reads cannot write, and none of them can start a program or reach a network. Use them for what they do and the terminal for everything else.\n\nThe tools:\n" + listed
+  + "Each tool can do only what it says: a tool that reads cannot write, and none of them can start a program or reach a network. " + division(listed) + "\n\nThe tools:\n" + listed
 
 effect fn run_orders(orders: List[said.Order]) -> String = {
   var parts: List[String] = []
@@ -173,6 +184,10 @@ effect fn main() -> Unit = {
   var steps = 0
   var unread = 0
   var asked = false
+  // What the model said when it first said it was done: asked whether it is sure, it
+  // answers that question in fewer words. With nothing run in between, the first is the
+  // answer (as in the conversation, penned.almd).
+  var first_said = ""
   var checking = false
   var check_from = 0
   var done = false
@@ -212,11 +227,13 @@ effect fn main() -> Unit = {
               Work => {
                 list.push(messages, exchange.message("user", seen))
                 asked = false
+                first_said = ""
               },
               AskSure => {
                 eprintln("\n  comide asks the model once whether the task is complete")
                 list.push(messages, exchange.message("user", seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
                 asked = true
+                first_said = s.analysis
               },
               Done => {
                 if check and not checking then {
@@ -230,7 +247,8 @@ effect fn main() -> Unit = {
                   check_from = steps
                   asked = false
                 } else {
-                  println(if string.trim(s.analysis) == "" then "(task marked complete)" else string.trim(s.analysis))
+                  let last = if list.is_empty(s.orders) and string.trim(first_said) != "" then first_said else s.analysis
+                  println(if string.trim(last) == "" then "(task marked complete)" else string.trim(last))
                   done = true
                 }
               },

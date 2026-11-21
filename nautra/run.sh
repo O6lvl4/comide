@@ -71,7 +71,10 @@ if [ -z "${TOOLS+set}" ]; then
   # Xcode is taken whole: its tools load frameworks from beside the developer directory.
   xcode=$(xcode-select -p 2>/dev/null || true)
   case $xcode in *.app/Contents/Developer) xcode=${xcode%/Contents/Developer} ;; esac
-  for d in "$xcode" /Library/Developer/CommandLineTools /nix /opt/homebrew; do
+  # The user's own toolchains too, where a version manager keeps them under the home
+  # directory, and git's settings: the first real run found python3 only as Xcode's stub.
+  # None of these holds a key (~/.cargo, with its credentials file, is left out).
+  for d in "$xcode" /Library/Developer/CommandLineTools /nix /opt/homebrew /usr/local "$HOME/.local/bin" "$HOME/.local/share/qusp" "$HOME/.rustup" "$HOME/.config/git"; do
     [ -n "$d" ] && [ -d "$d" ] || continue
     case " $TOOLS " in *" $d "*) ;; *) TOOLS="$TOOLS $d" ;; esac
   done
