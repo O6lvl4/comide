@@ -21,7 +21,7 @@ until they pass.
 
 ## Setup
 
-1. **Almide** 0.64.0 or later.
+1. **Almide** 0.70.0 or later.
 2. **golemide 0.2.0 or later** on `PATH`. comide's edits and `solve` go through it,
    and it says at startup when golemide is missing or too old.
    ```sh
