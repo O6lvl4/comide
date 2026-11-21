@@ -68,6 +68,7 @@ comide errand "make the build pass"   # 1 つのタスクを、誰も見てい�
 | `solve` | `golemide solve --json`：編集・検証・やり直しを、コマンドが通るまで |
 | `shell` | ctxgate：長い出力を要約し、終了ステータスは残す |
 | `web_search`, `web_fetch` | SearXNG と Almide の `http`。リダイレクトのたびに行き先を確かめる |
+| `reference` | その言語のツールチェーン：文法を検査済みのプログラム 1 本で、標準ライブラリのモジュールの関数一覧（Almide） |
 
 シェルコマンドと、`solve` が実行する検証コマンドは、実行前に確認します。
 Web ページは公開されているものだけを読みます。

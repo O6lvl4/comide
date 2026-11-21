@@ -33,6 +33,7 @@ import self.options
 import self.turn
 import self.penned
 import self.web
+import self.reference
 import self.briefing
 import self.skills
 import self.handover
@@ -167,7 +168,8 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   // Asked in writing (the default), the model is told the shape of its reply, the
   // terminal's rules and the tools as things to write (penned.almd); with --loop tools,
   // the tools are sent and this file's own words say how to use them.
-  let without = if opts0.written and not web.search_answers(setup.searx)! then ["web_search"] else []
+  let without = (if opts0.written and not web.search_answers(setup.searx)! then ["web_search"] else [])
+    + (if list.is_empty(reference.installed()!) then ["reference"] else [])
   let opening = (if opts0.written then penned.system_prompt(opts0.root, without, opts0.live) else system_prompt(opts0.root)) + "\n" + tools.project_context(setup)!
   let system = list.join(list.filter([opening, if opts0.written then penned.toolchains()! else "", briefed, skills.section(known), mcp.section(servers),
     if at_start.printed == "" then "" else "Said by a check the user set up to run at the start of a session:\n" + at_start.printed, remembered], (part) => part != ""), "\n\n")

@@ -399,7 +399,9 @@ python3 - "$tmp/fake" <<'EOF'
 import json, sys
 def say(commands, done=False, analysis="a"):
     return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
-replies = [say([{"command": "echo one; sleep 2; echo two", "wait_s": 10}]),
+replies = [say([{"tool": "reference", "args": {"language": "almide"}},
+                {"tool": "reference", "args": {"language": "almide", "module": "int"}},
+                {"command": "echo one; sleep 2; echo two", "wait_s": 10}]),
            say([], done=True, analysis="All done."), say([], done=True, analysis="All done.")]
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
@@ -426,21 +428,27 @@ has "a command that is running is shown running, with the seconds" "^running Tru
 has "what it printed and the answer are shown" "^printed True$" "$tmp/pt.out"
 
 # What the model was told in that conversation: the machine is the person's, and, where
-# almide is installed, the language's syntax as a program. The program is taken out of the
-# prompt and given to the compiler, so the text a model learns from cannot rot unseen.
+# almide is installed, that the reference tool tells about the language. The tool's answer
+# is the syntax as one program; the program is taken out of the answer and given to the
+# compiler, so the text a model learns from cannot rot unseen.
 python3 - "$tmp/fake" "$tmp/primer.almd" > "$tmp/told.out" <<'EOF'
 import json, sys
 system = json.load(open(sys.argv[1] + "/request-1.json"))["messages"][0]["content"]
+seen = json.load(open(sys.argv[1] + "/request-2.json"))["messages"][-1]["content"]
 print("own machine", "This is the user's own machine" in system)
-a = system.find("import fs ")
-b = system.find('assert_eq(label(15), "FizzBuzz")\n}')
+print("one line", "call the reference tool" in system and "- reference: " in system and "import fs " not in system)
+print("module", "fn int.to_string(x: Int) -> String" in seen and "int.__" not in seen)
+a = seen.find("import fs ")
+b = seen.find('assert_eq(label(15), "FizzBuzz")\n}')
 print("primer", a >= 0 and b > a)
 if a >= 0 and b > a:
-    open(sys.argv[2], "w").write(system[a:b] + 'assert_eq(label(15), "FizzBuzz")\n}\n')
+    open(sys.argv[2], "w").write(seen[a:b] + 'assert_eq(label(15), "FizzBuzz")\n}\n')
 EOF
 has "with a person there, the model is told the machine is theirs" "^own machine True$" "$tmp/told.out"
 if command -v "$almide" > /dev/null 2>&1; then
-  has "with almide installed, the model is given the language's syntax as a program" "^primer True$" "$tmp/told.out"
+  has "with almide installed, the model is told of the reference tool in one line, not the syntax" "^one line True$" "$tmp/told.out"
+  has "the tool gives the language's syntax as a program" "^primer True$" "$tmp/told.out"
+  has "and one module's functions, without the module's own workings" "^module True$" "$tmp/told.out"
   ( cd "$tmp" && : > notes.txt && "$almide" check primer.almd > "$tmp/primer.check" 2>&1 && "$almide" test primer.almd > "$tmp/primer.test" 2>&1 )
   same "and that program passes almide check and its own test" "0" "$?"
 fi

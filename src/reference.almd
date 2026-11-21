@@ -1,0 +1,80 @@
+// What a language's own toolchain tells about it, for a model that does not know the
+// language well: the reference tool.
+//
+// The first person to ask for Almide watched the model search the project for what Almide
+// might be; the second, with the toolchain's commands named, watched fifteen steps to
+// FizzBuzz, because the commands list functions and not syntax. So the syntax a first
+// program needs is kept here as one program (ci/check.sh takes it out of the tool's answer
+// and gives it to the compiler), and the standard library is asked of the toolchain.
+
+import process
+import self.toolkit
+
+let ALMIDE_NOTE = "Almide (.almd files) is a language you may not know well, and its toolchain is installed here. Do not guess, and do not read through the project to learn the language. Its syntax, in one program:\n\n"
+  + "import fs                                  // json, fs, http, env, io, process, regex need an import; string, list, int, map, value do not\n\n"
+  + "type Shape =\n  | Circle(Float)\n  | Rect(Float, Float)\n\n"
+  + "type Point = { x: Int, y: Int }\n\n"
+  + "fn area(s: Shape) -> Float = match s {\n  Circle(r) => 3.14 * r * r,\n  Rect(w, h) => w * h,\n}\n\n"
+  + "fn label(n: Int) -> String =\n  if n % 15 == 0 then \"FizzBuzz\" else if n % 3 == 0 then \"Fizz\" else if n % 5 == 0 then \"Buzz\" else int.to_string(n)\n\n"
+  + "effect fn main() -> Unit = {                // `effect fn`: may do I/O or fail. A pure function is `fn`\n"
+  + "  let p = Point { x: 1, y: 2 }              // let is fixed, var can be assigned again\n"
+  + "  var total = 0\n"
+  + "  for i in 1...10 {                         // 1...10 includes 10; 0..<10 does not. Also: while cond { }\n"
+  + "    total = total + i\n    println(label(i))\n  }\n"
+  + "  let names = list.map([1, 2, 3], (n) => \"n$" + "{n}\")   // a lambda; $" + "{...} inside a string interpolates\n"
+  + "  let first = list.get(names, 0) ?? \"none\"   // ?? gives a fallback for an Option or a Result\n"
+  + "  let text = fs.read_text(\"notes.txt\")!       // ! passes a failure up; it is required on a call that can fail\n"
+  + "  println(\"$" + "{first} $" + "{total} $" + "{p.x + p.y} $" + "{area(Circle(1.0))} $" + "{string.len(text)}\")\n}\n\n"
+  + "test \"label\" {\n  assert_eq(label(15), \"FizzBuzz\")\n}\n\n"
+  + "`if` always has `then` and `else`; there is no `return`: a function's value is its last expression. "
+  + "For the standard library: `almide query stdlib` prints the common modules' functions with their signatures, and `almide query outline @stdlib/MODULE` (string, list, int, map, fs, json, ...) one module's; both work in any directory. "
+  + "`almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test FILE` runs its tests, and `almide explain E041` explains an error code. "
+  + "Check what you wrote with `almide check` before saying it works. To try a snippet that is not part of the project, write it under a temporary directory (mktemp -d), not into the project: inside a project `almide run` builds the whole project."
+
+// language, the program that must be on PATH, and what is said when no module is named.
+let LANGUAGES: List[(String, String, String)] = [("almide", "almide", ALMIDE_NOTE)]
+
+effect fn on_path(bin: String) -> Bool = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v " + bin] }) {
+  ok(st) => st.code == 0,
+  err(_) => false,
+}
+
+// The languages whose toolchain is on PATH.
+effect fn installed() -> List[String] = {
+  var out: List[String] = []
+  for l in LANGUAGES { if on_path(l.1)! then list.push(out, l.0) else () }
+  out
+}
+
+// A module name is letters, digits and `_`: it goes on a command line.
+fn plain(name: String) -> Bool = name != "" and list.all(string.to_list(name), (c) => string.is_alphanumeric(c) or c == "_")
+
+// One module of the standard library, without the names that begin with `__` (the
+// module's own workings: 7 of the first 10 lines of `almide query stdlib` were those).
+effect fn almide_module(part: String) -> toolkit.ToolResult =
+  if not plain(part) then toolkit.failed("a module is one name, such as string, list, int, map, fs or json", "not a module name")
+  else match process.output(process.ProcessCommand { cmd: "almide", args: ["query", "outline", "@stdlib/" + part], timeout_ms: 15000 }) {
+    err(e) => toolkit.failed("almide could not be asked: " + e, "almide did not answer"),
+    ok(st) => {
+      let lines = list.filter(string.split(st.stdout, "\n"), (l) => string.trim(l) != "" and not string.contains(l, "." + "__"))
+      if st.code != 0 or list.is_empty(lines) then toolkit.failed("there is no standard library module called " + part + ". Some that exist: string, list, int, float, map, set, option, result, value, json, fs, io, env, process, http, regex, datetime, bytes.", "no such module")
+      else toolkit.said(list.join(lines, "\n"), int.to_string(list.len(lines)) + " functions")
+    },
+  }
+
+effect fn look(a: Value) -> toolkit.ToolResult = {
+  let language = string.to_lower(string.trim(toolkit.str_arg(a, "language")))
+  let part = string.trim(toolkit.str_arg(a, "module"))
+  match list.find(LANGUAGES, (l) => l.0 == language) {
+    none => toolkit.failed("there is no reference for " + language + " here. There is one for: " + list.join(list.map(LANGUAGES, (l) => l.0), ", "), "no reference"),
+    some(l) => if not on_path(l.1)! then toolkit.failed(l.1 + " is not installed on this machine", "not installed")
+      else if part == "" then toolkit.said(l.2, "the syntax, as one program")
+      else almide_module(part)!,
+  }
+}
+
+test "a module name is one plain word" {
+  assert(plain("string"))
+  assert(not plain("string; rm -rf /"))
+  assert(not plain(""))
+}

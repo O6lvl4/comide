@@ -14,6 +14,7 @@ import json
 import self.toolkit
 import self.solving
 import self.web
+import self.reference
 import self.skills
 import self.memory
 import self.exploring
@@ -54,6 +55,8 @@ fn definitions() -> List[Value] = [
     [prop("path", "string", "file to write"), prop("content", "string", "the complete file content")], ["path", "content"]),
   tool("shell", "Run a shell command in the project root: tests, builds, git. Returns the exit status and output. Long output is shortened for you, so do not pipe it through head or tail. The user may decline to run it.",
     [prop("command", "string", "the command line"), prop("timeout_s", "integer", "seconds before it is stopped (default 300)")], ["command"]),
+  tool("reference", "A language's syntax and standard library, from its own toolchain, for a language you do not know well (Almide). With the language alone: the syntax as one checked program, and how to check and run a file. With a module: that module's functions with their signatures. Call it before writing the language; it is not a search of the project.",
+    [prop("language", "string", "the language: almide"), prop("module", "string", "a standard library module, such as string, list, int, map, fs, json; leave out for the syntax")], ["language"]),
   tool("solve", "The default way to change code whenever a command can check the change (tests, a build). Hands the change to golemide, which reads the code, edits it, runs verify, and retries with the failure until verify exits 0. Call it before writing the implementation yourself. Returns the status, the files changed and the end of the last verify output.",
     [prop("task", "string", "the change, stated precisely"), prop("verify", "string", "command whose exit status 0 means done, taken from how the project runs its tests, e.g. \"cargo test\""),
      prop("attempts", "integer", "edit/verify rounds before giving up (default 6)")], ["task", "verify"]),
@@ -198,6 +201,7 @@ effect fn changed(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResul
   else if name == "write" then solving.write(s, a)!
   else if name == "shell" then shell(s, a)!
   else if name == "solve" then solving.solve(s, a)!
+  else if name == "reference" then reference.look(a)!
   else if name == "web_search" then web.web_search(s, a)!
   else if name == "web_fetch" then web.web_fetch(s, a)!
   else if name == "mcp_call" then mcp_call(s, a)!

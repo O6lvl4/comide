@@ -117,7 +117,7 @@ fn read_reply(text: String, tools: Bool, whole: Bool) -> Result[Said, String] = 
         let unnamed = list.filter(orders, (o) => string.starts_with(o.command, BODY_REF) or string.contains(o.args, "\"" + BODY_REF))
         if not list.is_empty(empty) then err(if tools then "a command has none of \"command\", \"job\" and \"tool\"" else "a command has neither \"command\" nor \"job\"")
         else if not list.is_empty(unnamed) then err("a command names a text (" + BODY_REF + "NAME) that is not written after the object between " + BODY_OPEN + "NAME and " + BODY_CLOSE + "NAME lines")
-        else ok(Said { analysis: value.get_string(d, "analysis") ?? "", plan: value.get_string(d, "plan") ?? "",
+        else ok(Said { analysis: value.as_string(filled(value.get(d, "analysis") ?? value.string(""), parts.1)) ?? "", plan: value.get_string(d, "plan") ?? "",
           orders: orders, complete: value.get_bool(d, "task_complete") ?? false })
       },
     },
@@ -175,6 +175,12 @@ test "a long text is written after the object and named where it is meant" {
   assert(string.starts_with(match read_with("{\"commands\":[]}\n<<<BODY a\nx\n", true) { ok(_) => "", err(e) => e }, "the text a has no closing line"))
   let open = read_reply("{\"commands\":[{\"command\":\"@body:a\"}]}\n<<<BODY a\necho x\n\n", true, true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
   assert_eq(list.map(open.orders, (o) => o.command), ["echo x\n"])
+}
+
+test "an answer of several lines is a text after the object too" {
+  let s = read_reply("{\"analysis\":\"@body:answer\",\"plan\":\"\",\"commands\":[],\"task_complete\":true}\n<<<BODY answer\nHere it is:\n\n    fn main() -> Unit = {\n      println(\"hi\")\n    }\n>>>BODY answer\n", true, true) ?? Said { analysis: "", plan: "", orders: [], complete: false }
+  assert_eq(s.analysis, "Here it is:\n\n    fn main() -> Unit = {\n      println(\"hi\")\n    }\n")
+  assert(s.complete)
 }
 
 test "complete twice in a row ends it; once is asked about" {

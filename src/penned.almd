@@ -40,6 +40,7 @@ import self.tools
 import self.turn
 import self.ui
 import process
+import self.reference
 import self.waiting
 import self.watch
 
@@ -67,52 +68,20 @@ fn name_of(t: Value) -> String = value.get_string(value.get(t, "function") ?? va
 fn tools_section(without: List[String]) -> String =
   list.join(list.map(list.filter(tools.definitions(), (t) => name_of(t) != "shell" and not list.contains(without, name_of(t))), tool_line), "\n")
 
-// Languages the model is unlikely to know well: the program whose presence says the
-// language is in use on this machine, and how its own toolchain tells about it. The first
-// person to ask 0.7.0 for Almide watched it go looking through the project for what
-// Almide might be.
-//
-// The second person-run (2026-11-21) had the toolchain's commands and still took fifteen
-// steps to FizzBuzz: the commands list functions, not syntax, so the model read five files
-// of a neighbouring project to learn `if` and `for`. The syntax a first program needs is
-// said here. The program below is ci-checked text: `almide check`, `run` and `test` pass
-// on it (0.70.0).
-let ALMIDE_NOTE = "Almide (.almd files) is a language you may not know well, and its toolchain is installed here. Do not guess, and do not read through the project to learn the language. Its syntax, in one program:\n\n"
-  + "import fs                                  // json, fs, http, env, io, process, regex need an import; string, list, int, map, value do not\n\n"
-  + "type Shape =\n  | Circle(Float)\n  | Rect(Float, Float)\n\n"
-  + "type Point = { x: Int, y: Int }\n\n"
-  + "fn area(s: Shape) -> Float = match s {\n  Circle(r) => 3.14 * r * r,\n  Rect(w, h) => w * h,\n}\n\n"
-  + "fn label(n: Int) -> String =\n  if n % 15 == 0 then \"FizzBuzz\" else if n % 3 == 0 then \"Fizz\" else if n % 5 == 0 then \"Buzz\" else int.to_string(n)\n\n"
-  + "effect fn main() -> Unit = {                // `effect fn`: may do I/O or fail. A pure function is `fn`\n"
-  + "  let p = Point { x: 1, y: 2 }              // let is fixed, var can be assigned again\n"
-  + "  var total = 0\n"
-  + "  for i in 1...10 {                         // 1...10 includes 10; 0..<10 does not. Also: while cond { }\n"
-  + "    total = total + i\n    println(label(i))\n  }\n"
-  + "  let names = list.map([1, 2, 3], (n) => \"n$" + "{n}\")   // a lambda; $" + "{...} inside a string interpolates\n"
-  + "  let first = list.get(names, 0) ?? \"none\"   // ?? gives a fallback for an Option or a Result\n"
-  + "  let text = fs.read_text(\"notes.txt\")!       // ! passes a failure up; it is required on a call that can fail\n"
-  + "  println(\"$" + "{first} $" + "{total} $" + "{p.x + p.y} $" + "{area(Circle(1.0))} $" + "{string.len(text)}\")\n}\n\n"
-  + "test \"label\" {\n  assert_eq(label(15), \"FizzBuzz\")\n}\n\n"
-  + "`if` always has `then` and `else`; there is no `return`: a function's value is its last expression. "
-  + "For the standard library: `almide query stdlib` prints the common modules' functions with their signatures, and `almide query outline @stdlib/MODULE` (string, list, int, map, fs, json, ...) one module's; both work in any directory. "
-  + "`almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test FILE` runs its tests, and `almide explain E041` explains an error code. "
-  + "Check what you wrote with `almide check` before saying it works. To try a snippet that is not part of the project, write it under a temporary directory (mktemp -d), not into the project: inside a project `almide run` builds the whole project."
-
-let TOOLCHAINS: List[(String, String)] = [("almide", ALMIDE_NOTE)]
+// Languages the model is unlikely to know well, each with the program whose presence says
+// it is in use on this machine. The model is told one line: that the language is here and
+// that the reference tool tells about it (reference.almd). The syntax itself was in this
+// prompt for one commit; it is 2.5 KB that every conversation paid for, about Almide or not.
+effect fn toolchains() -> String = {
+  let here = reference.installed()!
+  if list.is_empty(here) then ""
+  else "Installed here, and languages you may not know well: " + list.join(here, ", ") + ". Before you write or change code in one of them, call the reference tool with that language: it gives the syntax as one checked program and how to look up the standard library. Do not guess the syntax, and do not read through the project to learn the language."
+}
 
 // Asked for FizzBuzz, and finding the compiler's toolchain too old to run it, the model
 // tried `rustup update` on the person's machine, with "stop asking" already given.
 let OWN_MACHINE = "\n\nThis is the user's own machine. Do not install, update or remove toolchains, system packages or global tools, and do not change settings outside the project, unless the user asked for that: say what is missing and what would fix it, and let the user decide."
 
-// What is said of the toolchains found on PATH, or "" when none is.
-effect fn toolchains() -> String =
-  list.join(list.filter_map(TOOLCHAINS, (t) => match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v " + t.0] }) {
-    ok(st) => if st.code == 0 then some(t.1) else none,
-    err(_) => none,
-  }), "\n\n")
-
-// What the model is told: the errand's words unchanged (charge.written_prompt), then who
-// it is working with and the tools. Nothing here asks it to be brief.
 // `someone`: a person is at the terminal, and the machine is theirs (a conversation). With
 // nobody there (-p in a container, a measured run) the machine is the task's to change.
 fn system_prompt(root: String, without: List[String], someone: Bool) -> String = string.trim(charge.written_prompt(root)) + (if someone then OWN_MACHINE else "") + """
@@ -120,7 +89,7 @@ fn system_prompt(root: String, without: List[String], someone: Bool) -> String =
 
 You are comide, a coding assistant, working with a user in the project at ${root}. The terminal starts there. What the user asks may be a task or a question; when you set "task_complete", your "analysis" is what the user reads as your answer: say what you changed and how you know it works, or answer the question, in the language the user wrote in. If nothing checked the work, say so. A question that needs no command is answered at once, with "commands" empty and "task_complete" true.
 
-A command of yours may be put to the user before it runs, and the user may decline it. The user sees each command and the first lines of what it printed, not all of it: when the user asked for a result, put the result itself in your answer, not a report that it was printed. The same for code or text the user asks to see: it goes inside "analysis", whole, in a fenced block. Nothing but "analysis" reaches the user, so "here it is" with nothing after it shows them nothing.
+A command of yours may be put to the user before it runs, and the user may decline it. The user sees each command and the first lines of what it printed, not all of it: when the user asked for a result, put the result itself in your answer, not a report that it was printed. The same for code or text the user asks to see: it goes in your answer, whole. Nothing but "analysis" reaches the user, so "here it is" with nothing after it shows them nothing. An answer that holds code, or more than one paragraph, is not written inside the JSON string, where its line breaks are lost: write "analysis": "@body:answer" and the answer itself after the object, between <<<BODY answer and >>>BODY answer, with its line breaks and with code in fenced blocks.
 
 The terminal keeps its directory from one command to the next: after `cd sub`, the next command starts in sub. Use paths from where the terminal is, and do not leave files of your own behind in the user's project unless they are what was asked for.
 

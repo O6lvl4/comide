@@ -71,6 +71,7 @@ The model's tools are programs that already exist:
 | `solve` | `golemide solve --json`: edit, verify, retry until the command passes |
 | `shell` | ctxgate: long output summarised, the exit status kept |
 | `web_search`, `web_fetch` | SearXNG, and Almide's `http` with every redirect checked |
+| `reference` | the language's own toolchain: the syntax as one checked program, a standard library module's functions (Almide) |
 
 A shell command, and the verify command `solve` would run, are asked about first.
 Pages are read only from the public web.
