@@ -10,6 +10,7 @@ import self.model
 import self.tools
 import self.ui
 import self.term
+import self.aside
 import self.convo
 import self.options
 
@@ -46,80 +47,26 @@ effect fn await_reply(opts: options.Options, c: model.Call) -> Result[Heard, Str
 }
 
 // A tenth of a second's wait. On a taken-over terminal it is a key read with that
-// timeout, so Esc or Ctrl+C stops the request mid-answer: true when one was pressed.
-// Any other key is the person saying something while comide works (below).
+// timeout: true when Esc or Ctrl+C was pressed, which stops what is running. Any other
+// key is the person saying something while comide works (aside.almd).
 effect fn pause(opts: options.Options) -> Bool =
-  if opts.tui then {
-    let k = term.read_key()!
-    if k.kind == "esc" or (k.kind == "ctrl" and k.text == "c") then {
-      // Esc with something typed or waiting to be told: stop, and send it at once.
-      if k.kind == "esc" and opts.aside != "" and (string.trim(fs.read_text(opts.aside) ?? "") != "" or not list.is_empty(told_lines(opts.aside)!)) then {
-        let _ = fs.write_text(now_file(opts.aside), "1")
-      }
-      true
-    } else {
-      if opts.aside != "" and k.kind != "none" then typed(opts.aside, k)!
-      false
-    }
-  } else {
+  if opts.tui then aside.key(opts.aside, term.read_key()!)!
+  else {
     env.sleep_ms(100)
     false
   }
 
-// ---- said while comide works ----------------------------------------------------------
-//
-// While a request is worked the keys are still read, so the person need not stop it to
-// add a word. What is typed is shown on the waiting line; Enter hands it over, and the
-// model is told it with the results of the step it is on, before its next reply. What
-// was typed and not handed over, or handed over when the request was already ending, is
-// in the input box when the request ends.
-//
-// A step can be long (a command that runs for minutes), and what is handed over waits
-// for it. So Esc means two things. With nothing typed it stops the request, as it always
-// did. With something typed, or handed over and still waiting, it stops the request and
-// sends that at once, as the next request: the way to turn comide round mid-step.
-// Ctrl+C only stops, whatever is typed.
-//
-// Kept in two files of the run's scratch directory, because the waits that read the keys
-// are in several places and share nothing else: `aside` is the line being typed, and
-// `aside.told` the lines handed over, one JSON string a line.
+// ---- said while comide works (aside.almd), as the loops ask about it -------------------
 
-fn told_file(aside: String) -> String = aside + ".told"
-fn now_file(aside: String) -> String = aside + ".now"
-
-// Whether the request is being stopped to send what was typed at once: asked by the loop
-// while the request is still being worked, so that it ends there.
-effect fn stopping(opts: options.Options) -> Bool = opts.aside != "" and fs.is_file(now_file(opts.aside))
+// Whether the request is being stopped to send what was typed at once: asked while the
+// request is still being worked, so that it ends there.
+effect fn stopping(opts: options.Options) -> Bool = aside.stopping(opts.aside)!
 
 // Whether the request was stopped to send what was typed at once. Asked once: taken.
-effect fn stopped_to_send(opts: options.Options) -> Bool =
-  if opts.aside == "" or not fs.is_file(now_file(opts.aside)) then false
-  else { let _ = fs.remove(now_file(opts.aside)); true }
+effect fn stopped_to_send(opts: options.Options) -> Bool = opts.aside != "" and aside.taken(aside.now_file(opts.aside))!
 
-effect fn typed(aside: String, k: term.Key) -> Unit = {
-  let draft = fs.read_text(aside) ?? ""
-  if k.kind == "up" then {
-    // ↑ with nothing typed takes the last line handed over back, to change it or to
-    // drop it (Ctrl+U): until the step ends it has not been told.
-    let lines = told_lines(aside)!
-    if draft == "" and not list.is_empty(lines) then {
-      let _ = fs.write_text(told_file(aside), list.join(list.map(list.take(lines, list.len(lines) - 1), (l) => json.stringify(value.string(l)) + "\n"), ""))
-      let _ = fs.write_text(aside, list.last(lines) ?? "")
-    }
-  } else if k.kind == "enter" then {
-    if string.trim(draft) != "" then {
-      let _ = fs.append_text(told_file(aside), json.stringify(value.string(string.trim(draft))) + "\n")
-      let _ = fs.write_text(aside, "")
-    }
-  } else {
-    let next = if k.kind == "char" or k.kind == "paste" then draft + k.text
-      else if k.kind == "newline" then draft + "\n"
-      else if k.kind == "backspace" then string.drop_end(draft, 1)
-      else if k.kind == "delete_word" or (k.kind == "ctrl" and (k.text == "u" or k.text == "w")) then ""
-      else draft
-    if next != draft then { let _ = fs.write_text(aside, next) }
-  }
-}
+// Whether the request was stopped by the person at all. Asked once: taken.
+effect fn was_stopped(opts: options.Options) -> Bool = opts.aside != "" and aside.taken(aside.stopped_file(opts.aside))!
 
 // A question is about to be put to the person (asking.almd). Keys typed for something
 // else may still be on their way, and a stray Enter or digit would answer the question:
@@ -137,49 +84,54 @@ effect fn settled(opts: options.Options) -> Unit =
       else {
         quiet = 0
         read = read + 1
-        if opts.aside != "" and k.kind != "esc" and k.kind != "ctrl" then typed(opts.aside, k)!
+        if opts.aside != "" and k.kind != "esc" and k.kind != "ctrl" then aside.typed(opts.aside, k)!
       }
     }
   }
 
-effect fn told_lines(aside: String) -> List[String] =
-  list.filter(list.map(string.split(fs.read_text(told_file(aside)) ?? "", "\n"), (l) => value.as_string(json.parse(l) ?? value.string("")) ?? ""), (l) => l != "")
-
-// What the waiting line says after its own hint: what is being typed, and how much is
-// waiting to be told.
-effect fn hint(opts: options.Options, base: String) -> String =
-  if opts.aside == "" then base
-  else {
-    let draft = string.replace(fs.read_text(opts.aside) ?? "", "\n", " ")
-    let waiting_ = list.len(told_lines(opts.aside)!)
-    list.join(list.filter([base,
-      if waiting_ > 0 then int.to_string(waiting_) + " to tell at the next step" + (if draft == "" then " (↑ takes it back)" else "") else "",
-      if draft != "" then "❯ " + string.take_end(draft, int.max(10, opts.ui.width - 78)) + "▏ enter: tell at the next step · esc: stop and send now"
-        else if waiting_ == 0 then "type to tell comide more" else "esc: stop and send now"], (p) => p != ""), " · ")
-  }
+// What the waiting line says after its own hint.
+effect fn hint(opts: options.Options, base: String) -> String = aside.hint(opts.aside, base, opts.ui.width)!
 
 // What was handed over, taken: said to the model as this, and not again.
 effect fn told(opts: options.Options) -> String =
   if opts.aside == "" then ""
   else {
-    let lines = told_lines(opts.aside)!
+    let lines = aside.told(opts.aside)!
     if list.is_empty(lines) then ""
     else {
-      let _ = fs.write_text(told_file(opts.aside), "")
+      aside.lines_out(aside.told_file(opts.aside), [])!
       options.show(opts, "\n" + ui.note_line(opts.ui, "told comide: " + list.join(lines, " / ")))!
       "[While you were working, the user said this. It comes from the user, like the task: take it into account from here on.]\n" + list.join(lines, "\n")
     }
   }
 
-// What is left when a request ends: handed over too late to be told, or typed and not
-// handed over. Taken, for the input box.
+// What is left when a request ends: handed over too late to be told, or typed and
+// neither handed over nor put by. Taken, for the input box.
 effect fn left(opts: options.Options) -> String =
   if opts.aside == "" then ""
   else {
-    let rest = list.filter(told_lines(opts.aside)! + [string.trim(fs.read_text(opts.aside) ?? "")], (l) => l != "")
-    let _ = fs.write_text(told_file(opts.aside), "")
+    let rest = list.filter(aside.told(opts.aside)! + [string.trim(aside.draft(opts.aside)!)], (l) => l != "")
+    aside.lines_out(aside.told_file(opts.aside), [])!
     let _ = fs.write_text(opts.aside, "")
     list.join(rest, "\n")
+  }
+
+// The first of the lines put by for after the request, taken; "" when there is none.
+effect fn next_after(opts: options.Options) -> String =
+  if opts.aside == "" then ""
+  else {
+    let lines = aside.after(opts.aside)!
+    if list.is_empty(lines) then ""
+    else { aside.lines_out(aside.after_file(opts.aside), list.drop(lines, 1))!; list.first(lines) ?? "" }
+  }
+
+// All of the lines put by, taken: a request that was stopped does not go on to them.
+effect fn all_after(opts: options.Options) -> String =
+  if opts.aside == "" then ""
+  else {
+    let lines = aside.after(opts.aside)!
+    aside.lines_out(aside.after_file(opts.aside), [])!
+    list.join(lines, "\n")
   }
 
 // The whole new lines of the answer, or the spinner while there are none yet.

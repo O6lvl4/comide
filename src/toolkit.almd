@@ -7,6 +7,8 @@ import json
 import fs
 import env
 import process
+import self.aside
+import self.term
 
 // `searx` is the SearXNG the web searches go to, e.g. http://127.0.0.1:8888.
 // `solve_model` and `solve_strong` are golemide's --model and --strong-model, "" for
@@ -30,6 +32,9 @@ import process
 // `mcp_json` is the settings' `mcpServers` object as JSON text (mcp.almd), "" for none.
 // `keep_dir` is where the request now being worked keeps files as they were before it
 // changed them (checkpoints.almd), "" when nothing is kept.
+// `aside` is the file that holds what the person types while a request is worked
+// (aside.almd), "" where no keys are read: a program that may run long is then watched,
+// so the keys are read while it runs (`watched`).
 // `solve_timeout_s` is how long one solve may hold the conversation (COMIDE_SOLVE_TIMEOUT_S).
 // It was 1800: a solve slowed by a rate limit then outlasted a 600 s task budget with the
 // model never getting a turn to try another way.
@@ -37,7 +42,7 @@ type Setup = { root: String, golemide: String, scratch: String, ctxgate: Bool, s
   solve_timeout_s: Int = 300, solve_notes: String = "", skills: List[(String, String)] = [],
   memory_file: String = "", allow_rules: List[String] = [], ask_rules: List[String] = [], deny_rules: List[String] = [],
   hooks_json: String = "", frozen: String = "", depth: Int = 0, self_bin: String = "comide", explore_model: String = "",
-  mcp_json: String = "", door_url: String = "", door_token: String = "", keep_dir: String = "" }
+  mcp_json: String = "", door_url: String = "", door_token: String = "", keep_dir: String = "", aside: String = "" }
 
 // What goes back to the model; the one line the person watching sees under the call;
 // whether that line is bad news; and what the tool spent on a model of its own (solve
@@ -80,9 +85,46 @@ effect fn run_program(prog: String, args: List[String], timeout_s: Int) -> (Int,
 // any other output. KIND is what the call is for, so a runner can grant each differently:
 // `read` (looking at the project), `shell` (a command the model wrote), `solve` (golemide,
 // which edits and runs the verify command).
-effect fn run_in(s: Setup, kind: String, prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
-  if s.runner == "" then run_program(prog, args, timeout_s)!
-  else run_program(s.runner, [kind, "--", prog] + args, timeout_s)!
+effect fn run_in(s: Setup, kind: String, prog: String, args: List[String], timeout_s: Int) -> (Int, String) = {
+  let (p, a) = if s.runner == "" then (prog, args) else (s.runner, [kind, "--", prog] + args)
+  // What may run long (a command the model wrote, a solve) is watched; a look is quick.
+  if kind == "shell" or kind == "solve" then watched(s, p, a, timeout_s)! else run_program(p, a, timeout_s)!
+}
+
+// A program that may run long. Where keys are read (`s.aside`), they are read while it
+// runs: what the person types is kept (aside.almd), and Esc or Ctrl+C stops the program.
+// Its output goes to files, so that what it wrote before it was stopped is still had.
+// Elsewhere it is run_program.
+effect fn watched(s: Setup, prog: String, args: List[String], timeout_s: Int) -> (Int, String) =
+  if s.aside == "" then run_program(prog, args, timeout_s)!
+  else {
+    let base = s.scratch + "/run-" + int.to_string(datetime.now_ms())
+    match process.start(process.ProcessCommand { cmd: "bash", args: ["-c", "exec \"$@\" > \"$0.out\" 2> \"$0.err\"", base, prog] + args }) {
+      err(e) => (-1, e),
+      ok(child) => {
+        let t0 = datetime.now_ms()
+        var code = -2
+        var stopped = false
+        var over = false
+        while code == -2 and not stopped and not over {
+          stopped = aside.key(s.aside, term.read_key()!)!
+          match process.poll(child)! {
+            some(ok(st)) => { code = st.code },
+            some(err(_)) => { code = -1 },
+            none => (),
+          }
+          over = datetime.now_ms() - t0 > timeout_s * 1000
+        }
+        if code == -2 then { let _ = process.stop(child, 2000) }
+        let out = fs.read_text(base + ".out") ?? ""
+        let errs = fs.read_text(base + ".err") ?? ""
+        let text = string.trim_end(out + (if string.trim(errs) == "" then "" else "\n" + errs))
+        if code != -2 then (code, text)
+        else if stopped then (130, string.trim(text + "\n[The user stopped this.]"))
+        else (-1, string.trim(text + "\n[stopped: it had not finished in " + int.to_string(timeout_s) + " seconds]"))
+      },
+    }
+  }
 
 effect fn capped(s: Setup, text: String) -> String =
   if string.len(text) <= MAX_RESULT_CHARS then text

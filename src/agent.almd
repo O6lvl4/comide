@@ -143,7 +143,8 @@ let KEYS_HELP = """
   enter send · shift+enter, alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
   while comide works: type and press enter to tell it more at the next step, without stopping it
   esc: stop; with something typed, stop and send it now · ↑: take back what was handed over · ctrl+c: stop only
-  esc twice on an empty box: /rewind
+  tab: put what is typed by for after the request
+  at the box: esc twice on an empty line is /rewind · !command runs a command of your own · @ then tab names a file
   ctrl+c twice or ctrl+d on an empty box: leave
 """
 
@@ -295,7 +296,7 @@ effect fn next_line(opts: options.Options, place: Place, s: options.Session, his
     var skips = 0
     while asking {
       let status = if skips == 0 then status_of(opts, place, s) else "esc again to go back to before a request (/rewind)"
-      let p = editor.prompt(opts.ui, history, "ask, or tell comide what to change  ·  / for commands", status, COMMANDS, if skips == 0 then draft else "")!
+      let p = editor.prompt(opts.ui, history, "ask, or tell comide what to change  ·  / for commands", status, COMMANDS, if skips == 0 then draft else "", opts.root)!
       if p.kind == "send" then { got = some(p.text); asking = false }
       else if p.kind == "leave" then asking = false
       else if p.kind == "skip" then {
@@ -317,8 +318,9 @@ effect fn next_line(opts: options.Options, place: Place, s: options.Session, his
 // name, so a conversation taken up again can still go back. `id` names the file the
 // conversation is kept in, which /resume changes. `keep` is where the request now being
 // worked keeps its copies, `made` how many requests have been marked, and `draft` what
-// the input box starts with next.
-type Talk = { opts: options.Options, s: options.Session, open: Bool, marks: List[Mark] = [], id: String = "", keep: String = "", made: Int = 0, draft: String = "" }
+// the input box starts with next. `ran` is what the person ran themselves with `!` since
+// the last request, to be shown to the model with the next one.
+type Talk = { opts: options.Options, s: options.Session, open: Bool, marks: List[Mark] = [], id: String = "", keep: String = "", made: Int = 0, draft: String = "", ran: String = "" }
 
 // `at` is how many messages there were before the request, -1 when the conversation has
 // since been replaced (/clear, /compact) and only the files can go back. `dir` is where
@@ -347,7 +349,7 @@ effect fn marks_of(home: String, root: String, id: String) -> List[Mark] = {
 }
 
 // What the tools work with while a request is worked: the setup, with where to keep.
-fn setup_now(t: Talk, place: Place) -> toolkit.Setup = { ...place.setup, keep_dir: t.keep }
+fn setup_now(t: Talk, place: Place) -> toolkit.Setup = { ...place.setup, keep_dir: t.keep, aside: t.opts.aside }
 
 // The commands that start a request of their own, as a line of plain words does.
 let TURNING = ["/go", "/goal", "/init", "/review"]
@@ -402,20 +404,40 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
           let text = line ?? ""
           line = none
           if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
-          if starts_turn(text) then { t = marked(t, place, text)! }
-          t = match command_of(text) {
-            some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
-            none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, setup_now(t, place), t.s, text)! },
+          let own = string.strip_prefix(string.trim(text), "!")
+          if option.is_none(own) and starts_turn(text) then { t = marked(t, place, text)! }
+          t = match own {
+            // `!command`: the person's own command, run as they typed it and shown to them.
+            some(command) => bang(t, place, string.trim(command))!,
+            none => match command_of(text) {
+              some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
+              none => if string.trim(text) == "" then t
+                else { ...t, ran: "", s: one_turn(t.opts, setup_now(t, place), t.s, with_context(t, text)!)! },
+            },
           }
           // What was typed while the request was worked and did not reach the model is
           // not lost. Stopped with Esc to send it, it is the next request, now;
           // otherwise it is in the input box next.
           let unsaid = waiting.left(t.opts)!
           let at_once = waiting.stopped_to_send(t.opts)!
+          let stopped = waiting.was_stopped(t.opts)!
           if unsaid != "" and at_once then {
             println("\n" + ui.note_line(t.opts.ui, "stopped, and sent: " + (list.first(string.split(unsaid, "\n")) ?? "")))
             line = some(unsaid)
-          } else if unsaid != "" and t.draft == "" then { t = { ...t, draft: unsaid } }
+          } else if stopped then {
+            // Stopped, with nothing to send at once: what was put by for after does not
+            // go on by itself. It is in the input box with the rest.
+            let rest = list.join(list.filter([unsaid, waiting.all_after(t.opts)!], (p) => p != ""), "\n")
+            if rest != "" and t.draft == "" then { t = { ...t, draft: rest } }
+          } else {
+            if unsaid != "" and t.draft == "" then { t = { ...t, draft: unsaid } }
+            // What was put by for after the request is the next request, one at a time.
+            let put_by = waiting.next_after(t.opts)!
+            if put_by != "" then {
+              println("\n" + ui.note_line(t.opts.ui, "next, as put by: " + (list.first(string.split(put_by, "\n")) ?? "")))
+              line = some(put_by)
+            }
+          }
           if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, t.id, t.s)!
         }
       },
@@ -423,6 +445,33 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
   }
   println(ui.note_line(u, "transcript: " + place.transcript + " · session " + convo.usd(t.s.cost) + " · go on with: comide --continue"))
   ok(0)
+}
+
+// `!command` at the input box: run in the project as the person, with no question asked
+// (it is theirs), its output shown, and kept to be shown to the model with the next
+// request, so that "why does that fail?" needs no pasting. Esc stops it.
+effect fn bang(t: Talk, place: Place, command: String) -> Talk = {
+  let u = t.opts.ui
+  if command == "" then { println(ui.note_line(u, "! runs a command of your own here: !git status")); t }
+  else {
+    let (code, out) = toolkit.watched({ ...place.setup, aside: if t.opts.tui then place.setup.scratch + "/own" else "", runner: "" }, "bash", ["-c", "cd \"$1\" && eval \"$2\"", "comide", t.opts.root, command], 600)!
+    let lines = string.split(string.trim_end(out), "\n")
+    for l in list.take(lines, 40) { println("  " + l) }
+    if list.len(lines) > 40 then println(ui.note_line(u, "… " + int.to_string(list.len(lines) - 40) + " more lines"))
+    println(ui.note_line(u, "exit " + int.to_string(code) + " · comide will be shown this with your next request"))
+    let shown = "$ " + command + "\n" + (if string.len(out) > 6000 then string.take(out, 3000) + "\n[…]\n" + string.take_end(out, 3000) else out) + "\n[exit code " + int.to_string(code) + "]"
+    { ...t, ran: if t.ran == "" then shown else t.ran + "\n\n" + shown }
+  }
+}
+
+// The request as the model is given it: with what the person ran themselves since the
+// last one, and with the files they named with `@` said to be files.
+effect fn with_context(t: Talk, text: String) -> String = {
+  let words = list.filter_map(string.split(string.replace(text, "\n", " "), " "), (w) => string.strip_prefix(w, "@"))
+  let files = list.filter(list.map(words, (w) => string.strip_suffix(w, "/") ?? w), (w) => w != "" and fs.exists(absolute(w, t.opts.root)))
+  (if t.ran == "" then "" else "[The user ran this themselves, in the project, before asking:]\n" + t.ran + "\n\n")
+    + text
+    + (if list.is_empty(files) then "" else "\n\n[Named with @, in the project: " + list.join(files, ", ") + ". Look at them before you answer.]")
 }
 
 // One request, worked by the loop the session was started with.

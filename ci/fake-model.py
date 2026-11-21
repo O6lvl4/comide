@@ -43,7 +43,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         content = reply.get("content", "")
         for i in range(0, len(content), 40):
             send({"choices": [{"delta": {"content": content[i:i + 40]}}]})
-        send({"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1000, "completion_tokens": 100}})
+        # "tool_calls": [{"name": ..., "arguments": {...}}] in the reply are sent as tool calls.
+        calls = reply.get("tool_calls") or []
+        for i, call in enumerate(calls):
+            send({"choices": [{"delta": {"tool_calls": [{"index": i, "id": f"call-{count}-{i}", "type": "function",
+                                                        "function": {"name": call["name"], "arguments": json.dumps(call.get("arguments", {}))}}]}}]})
+        send({"choices": [{"delta": {}, "finish_reason": "tool_calls" if calls else "stop"}], "usage": {"prompt_tokens": 1000, "completion_tokens": 100}})
         self.wfile.write(b"data: [DONE]\n\n")
 
     def log_message(self, *args):

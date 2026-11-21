@@ -1,0 +1,118 @@
+// What the person types while comide works.
+//
+// While a request is worked the keys are still read, so the person need not stop it to
+// add a word. What is typed is shown on the waiting line, and then one of three things
+// is done with it:
+//
+//   Enter   it is handed over: the model is told it with the results of the step it is
+//           on, before its next reply
+//   Tab     it is put by for after: when the request has ended, it is the next request
+//   Esc     the request is stopped there, and it is sent at once as the next request
+//
+// ↑ with nothing typed takes back the last line handed over or put by, to change it or
+// drop it. With nothing typed and nothing waiting, Esc stops what is running, as it
+// always did; Ctrl+C only stops, whatever is typed.
+//
+// What was typed and none of the three, or handed over when the request was already
+// ending, is in the input box when the request ends.
+//
+// It is kept in files of the run's scratch directory, because the places that wait (a
+// model call, a command in the terminal, a tool's program) share nothing else. `path` is
+// the line being typed; beside it, `.told` holds the lines handed over and `.after` the
+// lines put by, one JSON string a line, and `.now` and `.stopped` are there when the
+// request was stopped to send at once, or stopped.
+
+import fs
+import json
+import self.term
+
+fn told_file(path: String) -> String = path + ".told"
+fn after_file(path: String) -> String = path + ".after"
+fn now_file(path: String) -> String = path + ".now"
+fn stopped_file(path: String) -> String = path + ".stopped"
+
+effect fn lines_in(file: String) -> List[String] =
+  list.filter(list.map(string.split(fs.read_text(file) ?? "", "\n"), (l) => value.as_string(json.parse(l) ?? value.string("")) ?? ""), (l) => l != "")
+
+effect fn lines_out(file: String, lines: List[String]) -> Unit = {
+  let _ = fs.write_text(file, list.join(list.map(lines, (l) => json.stringify(value.string(l)) + "\n"), ""))
+  ()
+}
+
+effect fn draft(path: String) -> String = fs.read_text(path) ?? ""
+effect fn told(path: String) -> List[String] = lines_in(told_file(path))!
+effect fn after(path: String) -> List[String] = lines_in(after_file(path))!
+
+// The draft, moved to the end of a file of lines.
+effect fn moved(path: String, file: String) -> Unit = {
+  let text = string.trim(draft(path)!)
+  if text != "" then {
+    lines_out(file, lines_in(file)! + [text])!
+    let _ = fs.write_text(path, "")
+  }
+}
+
+// The last line of a file of lines, back as the draft. False when there is none.
+effect fn back(path: String, file: String) -> Bool = {
+  let lines = lines_in(file)!
+  if list.is_empty(lines) then false
+  else {
+    lines_out(file, list.take(lines, list.len(lines) - 1))!
+    let _ = fs.write_text(path, list.last(lines) ?? "")
+    true
+  }
+}
+
+// A key that is not a stop: what it does to what is typed.
+effect fn typed(path: String, k: term.Key) -> Unit = {
+  let now = draft(path)!
+  if k.kind == "enter" then moved(path, told_file(path))!
+  else if k.kind == "tab" then moved(path, after_file(path))!
+  else if k.kind == "up" then {
+    if now == "" and not back(path, told_file(path))! then { let _ = back(path, after_file(path))! }
+  } else {
+    let next = if k.kind == "char" or k.kind == "paste" then now + k.text
+      else if k.kind == "newline" then now + "\n"
+      else if k.kind == "backspace" then string.drop_end(now, 1)
+      else if k.kind == "delete_word" or (k.kind == "ctrl" and (k.text == "u" or k.text == "w")) then ""
+      else now
+    if next != now then { let _ = fs.write_text(path, next) }
+  }
+}
+
+// A key pressed while comide works. True when it stops what is running: Esc or Ctrl+C.
+// Esc with something typed, or handed over and still waiting, also says that the request
+// ends here and what is typed is sent at once.
+effect fn key(path: String, k: term.Key) -> Bool =
+  if k.kind == "esc" or (k.kind == "ctrl" and k.text == "c") then {
+    if path != "" then {
+      let _ = fs.write_text(stopped_file(path), "1")
+      if k.kind == "esc" and (string.trim(draft(path)!) != "" or not list.is_empty(told(path)!)) then { let _ = fs.write_text(now_file(path), "1") }
+    }
+    true
+  } else {
+    if path != "" and k.kind != "none" then typed(path, k)!
+    false
+  }
+
+// Whether the request is being stopped to send what is typed at once.
+effect fn stopping(path: String) -> Bool = path != "" and fs.is_file(now_file(path))
+
+// A mark, asked about once: there, and now gone.
+effect fn taken(file: String) -> Bool =
+  if not fs.is_file(file) then false
+  else { let _ = fs.remove(file); true }
+
+// What the waiting line says after its own hint.
+effect fn hint(path: String, base: String, width: Int) -> String =
+  if path == "" then base
+  else {
+    let now = string.replace(draft(path)!, "\n", " ")
+    let n_told = list.len(told(path)!)
+    let n_after = list.len(after(path)!)
+    let waiting = list.join(list.filter([if n_told > 0 then int.to_string(n_told) + " for the next step" else "", if n_after > 0 then int.to_string(n_after) + " for after" else ""], (p) => p != ""), ", ")
+    list.join(list.filter([base,
+      if waiting == "" then "" else waiting + (if now == "" then " (↑ takes one back)" else ""),
+      if now != "" then "❯ " + string.take_end(now, int.max(10, width - 96)) + "▏ enter: next step · tab: after · esc: stop and send now"
+        else if waiting == "" then "type to tell comide more" else if n_told > 0 then "esc: stop and send now" else ""], (p) => p != ""), " · ")
+  }

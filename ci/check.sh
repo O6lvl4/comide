@@ -551,6 +551,76 @@ has "a line handed over is taken back with ↑ and another told in its place" "^
 has "Esc twice on an empty box is /rewind, chosen from its menus" "^rewound True$" "$tmp/pt6.out"
 has "and the request gone back over is in the input box again" "^again True$" "$tmp/pt6.out"
 
+# Tab puts what is typed by for after the request: when the request has ended, each line
+# put by is the next request, in turn.
+rm -rf "$tmp/fake7" "$tmp/pt7"; mkdir -p "$tmp/fake7" "$tmp/pt7"
+python3 - "$tmp/fake7" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+r = [say([{"command": "echo one; sleep 4; echo two", "wait_s": 10}])] + [say([], True, "Done.")] * 6
+for i, x in enumerate(r, 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt7" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake7" \
+    python3 "$here/ci/pty-drive.py" 16 'go@2,\r@2.5,then tests@3.5,\t@4,then docs@4.6,\t@5,\x03@13,\x03@13.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt7.raw" 2>&1 )
+python3 - "$tmp/fake7" > "$tmp/pt7.out" <<'EOF'
+import json, sys
+last = lambda n: [m["content"] for m in json.load(open(f"{sys.argv[1]}/request-{n}.json"))["messages"] if m["role"] == "user"][-1]
+print("after", "then tests" not in last(2) and last(4) == "then tests" and last(5) == "then docs")
+EOF
+has "what is put by with Tab is not told mid-request; it is the next request, and the one after" "^after True$" "$tmp/pt7.out"
+
+# The same keys with the tools sent as tool calls (--loop tools), against a stand-in that
+# speaks HTTP: a line typed and entered while a tool runs is told with its result, and Esc
+# with something typed stops the tool and sends it.
+rm -rf "$tmp/fake8" "$tmp/pt8"; mkdir -p "$tmp/fake8" "$tmp/pt8"
+python3 - "$tmp/fake8" <<'EOF'
+import json, sys
+r = [{"content": "", "tool_calls": [{"name": "shell", "arguments": {"command": "echo one; sleep 5; echo two"}}]},
+     {"content": "", "tool_calls": [{"name": "shell", "arguments": {"command": "echo three; sleep 30; echo four"}}]},
+     {"content": "Turned."}, {"content": "Turned."}]
+for i, x in enumerate(r, 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+port8=${FAKE_PORT:-18937}
+python3 "$here/ci/fake-model.py" "$port8" "$tmp/fake8" & fake8=$!
+python3 -c 'import time; time.sleep(0.7)'
+( cd "$tmp/pt8" && HOME="$tmp/home" LOCAL_BASE_URL="http://127.0.0.1:$port8/v1" LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 \
+    python3 "$here/ci/pty-drive.py" 20 'go@2,\r@2.5,use tabs@4.5,\r@5.2,other way@10,\x1b@11,\x03@17,\x03@17.4' -- "$here/comide" --yes --loop tools --model local:stand-in > "$tmp/pt8.raw" 2>&1 )
+kill "$fake8" 2> /dev/null || true
+python3 - "$tmp/fake8" > "$tmp/pt8.out" <<'EOF'
+import json, sys
+msgs = lambda n: json.load(open(f"{sys.argv[1]}/request-{n}.json"))["messages"]
+print("told", msgs(2)[-1]["role"] == "user" and msgs(2)[-1]["content"].endswith("use tabs") and msgs(2)[-2]["role"] == "tool")
+tool = [m for m in msgs(3) if m["role"] == "tool"][-1]["content"]
+print("stopped", msgs(3)[-1]["content"] == "other way" and "The user stopped this" in tool and "four" not in tool)
+EOF
+has "with --loop tools, what is typed while a tool runs is told with its result" "^told True$" "$tmp/pt8.out"
+has "and Esc with something typed stops the tool and sends it" "^stopped True$" "$tmp/pt8.out"
+
+# `!command` is the person's own: run without a question, shown, and given to the model
+# with the next request. `@` and Tab complete a file's name, and the request says which
+# of the words named with @ are files.
+rm -rf "$tmp/fake9" "$tmp/pt9"; mkdir -p "$tmp/fake9" "$tmp/pt9/src"
+echo hello > "$tmp/pt9/src/main.txt"; echo x > "$tmp/pt9/notes.md"
+python3 - "$tmp/fake9" <<'EOF'
+import json, sys
+for i in (1, 2):
+    json.dump({"content": json.dumps({"analysis": "Seen.", "plan": "p", "commands": [], "task_complete": True})}, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt9" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake9" \
+    python3 "$here/ci/pty-drive.py" 14 '!echo from-me; exit 3@2,\r@2.5,why @sr@5,\t@5.5,\t@6.2,and @no@7,\t@7.5,\r@9,\x03@12,\x03@12.4' -- "$here/comide" --model local:stand-in > "$tmp/pt9.raw" 2>&1 )
+python3 - "$tmp/fake9" "$tmp/pt9.raw" > "$tmp/pt9.out" <<'EOF'
+import json, re, sys
+sent = json.load(open(f"{sys.argv[1]}/request-1.json"))["messages"][-1]["content"]
+screen = re.sub(r"\x1b\[[0-9;?<>]*[A-Za-z]", " ", open(sys.argv[2], errors="replace").read()).replace("\r", "\n")
+print("own", "$ echo from-me; exit 3\nfrom-me\n[exit code 3]" in sent and bool(re.search(r"^ *from-me *$", screen, re.M)) and "Run this command?" not in screen)
+print("named", "why @src/main.txt and @notes.md" in sent and "Named with @, in the project: src/main.txt, notes.md" in sent)
+EOF
+has "!command runs unasked, is shown, and is given to the model with the next request" "^own True$" "$tmp/pt9.out"
+has "Tab after @ completes a file's name, and the request says which are files" "^named True$" "$tmp/pt9.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the

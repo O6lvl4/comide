@@ -435,12 +435,18 @@ and still waiting, it stops the request there and sends that at once as the next
 request: the way to turn comide round in the middle of a long command. Ctrl+C only
 stops, whatever is typed.
 
-A line handed over can be taken back until the step ends: ↑ with nothing typed puts it
-in front of you again, to change or to drop. When comide stops to ask you something
+Tab instead of Enter puts the line by for after: when the request has ended, each line
+put by is the next request, in turn (a request you stop does not go on to them; they
+come back to the input box). A line handed over or put by can be taken back: ↑ with
+nothing typed puts it in front of you again, to change or to drop. When comide stops to ask you something
 ("Run this command?"), what you were typing is not taken for the answer: the question
 opens once the keys have gone quiet, and what you typed is kept as what it was.
 
-At the input box, Esc twice on an empty line is `/rewind`.
+At the input box, Esc twice on an empty line is `/rewind`. A line that begins with `!`
+is a command of your own: it runs in the project as you typed it, with no question,
+and comide is shown it and its output with your next request (`!cargo test`, then
+"why does that fail?"). `@` and Tab complete a file's name, and comide is told which of
+the words you wrote with `@` are files to look at.
 
 ## Web search
 

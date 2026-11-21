@@ -11,7 +11,7 @@
 //   ↑ ↓                              between lines of the text, then through history
 //   Shift+Enter, Alt+Enter, or \ then Enter   a new line in the text
 //   Enter                            send
-//   Tab                              complete a slash command
+//   Tab                              complete a slash command, or a file's name after @
 //   Ctrl+L                           clear the screen
 //   Ctrl+C                           clear the text; on an empty box, twice to leave
 //   Ctrl+D                           on an empty box, leave
@@ -19,6 +19,7 @@
 import io
 import fs
 import json
+import process
 import self.term
 import self.textbox
 import self.ui
@@ -104,7 +105,8 @@ type Prompted = { kind: String, text: String }
 type Box = { ed: Ed, above: Int, history_at: Int, draft: String, armed: Bool }
 
 // `initial` is what the box holds when it opens, "" for nothing.
-effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: String, commands: List[Command], initial: String) -> Prompted = {
+// `root` is the project, for Tab after `@` to complete a file's name; "" for none.
+effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: String, commands: List[Command], initial: String, root: String) -> Prompted = {
   var b = Box { ed: if initial == "" then textbox.empty() else textbox.of(initial), above: 0, history_at: list.len(history), draft: "", armed: false }
   var result: Prompted? = none
   // Only while the box is read: a program run in a turn must not be left with keys told
@@ -113,7 +115,11 @@ effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: S
   b = Box { ed: b.ed, above: draw(0, frame(u, b.ed, placeholder, status, commands))!, history_at: b.history_at, draft: b.draft, armed: b.armed }
   while option.is_none(result) {
     let k = term.read_key()!
-    if k.kind != "none" then {
+    let named = if k.kind == "tab" and root != "" then mention(textbox.text(b.ed), b.ed.cursor == list.len(b.ed.chars)) else none
+    if option.is_some(named) then {
+      let (ed, said) = file_completed(root, b.ed, named ?? "")!
+      b = redrawn(u, with_ed(b, ed), k, placeholder, if said == "" then status else said, commands)!
+    } else if k.kind != "none" then {
       let (next, done) = on_key(b, k, history, commands)
       match done {
         some(p) => {
@@ -127,6 +133,38 @@ effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: S
   }
   term.keys_off()!
   result ?? Prompted { kind: "leave", text: "" }
+}
+
+// ---- a file named with @ ---------------------------------------------------------------
+
+// What is being typed after an `@` at the end of the text: the beginning of a file's
+// name. None when the last word does not start with `@`, or the cursor is not at the end.
+fn mention(text: String, at_end: Bool) -> String? =
+  if not at_end then none
+  else string.strip_prefix(list.last(string.split(string.replace(text, "\n", " "), " ")) ?? "", "@")
+
+// What a list of names all begin with.
+fn common(names: List[String]) -> String = {
+  var p = list.first(names) ?? ""
+  for n in names { while p != "" and not string.starts_with(n, p) { p = string.drop_end(p, 1) } }
+  p
+}
+
+// The text with the name after `@` completed as far as the project's files settle it,
+// and what to say under the box: the names it could still be, or that there is none.
+effect fn file_completed(root: String, e: textbox.Ed, prefix: String) -> (textbox.Ed, String) = {
+  let script = "cd \"$1\" 2> /dev/null || exit 0; compgen -f -- \"$2\" | head -60 | while IFS= read -r f; do if [ -d \"$f\" ]; then printf '%s/\\n' \"$f\"; else printf '%s\\n' \"$f\"; fi; done"
+  let out = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", script, "comide", root, prefix], timeout_ms: 3000 }) { ok(st) => st.stdout, err(_) => "" }
+  let names = list.filter(string.split(out, "\n"), (n) => n != "")
+  if list.is_empty(names) then (e, "no file here begins with " + prefix)
+  else {
+    let one = list.len(names) == 1
+    let to = if one then (list.first(names) ?? "") + (if string.ends_with(list.first(names) ?? "", "/") then "" else " ") else common(names)
+    let text = textbox.text(e)
+    let done = textbox.of(string.drop_end(text, string.len(prefix)) + to)
+    (done, if one then "" else list.join(list.map(list.take(names, 8), (n) => list.last(string.split(string.strip_suffix(n, "/") ?? n, "/")) ?? n), "  ")
+      + (if list.len(names) > 8 then "  …" else ""))
+  }
 }
 
 // The box drawn again after a key that did not end the prompt. Ctrl+L clears the screen
@@ -266,4 +304,13 @@ fn menu_key(k: term.Key, sel: Int, n: Int) -> (Int, Int?) = {
   else if k.kind == "esc" or (k.kind == "ctrl" and k.text == "c") then (sel, some(-1))
   else if k.kind == "char" and digit >= 1 and digit <= n then (sel, some(digit - 1))
   else (sel, none)
+}
+
+test "a file's name is being typed after @, at the end of the text" {
+  assert_eq(mention("look at @src/ma", true), some("src/ma"))
+  assert_eq(mention("look at @", true), some(""))
+  assert_eq(mention("look at src", true), none)
+  assert_eq(mention("look at @src", false), none)
+  assert_eq(common(["src/main.almd", "src/map.almd"]), "src/ma")
+  assert_eq(common(["a", "b"]), "")
 }

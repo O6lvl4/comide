@@ -50,7 +50,7 @@ effect fn explore(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
   else if task == "" then toolkit.failed("explore needs a task: the question, and everything the helper needs to know to answer it.", "no task")
   else {
     let cost_file = s.scratch + "/explore-" + int.to_string(datetime.now_ms()) + ".cost"
-    let (code, out) = toolkit.run_program("bash", arguments(cost_file, s.self_bin, task, s.root, s.explore_model, s.runner), TIMEOUT_S)!
+    let (code, out) = toolkit.watched(s, "bash", arguments(cost_file, s.self_bin, task, s.root, s.explore_model, s.runner), TIMEOUT_S)!
     let cost = cost_of(fs.read_text(cost_file) ?? "")
     let errs = fs.read_text(cost_file + ".err") ?? ""
     let r = result_of(code, out, errs, cost)
