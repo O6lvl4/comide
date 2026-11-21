@@ -373,6 +373,11 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
     var last_in = s.last_in
     var unread = 0
     var asked = false
+    // What the model said when it first said it was done. Asked whether it is sure, it
+    // answers that question ("Yes, the task is complete: ..."), in fewer words and without
+    // the code it had just shown; twice a person asked to see code and got that instead.
+    // When nothing was run in between, the first is the answer.
+    var first_said = ""
     var acted = false
     var done = false
     var work = watch.fresh(s.check)
@@ -469,10 +474,12 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
                     }
                   } else list.push(messages, exchange.message("user", ran.seen))
                   asked = false
+                  first_said = ""
                 },
                 AskSure => {
                   list.push(messages, exchange.message("user", ran.seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
                   asked = true
+                  first_said = w.analysis
                 },
                 Done => {
                   // Said to be the end. What may still say it is not: the check after a
@@ -518,9 +525,10 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
                     }
                   }
                   if go_on == "" then {
-                    answer(opts, w.analysis)!
+                    answer(opts, if asked and not had_orders and string.trim(first_said) != "" then first_said else w.analysis)!
                     done = true
                   } else {
+                    first_said = ""
                     if opts.live and string.trim(w.analysis) != "" then println("\n" + convo.answer_lines(u, string.trim(w.analysis), true))
                     list.push(messages, exchange.message("user", (if had_orders then ran.seen + "\n\n" else "") + go_on))
                     asked = false

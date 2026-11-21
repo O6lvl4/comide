@@ -276,16 +276,16 @@ import json, sys
 def say(commands, done=False, analysis="a"):
     return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done}), "reasoning": "thought"}
 replies = [say([{"command": "echo hi > made.txt && cat made.txt"}]),
-           say([], done=True), say([], done=True, analysis="Wrote made.txt; it says hi."),
+           say([], done=True, analysis="Wrote made.txt; it says hi."), say([], done=True, analysis="Yes."),
            say([{"command": "echo more >> made.txt"}, {"command": "echo never > never.txt"}, {"command": "echo after > after.txt"}]),
-           say([], done=True), say([], done=True, analysis="Added a line.")]
+           say([], done=True, analysis="Added a line."), say([], done=True, analysis="Yes.")]
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
 conv() { HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_FAKE="$tmp/fake" ./comide "$@" --loop written --model local:stand-in --root "$tmp/conv"; }
 conv -p "make the file" --yes > "$tmp/conv1.out" 2> "$tmp/conv1.err"
 same "exit 0" "0" "$?"
-has "the last analysis is the answer" "Wrote made.txt; it says hi." "$tmp/conv1.out"
+has "what the model said when it finished is the answer" "Wrote made.txt; it says hi." "$tmp/conv1.out"
 same "the command ran" "hi" "$(cat "$tmp/conv/made.txt")"
 printf 'add a line\n1\nuse printf instead\n' | conv --continue > "$tmp/conv2.out" 2> "$tmp/conv2.err"
 same "exit 0" "0" "$?"
@@ -363,12 +363,13 @@ say "== a long text, written after the object"
 rm -rf "$tmp/fake" "$tmp/bd"; mkdir -p "$tmp/fake" "$tmp/bd"
 python3 - "$tmp/fake" <<'EOF'
 import json, sys
-def say(commands, done=False, tail=""):
-    return {"content": json.dumps({"analysis": "a", "plan": "p", "commands": commands, "task_complete": done}) + tail}
+def say(commands, done=False, tail="", analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done}) + tail}
 body = "\n<<<BODY make\ncat > made.py <<'PY'\nd = {\"k\": [1, 2]}\nprint(\"}\" + str(d[\"k\"][1]))\nPY\npython3 made.py > made.out\n>>>BODY make\n"
 replies = [say([{"command": "@body:make", "wait_s": 10}], tail=body),
            say([{"command": "@body:missing"}]),
-           say([], done=True), say([], done=True)]
+           say([], done=True, analysis="@body:answer", tail="\n<<<BODY answer\nMade it. It prints:\n\n    }2\n>>>BODY answer\n"),
+           say([], done=True, analysis="Yes, the task is complete.")]
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
 EOF
@@ -376,6 +377,11 @@ HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_
   ./comide -p "make it" --yes --model local:stand-in --root "$tmp/bd" > "$tmp/bd.out" 2> "$tmp/bd.err"
 same "exit 0" "0" "$?"
 same "the text ran as it was written" "}2" "$(cat "$tmp/bd/made.out" 2>/dev/null)"
+# Asked whether it is sure, the model answers that question; what it said first, with its
+# line breaks, is the answer the person gets.
+same "the answer is what the model said when it finished, not its yes to being asked" "Made it. It prints:
+
+    }2" "$(cat "$tmp/bd.out")"
 python3 - "$tmp/fake" > "$tmp/bd.sent" <<'EOF'
 import json, sys
 f = sys.argv[1]
