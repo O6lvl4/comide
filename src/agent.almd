@@ -142,7 +142,8 @@ let NOT_HERE = [
 let KEYS_HELP = """
   enter send · shift+enter, alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
   while comide works: type and press enter to tell it more at the next step, without stopping it
-  esc: stop; with something typed, stop and send it now · ctrl+c: stop only
+  esc: stop; with something typed, stop and send it now · ↑: take back what was handed over · ctrl+c: stop only
+  esc twice on an empty box: /rewind
   ctrl+c twice or ctrl+d on an empty box: leave
 """
 
@@ -290,10 +291,17 @@ effect fn next_line(opts: options.Options, place: Place, s: options.Session, his
   if opts.tui then {
     var got: String? = none
     var asking = true
+    // Esc on an empty box, twice running, is /rewind: the box says so after the first.
+    var skips = 0
     while asking {
-      let p = editor.prompt(opts.ui, history, "ask, or tell comide what to change  ·  / for commands", status_of(opts, place, s), COMMANDS, draft)!
+      let status = if skips == 0 then status_of(opts, place, s) else "esc again to go back to before a request (/rewind)"
+      let p = editor.prompt(opts.ui, history, "ask, or tell comide what to change  ·  / for commands", status, COMMANDS, if skips == 0 then draft else "")!
       if p.kind == "send" then { got = some(p.text); asking = false }
       else if p.kind == "leave" then asking = false
+      else if p.kind == "skip" then {
+        skips = skips + 1
+        if skips >= 2 then { got = some("/rewind"); asking = false }
+      }
     }
     got
   } else {

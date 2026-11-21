@@ -435,6 +435,13 @@ and still waiting, it stops the request there and sends that at once as the next
 request: the way to turn comide round in the middle of a long command. Ctrl+C only
 stops, whatever is typed.
 
+A line handed over can be taken back until the step ends: ↑ with nothing typed puts it
+in front of you again, to change or to drop. When comide stops to ask you something
+("Run this command?"), what you were typing is not taken for the answer: the question
+opens once the keys have gone quiet, and what you typed is kept as what it was.
+
+At the input box, Esc twice on an empty line is `/rewind`.
+
 ## Web search
 
 `web_search` needs a SearXNG with JSON answers on, bound to this machine:

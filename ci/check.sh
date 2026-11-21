@@ -512,6 +512,45 @@ has "Esc with something typed stops the request and sends it as the next one at 
 has "and says so; the command it stopped did not go on" "^said True$" "$tmp/pt4.out"
 has "Esc with nothing typed stops the command only, and sends nothing" "^plain True$" "$tmp/pt4.out"
 
+# A question put to the person is not answered by what they were typing. The request, and
+# then "1" and Enter, arrive together, before the question "Run this command?" is up: on
+# 0.9.3 the "1" answered it and the command ran unasked.
+rm -rf "$tmp/fake5" "$tmp/pt5"; mkdir -p "$tmp/fake5" "$tmp/pt5"
+python3 - "$tmp/fake5" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+for i, x in enumerate([say([{"command": "touch ran.txt"}]), say([], True, "Done."), say([], True, "Done.")], 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt5" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake5" \
+    python3 "$here/ci/pty-drive.py" 12 'go\r1\r@2,\x1b@6,\x03@10,\x03@10.4' -- "$here/comide" --model local:stand-in > "$tmp/pt5.raw" 2>&1 )
+[ ! -e "$tmp/pt5/ran.txt" ] && grep -q "Run this command?" "$tmp/pt5.raw" && good "keys typed ahead of a question do not answer it: the command is not run" || bad "a command ran on keys typed before its question was up"
+
+# ↑ takes back a line handed over while comide works, before it is told; and Esc twice on
+# an empty input box is /rewind, with its menus, which puts the request in the box again.
+rm -rf "$tmp/fake6" "$tmp/pt6"; mkdir -p "$tmp/fake6" "$tmp/pt6"
+python3 - "$tmp/fake6" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+for i, x in enumerate([say([{"command": "echo one; sleep 5; echo two", "wait_s": 10}]), say([], True, "Done."), say([], True, "Done.")], 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt6" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake6" \
+    python3 "$here/ci/pty-drive.py" 20 'go@2,\r@2.5,wrong@3.5,\r@4,\x1b[A@4.8,\x15@5.4,right@5.8,\r@6.4,\x1b@11,\x1b@12,\r@13.5,\r@15,\x03@18,\x03@18.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt6.raw" 2>&1 )
+python3 - "$tmp/fake6" "$tmp/pt6.raw" > "$tmp/pt6.out" <<'EOF'
+import json, re, sys
+last = json.load(open(f"{sys.argv[1]}/request-2.json"))["messages"][-1]["content"]
+screen = re.sub(r"\x1b\[[0-9;?<>]*[A-Za-z]", " ", open(sys.argv[2], errors="replace").read()).replace("\r", "\n")
+print("taken", last.endswith("right") and "wrong" not in last)
+print("rewound", "esc again to go back" in screen and "Go back to before which request?" in screen and "the conversation is back to before: go" in screen)
+print("again", any(re.search(r"❯ *go", l) and "│" in l for l in screen.split("\n")[-30:]))
+EOF
+has "a line handed over is taken back with ↑ and another told in its place" "^taken True$" "$tmp/pt6.out"
+has "Esc twice on an empty box is /rewind, chosen from its menus" "^rewound True$" "$tmp/pt6.out"
+has "and the request gone back over is in the input box again" "^again True$" "$tmp/pt6.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the

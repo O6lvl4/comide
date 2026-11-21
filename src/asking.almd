@@ -7,6 +7,7 @@ import io
 import self.editor
 import self.ui
 import self.options
+import self.waiting
 
 type Permission = { run: Bool, allow_from_now: Bool, said: String }
 
@@ -37,6 +38,8 @@ effect fn permitted(opts: options.Options, allow: Bool, question: String) -> Per
 
 // The question as a menu, on a terminal comide has taken over.
 effect fn chosen(opts: options.Options, question: String) -> Permission = {
+  // What the person was typing when the question came up is not an answer to it.
+  waiting.settled(opts)!
   let pick = editor.choose(opts.ui, question, ["Yes", "Yes, and stop asking this session", "No, and tell comide what to do instead"])!
   if pick == 0 then yes_once()
   else if pick == 1 then yes_always()

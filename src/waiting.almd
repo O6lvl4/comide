@@ -98,7 +98,15 @@ effect fn stopped_to_send(opts: options.Options) -> Bool =
 
 effect fn typed(aside: String, k: term.Key) -> Unit = {
   let draft = fs.read_text(aside) ?? ""
-  if k.kind == "enter" then {
+  if k.kind == "up" then {
+    // ↑ with nothing typed takes the last line handed over back, to change it or to
+    // drop it (Ctrl+U): until the step ends it has not been told.
+    let lines = told_lines(aside)!
+    if draft == "" and not list.is_empty(lines) then {
+      let _ = fs.write_text(told_file(aside), list.join(list.map(list.take(lines, list.len(lines) - 1), (l) => json.stringify(value.string(l)) + "\n"), ""))
+      let _ = fs.write_text(aside, list.last(lines) ?? "")
+    }
+  } else if k.kind == "enter" then {
     if string.trim(draft) != "" then {
       let _ = fs.append_text(told_file(aside), json.stringify(value.string(string.trim(draft))) + "\n")
       let _ = fs.write_text(aside, "")
@@ -113,6 +121,27 @@ effect fn typed(aside: String, k: term.Key) -> Unit = {
   }
 }
 
+// A question is about to be put to the person (asking.almd). Keys typed for something
+// else may still be on their way, and a stray Enter or digit would answer the question:
+// "yes, run it", said by accident. So the keys are read until none has come for three
+// tenths of a second, and taken as what they were, words said aside. Only then is the
+// question open to an answer.
+effect fn settled(opts: options.Options) -> Unit =
+  if not opts.tui then ()
+  else {
+    var quiet = 0
+    var read = 0
+    while quiet < 3 and read < 2000 {
+      let k = term.read_key()!
+      if k.kind == "none" then { quiet = quiet + 1 }
+      else {
+        quiet = 0
+        read = read + 1
+        if opts.aside != "" and k.kind != "esc" and k.kind != "ctrl" then typed(opts.aside, k)!
+      }
+    }
+  }
+
 effect fn told_lines(aside: String) -> List[String] =
   list.filter(list.map(string.split(fs.read_text(told_file(aside)) ?? "", "\n"), (l) => value.as_string(json.parse(l) ?? value.string("")) ?? ""), (l) => l != "")
 
@@ -124,7 +153,7 @@ effect fn hint(opts: options.Options, base: String) -> String =
     let draft = string.replace(fs.read_text(opts.aside) ?? "", "\n", " ")
     let waiting_ = list.len(told_lines(opts.aside)!)
     list.join(list.filter([base,
-      if waiting_ > 0 then int.to_string(waiting_) + " to tell at the next step" else "",
+      if waiting_ > 0 then int.to_string(waiting_) + " to tell at the next step" + (if draft == "" then " (↑ takes it back)" else "") else "",
       if draft != "" then "❯ " + string.take_end(draft, int.max(10, opts.ui.width - 78)) + "▏ enter: tell at the next step · esc: stop and send now"
         else if waiting_ == 0 then "type to tell comide more" else "esc: stop and send now"], (p) => p != ""), " · ")
   }
