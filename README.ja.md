@@ -366,7 +366,8 @@ Claude Code のものなので、そちら向けに書いたフックはその�
 
 ## キー
 
-Enter で送信 · Alt+Enter で改行 · ↑↓ で履歴 · Tab で `/コマンド` を補完 ·
+Enter で送信 · Shift+Enter か Alt+Enter（Mac では Option）で改行。`\` のあと Enter でも
+改行 · ↑↓ で履歴 · Tab で `/コマンド` を補完 ·
 Esc で中断 · Ctrl+D で終了。ほかは `/help` で出ます。
 
 ## Web 検索

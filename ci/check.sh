@@ -433,6 +433,28 @@ has "and from what is sent" "^sent True$" "$tmp/pt.out"
 has "a command that is running is shown running, with the seconds" "^running True$" "$tmp/pt.out"
 has "what it printed and the answer are shown" "^printed True$" "$tmp/pt.out"
 
+# Shift+Enter and Option+Enter. A terminal sends both as a plain Return unless it is asked
+# to tell modified keys apart, so the box asks while it is read (and takes the asking back),
+# and the keys arrive as `ESC [ 13 ; 2 u` and `ESC [ 13 ; 3 u`: each a new line in the text.
+# Ctrl+C arrives in the same form then, and still leaves.
+rm -rf "$tmp/fake2" "$tmp/pt2"; mkdir -p "$tmp/fake2" "$tmp/pt2"
+python3 - "$tmp/fake2" <<'EOF'
+import json, sys
+for i in (1, 2):
+    json.dump({"content": json.dumps({"analysis": "Read.", "plan": "p", "commands": [], "task_complete": True})}, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt2" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake2" \
+    python3 "$here/ci/pty-drive.py" 12 'a@2,\x1b[13;2u@2.5,b@3,\x1b[13;3u@3.5,c@4,\r@4.5,\x1b[99;5u@9,\x1b[99;5u@9.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt2.raw" 2>&1 )
+python3 - "$tmp/fake2" "$tmp/pt2.raw" > "$tmp/pt2.out" <<'EOF'
+import json, sys
+sent = [m["content"] for m in json.load(open(sys.argv[1] + "/request-1.json"))["messages"] if m["role"] == "user"]
+raw = open(sys.argv[2], "rb").read()
+print("lines", sent[-1] == "Task Description:\na\nb\nc")
+print("asked", b"\x1b[>1u" in raw, "taken back", raw.count(b"\x1b[<u") >= raw.count(b"\x1b[>1u") > 0)
+EOF
+has "Shift+Enter and Option+Enter are new lines in what is sent" "^lines True$" "$tmp/pt2.out"
+has "the terminal is asked to tell modified keys apart, and the asking is taken back" "^asked True taken back True$" "$tmp/pt2.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the

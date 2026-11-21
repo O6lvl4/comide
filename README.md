@@ -382,7 +382,8 @@ a project's servers are not used until the project is trusted.
 
 ## Keys
 
-Enter sends · Alt+Enter adds a line · ↑↓ history · Tab completes `/commands` ·
+Enter sends · Shift+Enter or Alt+Enter (Option on a Mac) adds a line, as does `\` then
+Enter · ↑↓ history · Tab completes `/commands` ·
 Esc interrupts a turn · Ctrl+D leaves. `/help` lists the rest.
 
 ## Web search

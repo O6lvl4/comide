@@ -9,7 +9,7 @@
 //   ← → Home End, Ctrl+A/E           move; Alt+← → (or Alt+B/F) by word
 //   Backspace Delete, Ctrl+U/K/W     delete; to line start, to line end, a word back
 //   ↑ ↓                              between lines of the text, then through history
-//   Alt+Enter, or \ then Enter       a new line in the text
+//   Shift+Enter, Alt+Enter, or \ then Enter   a new line in the text
 //   Enter                            send
 //   Tab                              complete a slash command
 //   Ctrl+L                           clear the screen
@@ -106,6 +106,9 @@ type Box = { ed: Ed, above: Int, history_at: Int, draft: String, armed: Bool }
 effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: String, commands: List[Command]) -> Prompted = {
   var b = Box { ed: textbox.empty(), above: 0, history_at: list.len(history), draft: "", armed: false }
   var result: Prompted? = none
+  // Only while the box is read: a program run in a turn must not be left with keys told
+  // in a way it does not know.
+  term.keys_on()!
   b = Box { ed: b.ed, above: draw(0, frame(u, b.ed, placeholder, status, commands))!, history_at: b.history_at, draft: b.draft, armed: b.armed }
   while option.is_none(result) {
     let k = term.read_key()!
@@ -121,6 +124,7 @@ effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: S
       }
     }
   }
+  term.keys_off()!
   result ?? Prompted { kind: "leave", text: "" }
 }
 
