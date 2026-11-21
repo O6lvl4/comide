@@ -205,6 +205,14 @@ directory it was given. `ci/check.sh` tries to get out from inside it.
 | `COMIDE_REASONING_BACK=0` | what the model reasoned is not sent back to it (cheaper; the default sends it) |
 | `COMIDE_CHECK=1` | said complete, the work is checked once more in a new conversation that sees only the task |
 
+Under nautra the agent has more than the terminal from 0.8.1: `read`, `write` and
+`reference` are WebAssembly components of their own (`src/tool*.almd`), each given only
+what it needs — `read` sees the project and cannot write, `write` has the project and
+nothing else, `reference` has nothing at all — and none can start a program or reach a
+network. The agent asks nautra which tools its composition gives and tells the model of
+those, so a tool added to the composition is one the model can use. `TOOLS_OFF=1` gives
+the terminal alone.
+
 The loop was written and measured outside comide first, against Harbor's terminus-2 on
 Terminal-Bench 2 tasks with the same model, and passes about as many.
 

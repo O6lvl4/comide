@@ -1,0 +1,18 @@
+// A tool for nautra, as a WebAssembly component: a language's syntax as one program.
+//
+//   {"language": "almide"}   on stdin; the reference on stdout
+//
+// It is given nothing at all: it can only say what it holds (primer.almd). The native
+// reference tool also looks a module up by asking the toolchain; a component cannot
+// start one, so here that is the terminal's to do, and the answer says how.
+
+import io
+import json
+import self.primer
+
+effect fn main() -> Unit = {
+  let a = json.parse(io.read_all()) ?? value.object([])
+  let language = string.to_lower(string.trim(value.get_string(a, "language") ?? ""))
+  if language == "almide" then println(primer.ALMIDE_NOTE)
+  else println("[there is no reference for " + language + " here. There is one for: almide]")
+}

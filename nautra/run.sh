@@ -120,6 +120,30 @@ done
   # The host's own temporary directory is not the terminal's to write; /tmp is.
   echo 'env = ["TMPDIR=/tmp"]'
   echo 'timeout = "6m"'
+  # The other tools are components, each with the least it needs: read sees the project
+  # and cannot write; write has the project and nothing else; reference has nothing at
+  # all. None has a network. TOOLS_OFF=1 gives the terminal alone, as before 0.8.
+  if [ "${TOOLS_OFF:-0}" != 1 ]; then
+    echo
+    echo "[tools.read]"
+    echo "image = $(quoted "$here/build/tool-read.wasm")"
+    echo 'description = "Read a file of the project: its lines, numbered. For a long file give from and to (line numbers). It cannot write or run anything."'
+    echo 'input = { type = "object", properties = { path = { type = "string" }, from = { type = "integer" }, to = { type = "integer" } }, required = ["path"] }'
+    echo "mounts = [$(list "$root:/work:ro")]"
+    echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
+    echo
+    echo "[tools.write]"
+    echo "image = $(quoted "$here/build/tool-write.wasm")"
+    echo 'description = "Write a file of the project, whole: a new file, or a complete rewrite. Give the content as a text after the object (@body:NAME). It writes nowhere but the project, and does not check syntax."'
+    echo 'input = { type = "object", properties = { path = { type = "string" }, content = { type = "string" } }, required = ["path", "content"] }'
+    echo "mounts = [$(list "$root:/work")]"
+    echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
+    echo
+    echo "[tools.reference]"
+    echo "image = $(quoted "$here/build/tool-reference.wasm")"
+    echo 'description = "The syntax of a language you may not know well (almide), as one checked program, and how to look up its standard library. Call it before writing that language."'
+    echo 'input = { type = "object", properties = { language = { type = "string" } }, required = ["language"] }'
+  fi
 } > "$run/comide.toml"
 
 echo "comide under nautra: workspace $root, record in $run" >&2

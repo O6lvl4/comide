@@ -1,0 +1,54 @@
+// A tool for nautra, as a WebAssembly component: read a file of the project.
+//
+//   {"path": "src/a.py", "from": 10, "to": 40}   on stdin; the lines, numbered, on stdout
+//
+// It is given the project read-only and nothing else (nautra/run.sh): it cannot write,
+// start a process or reach a network, whatever it is asked. A path is placed by
+// toolpath.almd.
+
+import env
+import fs
+import io
+import json
+import self.toolpath
+
+let MAX_LINES = 400
+
+fn numbered(lines: List[String], first: Int) -> String = {
+  var out: List[String] = []
+  var n = first
+  for l in lines {
+    list.push(out, int.to_string(n) + "\t" + l)
+    n = n + 1
+  }
+  list.join(out, "\n")
+}
+
+// The lines `from`..`to` of a text (1 is the first; 0 for either end means that end),
+// and a line saying what was left out.
+fn part(text: String, from: Int, to: Int) -> String = {
+  let all = string.split(string.trim_end(text), "\n")
+  let total = list.len(all)
+  let a = if from <= 0 then 1 else int.min(from, int.max(1, total))
+  let asked = if to <= 0 or to > total then total else to
+  let b = int.min(asked, a + MAX_LINES - 1)
+  let shown = list.take(list.drop(all, a - 1), int.max(0, b - a + 1))
+  numbered(shown, a) + (if b < total then "\n[lines " + int.to_string(a) + "-" + int.to_string(b) + " of " + int.to_string(total) + "; ask for the rest with from and to]" else "")
+}
+
+effect fn main() -> Unit = {
+  let a = json.parse(io.read_all()) ?? value.object([])
+  let given = string.trim(value.get_string(a, "path") ?? "")
+  let root = env.get("ROOT") ?? "."
+  let path = toolpath.placed(given, root, env.get("HOST_ROOT") ?? "")
+  if given == "" then println("[read needs a path]")
+  else match fs.read_text(path) {
+    err(e) => println("[" + given + " could not be read: " + e + "]"),
+    ok(text) => println(part(text, value.get_int(a, "from") ?? 0, value.get_int(a, "to") ?? 0)),
+  }
+}
+
+test "a part of a file is its lines, numbered, and says what is left" {
+  assert_eq(part("a\nb\nc\n", 0, 0), "1\ta\n2\tb\n3\tc")
+  assert_eq(part("a\nb\nc\n", 2, 2), "2\tb\n[lines 2-2 of 3; ask for the rest with from and to]")
+}

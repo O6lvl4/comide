@@ -1,0 +1,45 @@
+// A tool for nautra, as a WebAssembly component: write a file of the project, whole.
+//
+//   {"path": "src/a.py", "content": "..."}   on stdin; what was done, on stdout
+//
+// It is given the project and nothing else (nautra/run.sh): no process, no network. A
+// path is placed by toolpath.almd, and a file
+// outside what it was given cannot be written, by nautra's doing and not this program's.
+// It does not check syntax: that is golemide's gate, a native program (comide#33).
+
+import env
+import fs
+import io
+import json
+import self.toolpath
+
+fn parent(path: String) -> String = {
+  let parts = string.split(path, "/")
+  list.join(list.take(parts, int.max(0, list.len(parts) - 1)), "/")
+}
+
+effect fn main() -> Unit = {
+  let a = json.parse(io.read_all()) ?? value.object([])
+  let given = string.trim(value.get_string(a, "path") ?? "")
+  let root = env.get("ROOT") ?? "."
+  let path = toolpath.placed(given, root, env.get("HOST_ROOT") ?? "")
+  match value.get(a, "content") {
+    none => println("[write needs content]"),
+    some(c) => if given == "" then println("[write needs a path]") else {
+      let text = value.as_string(c) ?? ""
+      let before = fs.read_text(path) ?? ""
+      let dir = parent(path)
+      let _ = if dir != "" then fs.mkdir_p(dir) else ok(())
+      match fs.write_text(path, text) {
+        err(e) => println("[" + given + " could not be written: " + e + "]"),
+        ok(_) => println((if before == "" then "wrote " else "rewrote ") + given + ": "
+          + int.to_string(list.len(string.split(string.trim_end(text), "\n"))) + " lines"),
+      }
+    },
+  }
+}
+
+test "the directory a file is in" {
+  assert_eq(parent("/w/proj/src/a.py"), "/w/proj/src")
+  assert_eq(parent("a.py"), "")
+}

@@ -486,6 +486,15 @@ else
   has "the directory and the variables last from call to call" "^kept=0$" "$tmp/probe.out"
   has "a command that outlasts its wait is waited for again" "^waited=True$" "$tmp/probe.out"
   has "nothing is left running when the run ends" "^left-running=False$" "$tmp/probe.out"
+  # Its other tools are components, each with only what it needs (src/tool*.almd).
+  has "the agent is told of the tools its composition gives, asked of nautra" "^tools-told=True$" "$tmp/probe.out"
+  has "a file is written by a tool from a text after the object" "^tool-wrote=True$" "$tmp/probe.out"
+  has "and is on the host as it was written" "^tool-file=True$" "$tmp/probe.out"
+  has "and read back by the path the host knows it by" "^tool-read=True$" "$tmp/probe.out"
+  has "the tool that writes cannot write beside the project" "^tool-escaped=False$" "$tmp/probe.out"
+  has "the tool that reads cannot read the system's files" "^tool-hosts=True$" "$tmp/probe.out"
+  has "the reference tool, given nothing, says what it holds" "^tool-reference=True$" "$tmp/probe.out"
+  has "a tool the composition does not give is said back" "^tool-unknown=True$" "$tmp/probe.out"
 
   say "== --confined: the conversation here, its terminal behind nautra's door"
   # The native comide, with every terminal order sent to the terminal nautra publishes.

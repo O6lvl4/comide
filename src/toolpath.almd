@@ -1,0 +1,22 @@
+// Where a path the model wrote is, for a WebAssembly tool under nautra.
+//
+// The terminal is a native program and sees the project where it is on the host
+// (/home/u/proj); a component sees it where nautra mounts it (/work: a mount at the
+// host's own path was tried and could not be read, 2026-11-21). The model knows only the
+// host's path, from `pwd`. So a path under the host's directory (HOST_ROOT) is read as
+// the same file under the mount (ROOT), and a path with no leading `/` is taken from the
+// project's directory.
+
+fn placed(given: String, root: String, host_root: String) -> String =
+  if host_root != "" and given == host_root then root
+  else if host_root != "" and string.starts_with(given, host_root + "/") then root + string.drop(given, string.len(host_root))
+  else if string.starts_with(given, "/") then given
+  else root + "/" + given
+
+test "a path under the host's directory is the same file under the mount" {
+  assert_eq(placed("/home/u/proj/src/a.py", "/work", "/home/u/proj"), "/work/src/a.py")
+  assert_eq(placed("/home/u/proj", "/work", "/home/u/proj"), "/work")
+  assert_eq(placed("src/a.py", "/work", "/home/u/proj"), "/work/src/a.py")
+  assert_eq(placed("/home/u/project2/a.py", "/work", "/home/u/proj"), "/home/u/project2/a.py")
+  assert_eq(placed("/etc/hosts", "/work", "/home/u/proj"), "/etc/hosts")
+}

@@ -16,9 +16,22 @@ echo "SECRET_IN_FILE=file-key-999" > "$P/keys/.env"
 python3 - "$P/fake" "$P" "$port" <<'EOF'
 import json, sys
 fake, P, port = sys.argv[1:4]
-def say(commands, done=False):
-    return {"content": json.dumps({"analysis": "a", "plan": "p", "commands": commands, "task_complete": done})}
-probe = [
+def say(commands, done=False, tail=""):
+    return {"content": json.dumps({"analysis": "a", "plan": "p", "commands": commands, "task_complete": done}) + tail}
+# The tools that are components (src/tool*.almd), written as orders beside the terminal's:
+# a file written from a text after the object and read back by the host's path, then each
+# tool asked for what it was not given.
+note = "\n<<<BODY note\nline one\n\"quoted\" {braces}\n>>>BODY note\n"
+tools = [
+    {"tool": "write", "args": {"path": "tooled/note.txt", "content": "@body:note"}},
+    {"tool": "read", "args": {"path": f"{P}/root/tooled/note.txt"}},
+    {"tool": "write", "args": {"path": "/work/../escaped-by-tool.txt", "content": "x"}},
+    {"tool": "read", "args": {"path": "/etc/hosts"}},
+    {"tool": "read", "args": {"path": f"{P}/keys/.env"}},
+    {"tool": "reference", "args": {"language": "almide"}},
+    {"tool": "no_such_tool", "args": {}},
+]
+probe = tools + [
     {"command": f"cat {P}/keys/.env; echo keyfile=$?"},
     {"command": "echo \"held=[$LOCAL_API_KEY]\"; env | grep -c real-key; echo envkey=$?"},
     {"command": "echo x > ../outside.txt; echo sibling=$?"},
@@ -39,7 +52,7 @@ probe = [
     # Left running when the model says it is done: comide must end it.
     {"command": "sleep 321", "wait_s": 1},
 ]
-for i, r in enumerate([say(probe), say([], done=True), say([], done=True)], 1):
+for i, r in enumerate([say(probe, tail=note), say([], done=True), say([], done=True)], 1):
     json.dump(r, open(f"{fake}/reply-{i}.json", "w"))
 EOF
 
@@ -61,6 +74,13 @@ for line in said.split("\n"):
     if re.fullmatch(r"[a-z]+=\d+", line) or line.startswith("held="):
         print(line)
 print("waited=" + str("(job 14)\nslept\n[exit code 0]" in said))
+system = json.load(open(P + "/fake/request-1.json"))["messages"][0]["content"]
+print("tools-told=" + str("- read: " in system and "- write: " in system and "- reference: " in system and "- shell: " not in system))
+print("tool-wrote=" + str("wrote tooled/note.txt: 2 lines" in said))
+print("tool-read=" + str('1\tline one\n2\t"quoted" {braces}' in said))
+print("tool-hosts=" + str("/etc/hosts could not be read" in said))
+print("tool-reference=" + str("import fs " in said and "effect fn main() -> Unit" in said))
+print("tool-unknown=" + str("no_such_tool" in said and ("refused" in said or "could not" in said)))
 print("authorization=" + str(sent["authorization"]))
 import subprocess
 print("left-running=" + str(subprocess.run(["pgrep", "-f", "sleep 321"], capture_output=True).returncode == 0))
@@ -69,5 +89,7 @@ import os, glob
 everything = "".join(open(f, errors="replace").read() for f in glob.glob(P + "/runs/*/**", recursive=True) if os.path.isfile(f))
 print("real-key-on-disk=" + str("the-real-key-777" in everything))
 print("outside-written=" + str(os.path.exists(P + "/outside.txt")))
+print("tool-file=" + str(open(P + "/root/tooled/note.txt").read() == 'line one\n"quoted" {braces}\n' if os.path.exists(P + "/root/tooled/note.txt") else "missing"))
+print("tool-escaped=" + str(os.path.exists(P + "/escaped-by-tool.txt")))
 print("home-written=" + str(os.path.exists(os.path.expanduser("~/comide-probe-escape.txt"))))
 EOF

@@ -87,15 +87,18 @@ effect fn ask(attempt: Int, model: String, messages: List[Value], max_tokens: In
 
 // One call of the terminal, and what it said. A refusal or a failure is said to the model
 // like any other result: it can do something about most of them.
-effect fn terminal(a: Value) -> String = {
+effect fn terminal(a: Value) -> String = tool_call("shell", a)!
+
+// One call of a tool the composition gives (nautra's tools are one MCP server here).
+effect fn tool_call(name: String, a: Value) -> String = {
   let message = value.object([("jsonrpc", value.string("2.0")), ("id", value.int(1)), ("method", value.string("tools/call")),
-    ("params", value.object([("name", value.string("shell")), ("arguments", a)]))])
+    ("params", value.object([("name", value.string(name)), ("arguments", a)]))])
   match http.send(http.new_request("POST", TOOLS, json.stringify(message), [("Content-Type", "application/json")])) {
-    err(e) => "[the terminal could not be reached: " + e + "]",
+    err(e) => "[" + name + " could not be reached: " + e + "]",
     ok(resp) => match json.parse(http.body(resp)) {
-      err(_) => "[the terminal's answer could not be read]",
+      err(_) => "[the answer of " + name + " could not be read]",
       ok(reply) => match value.get(reply, "error") {
-        some(problem) => "[the terminal refused the call: " + (value.get_string(problem, "message") ?? "no reason given") + "]",
+        some(problem) => "[the call to " + name + " was refused: " + (value.get_string(problem, "message") ?? "no reason given") + "]",
         none => {
           let result = value.get(reply, "result") ?? value.object([])
           string.trim_end(list.join(list.filter_map(value.get_array(result, "content") ?? [], (part) => value.get_string(part, "text")), "\n"))
@@ -105,11 +108,35 @@ effect fn terminal(a: Value) -> String = {
   }
 }
 
+// The tools the composition gives besides the terminal, as the model is told of them: a
+// line for each with its arguments, asked of nautra, so that what the operator wrote in
+// the composition is what the model is told and nothing is said twice. "" when the
+// terminal is all there is.
+effect fn offered() -> String = {
+  let message = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"
+  match http.send(http.new_request("POST", TOOLS, message, [("Content-Type", "application/json")])) {
+    err(_) => "",
+    ok(resp) => {
+      let result = value.get(json.parse(http.body(resp)) ?? value.object([]), "result") ?? value.object([])
+      let others = list.filter(value.get_array(result, "tools") ?? [], (t) => (value.get_string(t, "name") ?? "") != "shell")
+      list.join(list.map(others, (t) => "- " + (value.get_string(t, "name") ?? "") + ": " + (value.get_string(t, "description") ?? "")
+        + "\n    arguments: " + json.stringify(value.get(value.get(t, "inputSchema") ?? value.object([]), "properties") ?? value.object([]))), "\n")
+    },
+  }
+}
+
+// What is added to the errand's words when there are tools: how one is written, how a
+// long text is written, and which there are.
+fn tools_note(listed: String) -> String = if listed == "" then "" else "\n\nBesides the terminal you have tools. A command object may also be:\n"
+  + "- {\"tool\": \"NAME\", \"args\": {...}}: run one of the tools below, with its arguments. It runs in the order you wrote it, and its result is shown to you like a command's output.\n\n"
+  + "A text of more than a few lines (a file's contents) is not written inside the JSON. Write \"@body:NAME\" where it is meant, as a tool argument or as a \"command\", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`.\n\n"
+  + "Each tool can do only what it says: a tool that reads cannot write, and none of them can start a program or reach a network. Use them for what they do and the terminal for everything else.\n\nThe tools:\n" + listed
+
 effect fn run_orders(orders: List[said.Order]) -> String = {
   var parts: List[String] = []
   for o in orders {
     eprintln("\n⏺ " + charge.first_line(said.shown(o), 110))
-    let text = terminal(said.arguments(o))!
+    let text = if o.tool != "" and string.trim(o.command) == "" then tool_call(o.tool, json.parse(o.args) ?? value.object([]))! else terminal(said.arguments(o))!
     eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
     list.push(parts, said.shown(o) + "\n" + text)
   }
@@ -138,7 +165,9 @@ effect fn main() -> Unit = {
   let check = setting("COMIDE_CHECK")! == "1"
   let log_dir = setting("COMIDE_LOG_DIR")!
   let root = string.trim(charge.without_trailer(terminal(value.object([("command", value.string("pwd")), ("wait_s", value.int(10))]))!))
-  var messages = [exchange.message("system", string.trim(charge.written_prompt(root))), exchange.message("user", "Task Description:\n" + task)]
+  let listed = offered()!
+  let system = string.trim(charge.written_prompt(root)) + tools_note(listed)
+  var messages = [exchange.message("system", system), exchange.message("user", "Task Description:\n" + task)]
   var records: List[Value] = []
   var spent = 0.0
   var steps = 0
@@ -166,7 +195,7 @@ effect fn main() -> Unit = {
         list.push(records, charge.step_record(steps, r))
         list.push(messages, exchange.assistant_message(as_kept(r, reasoning_back), []))
         record(log_dir, records, spent, messages)!
-        match said.read(r.content) {
+        match said.read_reply(r.content, listed != "", r.finish != "length") {
           err(reason) => {
             unread = unread + 1
             eprintln("\n  the reply could not be read (" + reason + "); nothing was run")
@@ -196,7 +225,7 @@ effect fn main() -> Unit = {
                     let _ = fs.write_text(log_dir + "/transcript-work.json", json.stringify(value.array(messages)))
                     let _ = fs.write_text(log_dir + "/check.txt", "the check began after step " + int.to_string(steps) + "\n")
                   }
-                  messages = [exchange.message("system", string.trim(charge.written_prompt(root))), exchange.message("user", charge.check_task(task))]
+                  messages = [exchange.message("system", system), exchange.message("user", charge.check_task(task))]
                   checking = true
                   check_from = steps
                   asked = false

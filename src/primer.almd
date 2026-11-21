@@ -1,0 +1,26 @@
+// A language's syntax as one program, for a model that does not know the language well.
+// Text only, and nothing imported: the reference tool gives it out natively
+// (reference.almd) and as a WebAssembly tool under nautra (toolreference.almd).
+// ci/check.sh takes the program out of the tool's answer and gives it to the compiler.
+
+let ALMIDE_NOTE = "Almide (.almd files) is a language you may not know well, and its toolchain is installed here. Do not guess, and do not read through the project to learn the language. Its syntax, in one program:\n\n"
+  + "import fs                                  // json, fs, http, env, io, process, regex need an import; string, list, int, map, value do not\n\n"
+  + "type Shape =\n  | Circle(Float)\n  | Rect(Float, Float)\n\n"
+  + "type Point = { x: Int, y: Int }\n\n"
+  + "fn area(s: Shape) -> Float = match s {\n  Circle(r) => 3.14 * r * r,\n  Rect(w, h) => w * h,\n}\n\n"
+  + "fn label(n: Int) -> String =\n  if n % 15 == 0 then \"FizzBuzz\" else if n % 3 == 0 then \"Fizz\" else if n % 5 == 0 then \"Buzz\" else int.to_string(n)\n\n"
+  + "effect fn main() -> Unit = {                // `effect fn`: may do I/O or fail. A pure function is `fn`\n"
+  + "  let p = Point { x: 1, y: 2 }              // let is fixed, var can be assigned again\n"
+  + "  var total = 0\n"
+  + "  for i in 1...10 {                         // 1...10 includes 10; 0..<10 does not. Also: while cond { }\n"
+  + "    total = total + i\n    println(label(i))\n  }\n"
+  + "  let names = list.map([1, 2, 3], (n) => \"n$" + "{n}\")   // a lambda; $" + "{...} inside a string interpolates\n"
+  + "  let first = list.get(names, 0) ?? \"none\"   // ?? gives a fallback for an Option or a Result\n"
+  + "  let text = fs.read_text(\"notes.txt\")!       // ! passes a failure up; it is required on a call that can fail\n"
+  + "  println(\"$" + "{first} $" + "{total} $" + "{p.x + p.y} $" + "{area(Circle(1.0))} $" + "{string.len(text)}\")\n}\n\n"
+  + "test \"label\" {\n  assert_eq(label(15), \"FizzBuzz\")\n}\n\n"
+  + "`if` always has `then` and `else`; there is no `return`: a function's value is its last expression. "
+  + "For the standard library: `almide query stdlib` prints the common modules' functions with their signatures, and `almide query outline @stdlib/MODULE` (string, list, int, map, fs, json, ...) one module's; both work in any directory. "
+  + "`almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test FILE` runs its tests, and `almide explain E041` explains an error code. "
+  + "Check what you wrote with `almide check` before saying it works. To try a snippet that is not part of the project, write it under a temporary directory (mktemp -d), not into the project: inside a project `almide run` builds the whole project. "
+  + "If `almide run` refuses because the machine's rustc is too old, that is the machine and not your code: run it with `almide run FILE --target wasm`, which needs no rustc, and do not try to update the toolchain."
