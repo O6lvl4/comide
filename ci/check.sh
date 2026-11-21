@@ -425,6 +425,26 @@ has "and from what is sent" "^sent True$" "$tmp/pt.out"
 has "a command that is running is shown running, with the seconds" "^running True$" "$tmp/pt.out"
 has "what it printed and the answer are shown" "^printed True$" "$tmp/pt.out"
 
+# What the model was told in that conversation: the machine is the person's, and, where
+# almide is installed, the language's syntax as a program. The program is taken out of the
+# prompt and given to the compiler, so the text a model learns from cannot rot unseen.
+python3 - "$tmp/fake" "$tmp/primer.almd" > "$tmp/told.out" <<'EOF'
+import json, sys
+system = json.load(open(sys.argv[1] + "/request-1.json"))["messages"][0]["content"]
+print("own machine", "This is the user's own machine" in system)
+a = system.find("import fs ")
+b = system.find('assert_eq(label(15), "FizzBuzz")\n}')
+print("primer", a >= 0 and b > a)
+if a >= 0 and b > a:
+    open(sys.argv[2], "w").write(system[a:b] + 'assert_eq(label(15), "FizzBuzz")\n}\n')
+EOF
+has "with a person there, the model is told the machine is theirs" "^own machine True$" "$tmp/told.out"
+if command -v "$almide" > /dev/null 2>&1; then
+  has "with almide installed, the model is given the language's syntax as a program" "^primer True$" "$tmp/told.out"
+  ( cd "$tmp" && : > notes.txt && "$almide" check primer.almd > "$tmp/primer.check" 2>&1 && "$almide" test primer.almd > "$tmp/primer.test" 2>&1 )
+  same "and that program passes almide check and its own test" "0" "$?"
+fi
+
 say "== without a task, nothing is started"
 ./comide errand > /dev/null 2>&1
 same "exit 2" "2" "$?"

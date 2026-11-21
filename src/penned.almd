@@ -71,9 +71,38 @@ fn tools_section(without: List[String]) -> String =
 // language is in use on this machine, and how its own toolchain tells about it. The first
 // person to ask 0.7.0 for Almide watched it go looking through the project for what
 // Almide might be.
-let TOOLCHAINS: List[(String, String)] = [
-  ("almide", "Almide (.almd files) is a language you may not know well, and its toolchain is installed here. Do not guess its syntax or its standard library, and do not search the project to learn what Almide is: `almide query stdlib` prints the standard library's functions with their signatures, `almide query doc string.split` one of them, `almide query outline FILE` what a file declares. When the project has .almd files, read one for the syntax. `almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test` runs the tests, and `almide explain CODE` explains an error code such as E041. Check what you wrote with `almide check` before saying it works."),
-]
+//
+// The second person-run (2026-11-21) had the toolchain's commands and still took fifteen
+// steps to FizzBuzz: the commands list functions, not syntax, so the model read five files
+// of a neighbouring project to learn `if` and `for`. The syntax a first program needs is
+// said here. The program below is ci-checked text: `almide check`, `run` and `test` pass
+// on it (0.70.0).
+let ALMIDE_NOTE = "Almide (.almd files) is a language you may not know well, and its toolchain is installed here. Do not guess, and do not read through the project to learn the language. Its syntax, in one program:\n\n"
+  + "import fs                                  // json, fs, http, env, io, process, regex need an import; string, list, int, map, value do not\n\n"
+  + "type Shape =\n  | Circle(Float)\n  | Rect(Float, Float)\n\n"
+  + "type Point = { x: Int, y: Int }\n\n"
+  + "fn area(s: Shape) -> Float = match s {\n  Circle(r) => 3.14 * r * r,\n  Rect(w, h) => w * h,\n}\n\n"
+  + "fn label(n: Int) -> String =\n  if n % 15 == 0 then \"FizzBuzz\" else if n % 3 == 0 then \"Fizz\" else if n % 5 == 0 then \"Buzz\" else int.to_string(n)\n\n"
+  + "effect fn main() -> Unit = {                // `effect fn`: may do I/O or fail. A pure function is `fn`\n"
+  + "  let p = Point { x: 1, y: 2 }              // let is fixed, var can be assigned again\n"
+  + "  var total = 0\n"
+  + "  for i in 1...10 {                         // 1...10 includes 10; 0..<10 does not. Also: while cond { }\n"
+  + "    total = total + i\n    println(label(i))\n  }\n"
+  + "  let names = list.map([1, 2, 3], (n) => \"n$" + "{n}\")   // a lambda; $" + "{...} inside a string interpolates\n"
+  + "  let first = list.get(names, 0) ?? \"none\"   // ?? gives a fallback for an Option or a Result\n"
+  + "  let text = fs.read_text(\"notes.txt\")!       // ! passes a failure up; it is required on a call that can fail\n"
+  + "  println(\"$" + "{first} $" + "{total} $" + "{p.x + p.y} $" + "{area(Circle(1.0))} $" + "{string.len(text)}\")\n}\n\n"
+  + "test \"label\" {\n  assert_eq(label(15), \"FizzBuzz\")\n}\n\n"
+  + "`if` always has `then` and `else`; there is no `return`: a function's value is its last expression. "
+  + "For the standard library: `almide query stdlib` prints the common modules' functions with their signatures, and `almide query outline @stdlib/MODULE` (string, list, int, map, fs, json, ...) one module's; both work in any directory. "
+  + "`almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test FILE` runs its tests, and `almide explain E041` explains an error code. "
+  + "Check what you wrote with `almide check` before saying it works. To try a snippet that is not part of the project, write it under a temporary directory (mktemp -d), not into the project: inside a project `almide run` builds the whole project."
+
+let TOOLCHAINS: List[(String, String)] = [("almide", ALMIDE_NOTE)]
+
+// Asked for FizzBuzz, and finding the compiler's toolchain too old to run it, the model
+// tried `rustup update` on the person's machine, with "stop asking" already given.
+let OWN_MACHINE = "\n\nThis is the user's own machine. Do not install, update or remove toolchains, system packages or global tools, and do not change settings outside the project, unless the user asked for that: say what is missing and what would fix it, and let the user decide."
 
 // What is said of the toolchains found on PATH, or "" when none is.
 effect fn toolchains() -> String =
@@ -84,12 +113,16 @@ effect fn toolchains() -> String =
 
 // What the model is told: the errand's words unchanged (charge.written_prompt), then who
 // it is working with and the tools. Nothing here asks it to be brief.
-fn system_prompt(root: String, without: List[String]) -> String = string.trim(charge.written_prompt(root)) + """
+// `someone`: a person is at the terminal, and the machine is theirs (a conversation). With
+// nobody there (-p in a container, a measured run) the machine is the task's to change.
+fn system_prompt(root: String, without: List[String], someone: Bool) -> String = string.trim(charge.written_prompt(root)) + (if someone then OWN_MACHINE else "") + """
 
 
 You are comide, a coding assistant, working with a user in the project at ${root}. The terminal starts there. What the user asks may be a task or a question; when you set "task_complete", your "analysis" is what the user reads as your answer: say what you changed and how you know it works, or answer the question, in the language the user wrote in. If nothing checked the work, say so. A question that needs no command is answered at once, with "commands" empty and "task_complete" true.
 
-A command of yours may be put to the user before it runs, and the user may decline it. The user sees each command and the first lines of what it printed, not all of it: when the user asked for a result, put the result itself in your answer, not a report that it was printed.
+A command of yours may be put to the user before it runs, and the user may decline it. The user sees each command and the first lines of what it printed, not all of it: when the user asked for a result, put the result itself in your answer, not a report that it was printed. The same for code or text the user asks to see: it goes inside "analysis", whole, in a fenced block. Nothing but "analysis" reaches the user, so "here it is" with nothing after it shows them nothing.
+
+The terminal keeps its directory from one command to the next: after `cd sub`, the next command starts in sub. Use paths from where the terminal is, and do not leave files of your own behind in the user's project unless they are what was asked for.
 
 Besides the terminal you have comide's tools. A command object may also be:
 - {"tool": "NAME", "args": {...}}: run one of the tools below, with its arguments. It is run by comide, not in the terminal, in the order you wrote it, and its result is shown to you like a command's output.
@@ -197,6 +230,17 @@ fn command_failed(text: String) -> Bool = {
   string.starts_with(last, "[exit code ") and last != "[exit code 0]"
 }
 
+// The lines of a command after its first, as the person sees them under the call line.
+let COMMAND_LINES = 14
+
+fn command_rest(u: ui.Ui, command: String) -> String = {
+  let rest = list.drop(string.split(string.trim(command), "\n"), 1)
+  let first = list.take(rest, COMMAND_LINES)
+  let more = list.len(rest) - list.len(first)
+  let lines = list.map(first, (l) => "    " + string.take(l, int.max(20, u.width - 6)))
+  list.join(if more > 0 then lines + ["    " + ui.dim(u, "… " + int.to_string(more) + " more lines")] else lines, "\n")
+}
+
 // What a command printed, as the person sees it: its first lines, and how many more there
 // were. The last line (the exit code, or that it is still running) is the result line's.
 // Without this the person saw `[exit code 0]` and nothing of what they had asked to see.
@@ -277,6 +321,12 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
     } else {
       let command = string.trim(o.command)
       options.show(opts, "\n" + ui.call_line(opts.ui, "shell", if command == "" then string.trim(said.shown(o)) else charge.first_line(command, int.max(20, opts.ui.width - 12))))!
+      // The rest of a command of several lines (a file written through a here-document):
+      // with the first line alone, a person approved, and then asked to see, code that
+      // had never been on the screen.
+      let rest = command_rest(opts.ui, command)
+      if rest != "" then options.show(opts, rest)! else ()
+      let before = shell.text_of(sh.dir + "/cwd")!
       let (p, refused) = if command == "" then (asking.Permission { run: true, allow_from_now: allow, said: "" }, "") else permitted(opts, setup, allow, o.command)!
       allow = p.allow_from_now
       if not p.run then {
@@ -285,7 +335,11 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
         list.push(parts, said.shown(o) + "\n" + why)
         stopped = true
       } else {
-        let (next_sh, text) = watched_call(opts, sh, said.arguments(o))!
+        let (next_sh, ran_text) = watched_call(opts, sh, said.arguments(o))!
+        // A command that left the terminal somewhere else says so to the model: three
+        // commands in a row were written for a directory the terminal had left.
+        let now_in = string.trim(shell.text_of(next_sh.dir + "/cwd")!)
+        let text = if now_in != "" and now_in != string.trim(before) then ran_text + "\n[the terminal is now in " + now_in + "]" else ran_text
         sh = next_sh
         shell.keep(sh)!
         let post = if command == "" then hooks.quiet() else turn.hooked(opts, setup, "PostToolUse", "shell", value.object([("command", value.string(o.command))]), string.take(text, 20000), "")!
@@ -512,9 +566,9 @@ test "a declined command says so, with what the person said" {
 }
 
 test "the model is told of every tool but the terminal, with its arguments, and is not asked to be brief" {
-  let p = system_prompt("/p", [])
+  let p = system_prompt("/p", [], false)
   assert(string.contains(p, "- web_search: "))
-  assert(not string.contains(system_prompt("/p", ["web_search"]), "- web_search: "))
+  assert(not string.contains(system_prompt("/p", ["web_search"], false), "- web_search: "))
   assert(string.contains(p, "<<<BODY hello"))
   assert(string.contains(p, "- edit: "))
   assert(string.contains(p, "- solve: "))
