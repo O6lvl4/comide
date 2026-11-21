@@ -124,13 +124,38 @@ done
   # and cannot write; write has the project and nothing else; reference has nothing at
   # all. None has a network. TOOLS_OFF=1 gives the terminal alone, as before 0.8.
   if [ "${TOOLS_OFF:-0}" != 1 ]; then
-    echo
-    echo "[tools.read]"
-    echo "image = $(quoted "$here/build/tool-read.wasm")"
-    echo 'description = "Read a file of the project: its lines, numbered. For a long file give from and to (line numbers). It cannot write or run anything."'
-    echo 'input = { type = "object", properties = { path = { type = "string" }, from = { type = "integer" }, to = { type = "integer" } }, required = ["path"] }'
-    echo "mounts = [$(list "$root:/work:ro")]"
-    echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
+    # Reading is hew's when hew is here as a component (HEW_WASM, or build/hew.wasm in a
+    # hew checked out beside comide: hew's ci/build-wasm.sh makes it). One program is then
+    # four tools, each started with the project read-only and nothing else.
+    hew=${HEW_WASM-$here/../hew/build/hew.wasm}
+    if [ -n "$hew" ] && [ -f "$hew" ]; then
+      hew=$(cd "$(dirname "$hew")" && pwd)/$(basename "$hew")
+      hew_tool() { # hew_tool NAME DESCRIPTION INPUT
+        echo
+        echo "[tools.$1]"
+        echo "image = $(quoted "$hew")"
+        echo "description = $(quoted "$2")"
+        echo "input = $3"
+        echo "mounts = [$(list "$root:/work:ro")]"
+        echo "env = [$(list "HEW_TOOL=$1" "HEW_ROOT=/work" "HEW_HOST_ROOT=$root")]"
+      }
+      hew_tool read "Read part of a file of the project, numbered: one function or type by name (symbol), a range of lines (from, to), the lines that match (grep, around), or with only a path a short file whole and a long one as its outline. It cannot write or run anything." \
+        '{ type = "object", properties = { path = { type = "string" }, symbol = { type = "string" }, from = { type = "integer" }, to = { type = "integer" }, grep = { type = "string" }, around = { type = "integer" } }, required = ["path"] }'
+      hew_tool outline "What a file declares (functions, types, with their line ranges), or the same for every file of a directory. Look here before reading a file you have not seen." \
+        '{ type = "object", properties = { path = { type = "string" } }, required = ["path"] }'
+      hew_tool search "Search the project's files for a regular expression: the matching lines, each with the function it is in. Narrower than grep in the terminal." \
+        '{ type = "object", properties = { pattern = { type = "string" }, path = { type = "string" } }, required = ["pattern"] }'
+      hew_tool tree "The project's directories and files, without version-control and build noise." \
+        '{ type = "object", properties = { path = { type = "string" }, depth = { type = "integer" } } }'
+    else
+      echo
+      echo "[tools.read]"
+      echo "image = $(quoted "$here/build/tool-read.wasm")"
+      echo 'description = "Read a file of the project: its lines, numbered. For a long file give from and to (line numbers). It cannot write or run anything."'
+      echo 'input = { type = "object", properties = { path = { type = "string" }, from = { type = "integer" }, to = { type = "integer" } }, required = ["path"] }'
+      echo "mounts = [$(list "$root:/work:ro")]"
+      echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
+    fi
     echo
     echo "[tools.write]"
     echo "image = $(quoted "$here/build/tool-write.wasm")"

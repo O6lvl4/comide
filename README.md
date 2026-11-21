@@ -211,7 +211,10 @@ what it needs — `read` sees the project and cannot write, `write` has the proj
 nothing else, `reference` has nothing at all — and none can start a program or reach a
 network. The agent asks nautra which tools its composition gives and tells the model of
 those, so a tool added to the composition is one the model can use. `TOOLS_OFF=1` gives
-the terminal alone.
+the terminal alone. When [hew](https://github.com/O6lvl4/hew) is there as a component
+(`HEW_WASM`, or `build/hew.wasm` in a hew beside comide), reading is hew's: `read` by
+symbol, range or match, `outline`, `search` and `tree`, each started with the project
+read-only and nothing else.
 
 The loop was written and measured outside comide first, against Harbor's terminus-2 on
 Terminal-Bench 2 tasks with the same model, and passes about as many.

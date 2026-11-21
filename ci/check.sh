@@ -501,6 +501,14 @@ else
   has "the tool that reads cannot read the system's files" "^tool-hosts=True$" "$tmp/probe.out"
   has "the reference tool, given nothing, says what it holds" "^tool-reference=True$" "$tmp/probe.out"
   has "a tool the composition does not give is said back" "^tool-unknown=True$" "$tmp/probe.out"
+  # hew as a component (hew's ci/build-wasm.sh), when it is here: four more tools.
+  if grep -q '^hew-' "$tmp/probe.out"; then
+    has "hew outlines a file from inside its sandbox" "^hew-outline=True$" "$tmp/probe.out"
+    has "and searches the project" "^hew-search=True$" "$tmp/probe.out"
+    has "and reads one function by name" "^hew-read=True$" "$tmp/probe.out"
+  else
+    say "skipped: no hew component (HEW_WASM, or ../hew/build/hew.wasm)"
+  fi
 
   say "== --confined: the conversation here, its terminal behind nautra's door"
   # The native comide, with every terminal order sent to the terminal nautra publishes.

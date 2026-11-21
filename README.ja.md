@@ -203,7 +203,10 @@ nautra の上では、エージェントは鍵を持たない WebAssembly コン
 物だけで、`read` はプロジェクトが見えるだけで書けず、`write` はプロジェクトだけ、`reference` は
 何も持ちません。どれもプログラムを起こせず、ネットワークにも出られません。エージェントは
 構成にどの道具があるかを nautra に聞いてモデルに伝えるので、構成に足した道具はそのまま
-使えます。`TOOLS_OFF=1` で、端末だけに戻せます。
+使えます。`TOOLS_OFF=1` で、端末だけに戻せます。[hew](https://github.com/O6lvl4/hew) がコンポーネントとして
+あれば（`HEW_WASM`、または comide の隣の hew の `build/hew.wasm`）、読む道具は hew のものに
+なります。シンボル・範囲・一致で読む `read`、`outline`、`search`、`tree` で、どれもプロジェクトを
+読み取り専用で渡されるだけです。
 
 このループは先に comide の外で書いて測りました。同じモデルで Terminal-Bench 2 のタスクを
 解かせると、Harbor の terminus-2 とほぼ同じ数が通ります。

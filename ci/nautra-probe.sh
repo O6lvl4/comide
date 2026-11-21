@@ -11,6 +11,7 @@ set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 P=$1; port=$2; reads=$3
 mkdir -p "$P/fake" "$P/root" "$P/runs" "$P/keys"
+printf 'def unusual_name():\n    return 41 + 1\n' > "$P/root/hewn.py"
 echo "SECRET_IN_FILE=file-key-999" > "$P/keys/.env"
 
 python3 - "$P/fake" "$P" "$port" <<'EOF'
@@ -30,6 +31,11 @@ tools = [
     {"tool": "read", "args": {"path": f"{P}/keys/.env"}},
     {"tool": "reference", "args": {"language": "almide"}},
     {"tool": "no_such_tool", "args": {}},
+    # hew's tools, there when hew is here as a component (nautra/run.sh): what they answer
+    # is looked for below only then.
+    {"tool": "outline", "args": {"path": "hewn.py"}},
+    {"tool": "search", "args": {"pattern": "def unusual_name"}},
+    {"tool": "read", "args": {"path": "hewn.py", "symbol": "unusual_name"}},
 ]
 probe = tools + [
     {"command": f"cat {P}/keys/.env; echo keyfile=$?"},
@@ -77,9 +83,14 @@ print("waited=" + str("(job 14)\nslept\n[exit code 0]" in said))
 system = json.load(open(P + "/fake/request-1.json"))["messages"][0]["content"]
 print("tools-told=" + str("- read: " in system and "- write: " in system and "- reference: " in system and "- shell: " not in system))
 print("tool-wrote=" + str("wrote tooled/note.txt: 2 lines" in said))
-print("tool-read=" + str('1\tline one\n2\t"quoted" {braces}' in said))
-print("tool-hosts=" + str("/etc/hosts could not be read" in said))
+first_read = said.split("(tool read")[1].split("(tool ")[0]
+print("tool-read=" + str("line one" in first_read and '"quoted" {braces}' in first_read))
+print("tool-hosts=" + str("/etc/hosts could not be read" in said or "no such file: /etc/hosts" in said))
 print("tool-reference=" + str("import fs " in said and "effect fn main() -> Unit" in said))
+if "- outline: " in system:
+    print("hew-outline=" + str("unusual_name" in said.split("(tool outline")[1].split("(tool search")[0]))
+    print("hew-search=" + str("hewn.py" in said.split("(tool search")[1].split("(tool read")[0] and "1 matches" in said))
+    print("hew-read=" + str("return 41 + 1" in said.split('(tool read {"path":"hewn.py"')[1][:400]))
 print("tool-unknown=" + str("no_such_tool" in said and ("refused" in said or "could not" in said)))
 print("authorization=" + str(sent["authorization"]))
 import subprocess
