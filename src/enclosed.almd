@@ -37,6 +37,7 @@ import almai.answer as answer
 import self.exchange
 import self.charge
 import self.said
+import self.copied
 
 let TOOLS = "http://tools.nautra/"
 let TRIES = 4
@@ -143,11 +144,15 @@ fn tools_note(listed: String) -> String = if listed == "" then "" else "\n\nBesi
   + "A text of more than a few lines (a file's contents) is not written inside the JSON. Write \"@body:NAME\" where it is meant, as a tool argument or as a \"command\", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`.\n\n"
   + "Each tool can do only what it says: a tool that reads cannot write, and none of them can start a program or reach a network. " + division(listed) + "\n\nThe tools:\n" + listed
 
-effect fn run_orders(orders: List[said.Order]) -> String = {
+// A command line copied from the material (what is quoted in the task, what has been
+// shown since) is not run: copied.almd.
+effect fn run_orders(orders: List[said.Order], material: String, own: String) -> String = {
   var parts: List[String] = []
   for o in orders {
     eprintln("\n⏺ " + charge.first_line(said.shown(o), 110))
-    let text = if o.tool != "" and string.trim(o.command) == "" then tool_call(o.tool, json.parse(o.args) ?? value.object([]))! else terminal(said.arguments(o))!
+    let held = copied.from_material(o.command, material, own)
+    let text = if option.is_some(held) then copied.HELD_NOTE
+      else if o.tool != "" and string.trim(o.command) == "" then tool_call(o.tool, json.parse(o.args) ?? value.object([]))! else terminal(said.arguments(o))!
     eprintln("  ⎿ " + charge.first_line(list.last(string.split(string.trim(text), "\n")) ?? "", 110))
     list.push(parts, said.shown(o) + "\n" + text)
   }
@@ -177,7 +182,10 @@ effect fn main() -> Unit = {
   let log_dir = setting("COMIDE_LOG_DIR")!
   let root = string.trim(charge.without_trailer(terminal(value.object([("command", value.string("pwd")), ("wait_s", value.int(10))]))!))
   let listed = offered()!
-  let system = string.trim(charge.written_prompt(root)) + tools_note(listed)
+  let given = copied.parts(task)
+  let system = string.trim(charge.written_prompt(root)) + tools_note(listed) + (if given.quoted == "" then "" else copied.QUOTED_NOTE)
+  var material = given.quoted
+  var written = ""
   var messages = [exchange.message("system", system), exchange.message("user", "Task Description:\n" + task)]
   var records: List[Value] = []
   var spent = 0.0
@@ -222,7 +230,14 @@ effect fn main() -> Unit = {
           ok(s) => {
             unread = 0
             if string.trim(s.analysis) != "" then eprintln("\n" + charge.first_line(s.analysis, 300))
-            let seen = run_orders(s.orders)!
+            // What the model wrote itself and was let run is its own: shown back to it with
+            // the output, it is not material, or no command could be run twice.
+            let own = given.own + "\n" + written
+            let seen = run_orders(s.orders, material, own)!
+            for o in s.orders {
+              if option.is_none(copied.from_material(o.command, material, own)) then { written = written + "\n" + o.command }
+            }
+            material = material + "\n" + seen
             match said.after(s, asked) {
               Work => {
                 list.push(messages, exchange.message("user", seen))
