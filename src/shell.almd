@@ -108,10 +108,22 @@ effect fn keep(sh: Shell) -> Unit = {
 // Waits up to `wait_s` for job `n`, then says where it stands. A finished job's directory
 // and variables become the terminal's.
 effect fn attend(sh: Shell, n: Int, wait_s: Int) -> String = {
+  let t0 = datetime.now_ms()
+  while not finished(sh, n)! and datetime.now_ms() - t0 < wait_s * 1000 { env.sleep_ms(POLL_MS) }
+  report(sh, n, wait_s)!
+}
+
+effect fn finished(sh: Shell, n: Int) -> Bool = fs.exists(job_path(sh, n, "exit"))
+
+// The last line job `n` has printed so far, for whoever is watching it run.
+effect fn last_line(sh: Shell, n: Int) -> String =
+  string.trim(list.last(string.split(string.trim_end(text_of(job_path(sh, n, "out"))!), "\n")) ?? "")
+
+// Where job `n` stands, `wait_s` seconds having been given to it: attend without the wait,
+// for a caller that waits in its own way (the conversation shows the wait: penned.almd).
+effect fn report(sh: Shell, n: Int, wait_s: Int) -> String = {
   let exit_file = job_path(sh, n, "exit")
   let out_file = job_path(sh, n, "out")
-  let t0 = datetime.now_ms()
-  while not fs.exists(exit_file) and datetime.now_ms() - t0 < wait_s * 1000 { env.sleep_ms(POLL_MS) }
   let out = shown(string.trim_end(text_of(out_file)!), out_file)
   if fs.exists(exit_file) then {
     let code = string.trim(text_of(exit_file)!)

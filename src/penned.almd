@@ -39,6 +39,7 @@ import self.toolkit
 import self.tools
 import self.turn
 import self.ui
+import process
 import self.waiting
 import self.watch
 
@@ -65,6 +66,21 @@ fn name_of(t: Value) -> String = value.get_string(value.get(t, "function") ?? va
 // that no step is spent finding it out.
 fn tools_section(without: List[String]) -> String =
   list.join(list.map(list.filter(tools.definitions(), (t) => name_of(t) != "shell" and not list.contains(without, name_of(t))), tool_line), "\n")
+
+// Languages the model is unlikely to know well: the program whose presence says the
+// language is in use on this machine, and how its own toolchain tells about it. The first
+// person to ask 0.7.0 for Almide watched it go looking through the project for what
+// Almide might be.
+let TOOLCHAINS: List[(String, String)] = [
+  ("almide", "Almide (.almd files) is a language you may not know well, and its toolchain is installed here. Do not guess its syntax or its standard library, and do not search the project to learn what Almide is: `almide query stdlib` prints the standard library's functions with their signatures, `almide query doc string.split` one of them, `almide query outline FILE` what a file declares. When the project has .almd files, read one for the syntax. `almide check FILE` type-checks a file, `almide run FILE` runs it, `almide test` runs the tests, and `almide explain CODE` explains an error code such as E041. Check what you wrote with `almide check` before saying it works."),
+]
+
+// What is said of the toolchains found on PATH, or "" when none is.
+effect fn toolchains() -> String =
+  list.join(list.filter_map(TOOLCHAINS, (t) => match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v " + t.0] }) {
+    ok(st) => if st.code == 0 then some(t.1) else none,
+    err(_) => none,
+  }), "\n\n")
 
 // What the model is told: the errand's words unchanged (charge.written_prompt), then who
 // it is working with and the tools. Nothing here asks it to be brief.
@@ -195,6 +211,42 @@ fn output_shown(u: ui.Ui, text: String) -> String = {
   list.join(if more > 0 then lines + ["    " + ui.dim(u, "… " + int.to_string(more) + " more lines")] else lines, "\n")
 }
 
+// One call of the terminal, with the wait shown: a line rewritten in place that says the
+// command is running, for how long, and the last thing it printed. Esc stops the command.
+// Where nothing is drawn (a run with nobody there) it is shell.call.
+effect fn watched_call(opts: options.Options, sh: shell.Shell, a: Value) -> (shell.Shell, String) = {
+  let command = value.get_string(a, "command") ?? ""
+  let job = shell.int_arg(a, "job")
+  let starting = string.trim(command) != ""
+  let waiting_for = not starting and job > 0 and job < sh.next and not (value.get_bool(a, "stop") ?? false)
+  if not (opts.live and opts.ui.color) or not (starting or waiting_for) then shell.call(sh, a)!
+  else {
+    let begun: Result[shell.Shell, String] = if starting then shell.start(sh, command) else ok(sh)
+    match begun {
+    err(e) => (sh, "[the command could not be started: " + e + "]"),
+    ok(now) => {
+      let n = if starting then sh.next else job
+      let wait_s = shell.clamp_wait(shell.int_arg(a, "wait_s"))
+      let t0 = datetime.now_ms()
+      var frame = 0
+      var last = ""
+      var interrupted = false
+      while not shell.finished(now, n)! and datetime.now_ms() - t0 < wait_s * 1000 and not interrupted {
+        interrupted = waiting.pause(opts)!
+        if frame % 5 == 0 then { last = shell.last_line(now, n)! }
+        let room = int.max(10, opts.ui.width - 40)
+        io.print(ui.waiting(opts.ui, frame / 3, (datetime.now_ms() - t0) / 1000, "Running",
+          list.join(list.filter([if opts.tui then "esc to stop" else "", string.take(last, room)], (p) => p != ""), " · ")))
+        frame = frame + 1
+      }
+      io.print(ui.clear_line(opts.ui))
+      if interrupted then (now, shell.stop(now, n)! + "\n[The user stopped this command.]")
+      else (now, shell.report(now, n, wait_s)!)
+    },
+    }
+  }
+}
+
 // What the orders of one reply came to.
 type Ran ={ sh: shell.Shell, allow: Bool, seen: String, spent: Float, work: watch.Work, sigs: List[String] }
 
@@ -233,7 +285,7 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
         list.push(parts, said.shown(o) + "\n" + why)
         stopped = true
       } else {
-        let (next_sh, text) = shell.call(sh, said.arguments(o))!
+        let (next_sh, text) = watched_call(opts, sh, said.arguments(o))!
         sh = next_sh
         shell.keep(sh)!
         let post = if command == "" then hooks.quiet() else turn.hooked(opts, setup, "PostToolUse", "shell", value.object([("command", value.string(o.command))]), string.take(text, 20000), "")!
