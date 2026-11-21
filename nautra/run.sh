@@ -156,13 +156,36 @@ done
       echo "mounts = [$(list "$root:/work:ro")]"
       echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
     fi
-    echo
-    echo "[tools.write]"
-    echo "image = $(quoted "$here/build/tool-write.wasm")"
-    echo 'description = "Write a file of the project, whole: a new file, or a complete rewrite. Give the content as a text after the object (@body:NAME). It writes nowhere but the project, and does not check syntax."'
-    echo 'input = { type = "object", properties = { path = { type = "string" }, content = { type = "string" } }, required = ["path", "content"] }'
-    echo "mounts = [$(list "$root:/work")]"
-    echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
+    # Changing a file is golemide's when its edit is here as a component
+    # (GOLEMIDE_EDIT_WASM, or build/golemide-edit.wasm in a golemide beside comide): an
+    # edit that finds a passage quoted from memory, and a write that will not blank a
+    # file. As a component it starts no checker, so it says nothing was checked.
+    gol=${GOLEMIDE_EDIT_WASM-$here/../golemide/build/golemide-edit.wasm}
+    if [ -n "$gol" ] && [ -f "$gol" ]; then
+      gol=$(cd "$(dirname "$gol")" && pwd)/$(basename "$gol")
+      echo
+      echo "[tools.edit]"
+      echo "image = $(quoted "$gol")"
+      echo 'description = "Change part of a file of the project: old is the passage as it is now, new what replaces it. Copy old from what read showed, without the line numbers; indentation need not be exact. For passages of more than a few lines give old and new as texts after the object (@body:NAME). The answer is JSON: ok, a diff, or the reason it was refused. Syntax is not checked here (checked_by is empty): run the project'"'"'s own check after."'
+      echo 'input = { type = "object", properties = { path = { type = "string" }, old = { type = "string" }, new = { type = "string" } }, required = ["path", "old", "new"] }'
+      echo "mounts = [$(list "$root:/work")]"
+      echo "env = [$(list "GOLEMIDE_ROOT=/work" "GOLEMIDE_HOST_ROOT=$root")]"
+      echo
+      echo "[tools.write]"
+      echo "image = $(quoted "$gol")"
+      echo 'description = "Write a file of the project, whole: a new file, or a complete rewrite. Give the content as a text after the object (@body:NAME). It writes nowhere but the project and will not blank a file. The answer is JSON: ok, a diff, or the reason it was refused. Syntax is not checked here."'
+      echo 'input = { type = "object", properties = { path = { type = "string" }, content = { type = "string" } }, required = ["path", "content"] }'
+      echo "mounts = [$(list "$root:/work")]"
+      echo "env = [$(list "GOLEMIDE_ROOT=/work" "GOLEMIDE_HOST_ROOT=$root" "GOLEMIDE_CREATE=1")]"
+    else
+      echo
+      echo "[tools.write]"
+      echo "image = $(quoted "$here/build/tool-write.wasm")"
+      echo 'description = "Write a file of the project, whole: a new file, or a complete rewrite. Give the content as a text after the object (@body:NAME). It writes nowhere but the project, and does not check syntax."'
+      echo 'input = { type = "object", properties = { path = { type = "string" }, content = { type = "string" } }, required = ["path", "content"] }'
+      echo "mounts = [$(list "$root:/work")]"
+      echo "env = [$(list "ROOT=/work" "HOST_ROOT=$root")]"
+    fi
     echo
     echo "[tools.reference]"
     echo "image = $(quoted "$here/build/tool-reference.wasm")"

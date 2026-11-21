@@ -36,6 +36,9 @@ tools = [
     {"tool": "outline", "args": {"path": "hewn.py"}},
     {"tool": "search", "args": {"pattern": "def unusual_name"}},
     {"tool": "read", "args": {"path": "hewn.py", "symbol": "unusual_name"}},
+    # golemide's edit, there when it is here as a component: a passage quoted with the
+    # wrong indentation still lands.
+    {"tool": "edit", "args": {"path": "hewn.py", "old": "def unusual_name():\n  return 41 + 1", "new": "def unusual_name():\n    return 40 + 2"}},
 ]
 probe = tools + [
     {"command": f"cat {P}/keys/.env; echo keyfile=$?"},
@@ -82,7 +85,9 @@ for line in said.split("\n"):
 print("waited=" + str("(job 14)\nslept\n[exit code 0]" in said))
 system = json.load(open(P + "/fake/request-1.json"))["messages"][0]["content"]
 print("tools-told=" + str("- read: " in system and "- write: " in system and "- reference: " in system and "- shell: " not in system))
-print("tool-wrote=" + str("wrote tooled/note.txt: 2 lines" in said))
+print("tool-wrote=" + str("wrote tooled/note.txt: 2 lines" in said or '"ok":true,"path":"tooled/note.txt"' in said))
+if "- edit: " in system:
+    print("golemide-edit=" + str("return 40 + 2" in open(P + "/root/hewn.py").read() and "matched ignoring" in said))
 first_read = said.split("(tool read")[1].split("(tool ")[0]
 print("tool-read=" + str("line one" in first_read and '"quoted" {braces}' in first_read))
 print("tool-hosts=" + str("/etc/hosts could not be read" in said or "no such file: /etc/hosts" in said))

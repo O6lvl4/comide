@@ -206,7 +206,11 @@ nautra の上では、エージェントは鍵を持たない WebAssembly コン
 使えます。`TOOLS_OFF=1` で、端末だけに戻せます。[hew](https://github.com/O6lvl4/hew) がコンポーネントとして
 あれば（`HEW_WASM`、または comide の隣の hew の `build/hew.wasm`）、読む道具は hew のものに
 なります。シンボル・範囲・一致で読む `read`、`outline`、`search`、`tree` で、どれもプロジェクトを
-読み取り専用で渡されるだけです。
+読み取り専用で渡されるだけです。[golemide](https://github.com/O6lvl4/golemide) の編集が
+コンポーネントとしてあれば（`GOLEMIDE_EDIT_WASM`、または隣の golemide の
+`build/golemide-edit.wasm`）、`edit` と `write` は golemide のものになります。うろ覚えの引用にも
+合わせ、ファイルを空にしません。コンポーネントは検査のプログラムを起こせないので、そこでは
+構文は確かめず、答えにそう書かれます。
 
 このループは先に comide の外で書いて測りました。同じモデルで Terminal-Bench 2 のタスクを
 解かせると、Harbor の terminus-2 とほぼ同じ数が通ります。

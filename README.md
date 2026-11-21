@@ -214,7 +214,11 @@ those, so a tool added to the composition is one the model can use. `TOOLS_OFF=1
 the terminal alone. When [hew](https://github.com/O6lvl4/hew) is there as a component
 (`HEW_WASM`, or `build/hew.wasm` in a hew beside comide), reading is hew's: `read` by
 symbol, range or match, `outline`, `search` and `tree`, each started with the project
-read-only and nothing else.
+read-only and nothing else. When [golemide](https://github.com/O6lvl4/golemide)'s edit is
+there as a component (`GOLEMIDE_EDIT_WASM`, or `build/golemide-edit.wasm` in a golemide
+beside comide), `edit` and `write` are golemide's: a passage quoted from memory is found,
+a file is not blanked. As a component it starts no checker, so syntax is not checked
+there and its answer says so.
 
 The loop was written and measured outside comide first, against Harbor's terminus-2 on
 Terminal-Bench 2 tasks with the same model, and passes about as many.

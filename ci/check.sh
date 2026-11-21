@@ -509,6 +509,12 @@ else
   else
     say "skipped: no hew component (HEW_WASM, or ../hew/build/hew.wasm)"
   fi
+  # golemide's edit as a component (golemide's ci/build-wasm.sh), when it is here.
+  if grep -q '^golemide-edit=' "$tmp/probe.out"; then
+    has "golemide edits a file from inside its sandbox, the passage quoted loosely" "^golemide-edit=True$" "$tmp/probe.out"
+  else
+    say "skipped: no golemide edit component (GOLEMIDE_EDIT_WASM, or ../golemide/build/golemide-edit.wasm)"
+  fi
 
   say "== --confined: the conversation here, its terminal behind nautra's door"
   # The native comide, with every terminal order sent to the terminal nautra publishes.
