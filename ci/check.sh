@@ -389,6 +389,42 @@ has "the model is told how to write a long text" "^told True$" "$tmp/bd.sent"
 has "with no search engine answering, the search is not offered" "^no search True$" "$tmp/bd.sent"
 has "a text named and not written is said back, and nothing runs" "^missing True$" "$tmp/bd.sent"
 
+say "== on a terminal: the input box takes the keys, and what runs is shown running"
+# In a pseudo-terminal (ci/pty-drive.py): two wide characters typed, one erased, sent;
+# the model's reply runs a command that takes two seconds. From the epoch 15 stdlib to
+# 0.7.1 the terminal was never taken over and none of this was checked: no box, and a
+# line reader that could not erase a wide character.
+rm -rf "$tmp/fake" "$tmp/pt"; mkdir -p "$tmp/fake" "$tmp/pt"
+python3 - "$tmp/fake" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+replies = [say([{"command": "echo one; sleep 2; echo two", "wait_s": 10}]),
+           say([], done=True, analysis="All done."), say([], done=True, analysis="All done.")]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake" \
+    python3 "$here/ci/pty-drive.py" 12 'あい@2,\x7f@3,\r@4,\x03@10,\x03@10.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt.raw" 2>&1 )
+sed 's/'"$(printf '\033')"'\[[0-9;?]*[A-Za-z]/ /g' "$tmp/pt.raw" | tr '\r' '\n' > "$tmp/pt.txt"
+has "the input box is drawn" "│ *❯" "$tmp/pt.txt"
+has "two wide characters typed are drawn" "❯ *あい" "$tmp/pt.txt"
+python3 - "$tmp/fake" "$tmp/pt.txt" > "$tmp/pt.out" <<'EOF'
+import json, re, sys
+sent = [m["content"] for m in json.load(open(sys.argv[1] + "/request-1.json"))["messages"] if m["role"] == "user"]
+print("sent", sent[-1] == "Task Description:\nあ")
+screen = open(sys.argv[2], encoding="utf-8", errors="replace").read()
+rows = [l for l in screen.split("\n") if "❯" in l and "│" in l]
+after = [i for i, l in enumerate(rows) if re.search(r"❯ *あい", l)]
+print("erased", bool(after) and any(re.search(r"❯ *あ {3,}", l) for l in rows[after[-1] + 1:]))
+print("running", bool(re.search(r"Running… +\d+s", screen)))
+print("printed", "one" in screen and "two" in screen and "All done." in screen)
+EOF
+has "one of them erased is gone from the screen" "^erased True$" "$tmp/pt.out"
+has "and from what is sent" "^sent True$" "$tmp/pt.out"
+has "a command that is running is shown running, with the seconds" "^running True$" "$tmp/pt.out"
+has "what it printed and the answer are shown" "^printed True$" "$tmp/pt.out"
+
 say "== without a task, nothing is started"
 ./comide errand > /dev/null 2>&1
 same "exit 2" "2" "$?"
