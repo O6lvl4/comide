@@ -32,6 +32,7 @@ import self.convo
 import self.options
 import self.turn
 import self.penned
+import self.confined
 import self.web
 import self.reference
 import self.briefing
@@ -146,9 +147,19 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let has_hooks = not list.is_empty(value.as_object(loaded.settings.hooks) ?? [])
   // The programs and addresses whose tools can be reached (mcp.almd), by name only.
   let servers = mcp.servers_of(loaded.settings.mcp)
-  let setup = { ...setup_of(opts0)!, allow_rules: loaded.settings.allow, ask_rules: loaded.settings.ask, deny_rules: loaded.settings.deny,
+  let setup0 = { ...setup_of(opts0)!, allow_rules: loaded.settings.allow, ask_rules: loaded.settings.ask, deny_rules: loaded.settings.deny,
     hooks_json: if has_hooks then json.stringify(loaded.settings.hooks) else "",
     mcp_json: if list.is_empty(servers) then "" else json.stringify(loaded.settings.mcp) }
+  // --confined: the terminal is nautra's, behind a door on this machine (confined.almd).
+  // If it cannot be had, the conversation does not start.
+  let door = if opts0.confined and opts0.written then some(confined.open(opts0.root, setup0.scratch, setup0.scratch + "/terminal")!) else none
+  guard not (opts0.confined and not opts0.written) else err("--confined is for the written loop; it cannot be used with --loop tools")
+  let setup = match door {
+    some(d) => { ...setup0, door_url: d.url, door_token: d.token },
+    none => setup0,
+  }
+  if option.is_some(door) then options.show(opts0, ui.note_line(opts0.ui, "terminal confined by nautra: writes under " + opts0.root + " and /tmp, "
+    + (if string.trim(env.get("COMIDE_CONFINED_NET") ?? "") == "" then "no network" else "network: " + string.trim(env.get("COMIDE_CONFINED_NET") ?? ""))))!
   if not list.is_empty(servers) then options.show(opts0, ui.note_line(opts0.ui, "MCP servers: " + list.join(list.map(servers, (sv) => sv.name), ", ")))!
   // What a SessionStart hook prints is said to the model with the project's own notes.
   let at_start = turn.hooked(opts0, setup, "SessionStart", "", value.null(), "", "")!
@@ -171,7 +182,8 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
   let without = (if opts0.written and not web.search_answers(setup.searx)! then ["web_search"] else [])
     + (if list.is_empty(reference.installed()!) then ["reference"] else [])
   let opening = (if opts0.written then penned.system_prompt(opts0.root, without, opts0.live) else system_prompt(opts0.root)) + "\n" + tools.project_context(setup)!
-  let system = list.join(list.filter([opening, if opts0.written then penned.toolchains()! else "", briefed, skills.section(known), mcp.section(servers),
+  let system = list.join(list.filter([opening, if option.is_some(door) then confined.note(opts0.root, env.get("COMIDE_CONFINED_NET") ?? "") else "",
+    if opts0.written then penned.toolchains()! else "", briefed, skills.section(known), mcp.section(servers),
     if at_start.printed == "" then "" else "Said by a check the user set up to run at the start of a session:\n" + at_start.printed, remembered], (part) => part != ""), "\n\n")
   let fresh = options.Session { messages: [convo.message("system", system)], cost: 0.0, allow_shell: opts0.yes, steps: 0, check: "" }
   let _ = fs.mkdir_p(home + "/.comide")
@@ -414,6 +426,11 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                    command is run. /go in a conversation approves it; after `run`,
                    `comide run "go ahead" --continue` carries it out
   --read-only      only look, for the whole run: no file changed, no command run
+  --confined       the terminal is nautra's: a command the model writes can write only
+                   under the project and /tmp, read only the project and the system's
+                   directories, and reach no network ($COMIDE_CONFINED=1). Needs nautra
+                   and build/comide-shell (nautra/build.sh). $COMIDE_CONFINED_NET names
+                   hosts it may reach ("pypi.org:443 files.pythonhosted.org:443")
   --loop tools     the loop comide had before 0.7: the tools are sent to the model as
                    tool calls, and its shell starts afresh for every command
                    ($COMIDE_LOOP). The default, written, asks the model to answer every
@@ -472,6 +489,7 @@ effect fn cli(raw: List[String]) -> Int = {
       plan: has(args, "--plan"),
       read_only: has(args, "--read-only") or helper,
       written: (opt(args, "--loop") ?? (env.get("COMIDE_LOOP") ?? "")) != "tools",
+      confined: has(args, "--confined") or (env.get("COMIDE_CONFINED") ?? "") == "1",
     }
     match chat(opts) { ok(code) => code, err(e) => { eprintln(e); 2 } }
   }

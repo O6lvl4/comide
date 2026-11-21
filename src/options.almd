@@ -13,7 +13,7 @@ import self.ui
 // (penned.almd, --loop written), in place of the one that sends tools (turn.almd).
 type Options = { root: String, model: String, effort: String, max_steps: Int, max_tokens: Int, yes: Bool, prompt: String, golemide: String, live: Bool, tui: Bool, ui: ui.Ui, runner: String,
   take_up: Bool = false, take_up_id: String = "", goal: String = "", trust_project: Bool = false,
-  plan: Bool = false, read_only: Bool = false, written: Bool = false }
+  plan: Bool = false, read_only: Bool = false, written: Bool = false, confined: Bool = false }
 
 fn with_model(o: Options, m: String) -> Options = { ...o, model: m }
 

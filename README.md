@@ -224,6 +224,34 @@ text after the object, as it is, between a `<<<BODY NAME` line and a `>>>BODY NA
 line, and name it where it is meant (`"content": "@body:NAME"`). `web_search` is offered
 only when a search engine answers at the start.
 
+## A confined terminal
+
+`comide --confined` keeps the conversation where it is and puts the terminal somewhere it
+can do no harm. comide starts [nautra](https://github.com/Aid-On/nautra), has it publish
+comide's own terminal program on this machine behind a token (nautra's "publishing tools
+to an agent that runs elsewhere"), and sends every command the model writes there. A
+command can then
+
+- write only under the project and `/tmp`,
+- read only the project and the system's directories, plus the toolchains shown to it
+  read-only (Homebrew, Nix, Xcode, a version manager's directory under `~/.local`): not
+  your home directory, not `~/.ssh`, not where comide's and golemide's keys are kept,
+- reach no network, unless `COMIDE_CONFINED_NET` names the hosts
+  (`"pypi.org:443 files.pythonhosted.org:443"`).
+
+The directory it changed to and the variables it exported still last from command to
+command. The model is told where it stands, so it does not spend its steps rewording a
+command that will be refused again. If nautra or the terminal program
+(`build/comide-shell`, built by `nautra/build.sh`) is not there, comide does not start:
+it never falls back to an unconfined terminal.
+
+What is not confined: `edit`, `write`, `read` and the other tools, which are comide
+calling golemide and hew, not commands the model wrote. Known gap on macOS: the system C
+compiler (`cc` through Xcode's `xcrun`) does not run inside, because it writes a cache
+outside the sandbox; Python and git do. `COMIDE_CONFINED_READS=open` lets commands read
+outside the project (the key directories stay closed), and `COMIDE_CONFINED_TOOLS` names
+the toolchain directories itself.
+
 ## Settings
 
 What may run without asking, and what may not run at all, is written as rules in JSON:

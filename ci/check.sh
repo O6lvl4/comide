@@ -486,6 +486,58 @@ else
   has "the directory and the variables last from call to call" "^kept=0$" "$tmp/probe.out"
   has "a command that outlasts its wait is waited for again" "^waited=True$" "$tmp/probe.out"
   has "nothing is left running when the run ends" "^left-running=False$" "$tmp/probe.out"
+
+  say "== --confined: the conversation here, its terminal behind nautra's door"
+  # The native comide, with every terminal order sent to the terminal nautra publishes.
+  # The walls are tried from inside by a stand-in model; then comide is asked for a
+  # confined terminal where there is no nautra, and must not start.
+  rm -rf "$tmp/fake"; mkdir -p "$tmp/fake" "$probe/cw/proj" "$probe/cw/outside"
+  echo seed > "$probe/cw/proj/seed.txt"
+  python3 - "$tmp/fake" "$probe/cw" <<'EOF'
+import json, sys
+fake, P = sys.argv[1:3]
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+tries = [
+    {"command": "cat seed.txt > /dev/null && echo made > made.txt; echo inside=$?"},
+    {"command": f"echo x > {P}/outside/escape.txt 2> /dev/null; echo outside=$?"},
+    {"command": "ls ~ > /dev/null 2>&1; echo home=$?"},
+    {"command": "cat ~/.ssh/* > /dev/null 2>&1; echo ssh=$?"},
+    {"command": "curl -sS -m 4 -o /dev/null https://example.com 2> /dev/null; echo net=$?", "wait_s": 10},
+    {"command": "mkdir -p sub && cd sub && export V=kept"},
+    {"command": "echo kept=$(basename $(pwd))-$V"},
+]
+replies = [say(tries), say([], done=True, analysis="Done."), say([], done=True, analysis="Done.")]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{fake}/reply-{i}.json", "w"))
+EOF
+  LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_SHELL="$here/build/comide-shell" COMIDE_FAKE="$tmp/fake" ./comide -p "try the walls" --yes --confined --model local:stand-in --root "$probe/cw/proj" > "$tmp/cw.out" 2> "$tmp/cw.err"
+  same "exit 0" "0" "$?"
+  python3 - "$tmp/fake" > "$tmp/cw.sent" <<'EOF'
+import json, re, sys
+r1 = json.load(open(sys.argv[1] + "/request-1.json"))["messages"]
+seen = json.load(open(sys.argv[1] + "/request-2.json"))["messages"][-1]["content"]
+print("told", "Your terminal is confined" in r1[0]["content"])
+for name in ("inside", "outside", "home", "ssh", "net", "kept"):
+    m = re.search("^" + name + r"=(\S+)", seen, re.M)
+    print(name + "=" + (m.group(1) if m else "?"))
+print("moved", "[the terminal is now in " in seen)
+EOF
+  has "the person is told the terminal is confined" "terminal confined by nautra" "$tmp/cw.err"
+  has "and so is the model" "^told True$" "$tmp/cw.sent"
+  has "the project can be read and written" "^inside=0$" "$tmp/cw.sent"
+  same "and the file is there" "made" "$(cat "$probe/cw/proj/made.txt" 2>/dev/null)"
+  has "beside the project nothing can be written" "^outside=1$" "$tmp/cw.sent"
+  if [ -e "$probe/cw/outside/escape.txt" ]; then bad "and nothing was"; else say "ok: and nothing was"; fi
+  has "the home directory cannot be listed" "^home=1$" "$tmp/cw.sent"
+  has "nor ~/.ssh read" "^ssh=1$" "$tmp/cw.sent"
+  has "no host can be reached" "^net=6$" "$tmp/cw.sent"
+  has "the directory and the variables last from command to command" "^kept=sub-kept$" "$tmp/cw.sent"
+  has "and the model is told where the terminal now is" "^moved True$" "$tmp/cw.sent"
+  if pgrep -f "confined-.*\.toml" > /dev/null 2>&1; then bad "nautra's door is closed when the conversation ends"; else say "ok: nautra's door is closed when the conversation ends"; fi
+  rm -f "$probe/cw/proj/made.txt"
+  NAUTRA=/nonexistent/nautra LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_SHELL="$here/build/comide-shell" COMIDE_FAKE="$tmp/fake" ./comide -p "try the walls" --yes --confined --model local:stand-in --root "$probe/cw/proj" > "$tmp/cw2.out" 2> "$tmp/cw2.err"
+  if [ "$?" -ne 0 ] && [ ! -e "$probe/cw/proj/made.txt" ]; then say "ok: without nautra a confined conversation does not start, and nothing runs unconfined"; else bad "without nautra a confined conversation does not start, and nothing runs unconfined"; fi
   rm -rf "$probe"
 fi
 

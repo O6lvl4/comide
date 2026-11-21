@@ -13,6 +13,8 @@ done
 here=$(cd "$(dirname "$self")" && pwd)
 saved=""
 if [ -t 0 ]; then saved=$(stty -g 2>/dev/null); fi
+# Where comide's own programs are (build/comide-shell, for --confined).
+COMIDE_HOME=${COMIDE_HOME:-$(cd "$here/.." && pwd)}; export COMIDE_HOME
 "$here/../comide" "$@"
 code=$?
 if [ -n "$saved" ]; then

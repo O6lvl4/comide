@@ -1,0 +1,212 @@
+// The conversation's terminal, confined: `comide --confined`.
+//
+// The conversation stays where it is, at the person's terminal, and what the model writes
+// to be run goes somewhere it can do no harm. nautra publishes a tool to an agent that
+// runs elsewhere (a composition with `[mcp]` in place of `[agent]`): comide starts nautra
+// as a child, has it publish comide's own terminal (build/comide-shell, the one an errand
+// has under nautra) on this machine behind a token, and sends every terminal order there.
+// Each order is then a fresh process under the tool's grants: it can write under the
+// project and /tmp, read the project and the system's directories, and reach no network.
+// Tried by hand first (2026-11-21): `ls ~` was "Operation not permitted", curl could not
+// resolve a name, and `cd` and `export` were still there on the next call.
+//
+// What is not confined here: edit, write, read and the other tools, which are comide
+// calling golemide and hew and not a command the model wrote.
+//
+// Nothing here falls back. Asked for a confined terminal and unable to give one, comide
+// does not start: a terminal believed confined and not confined is the worst of the three.
+
+import env
+import fs
+import http
+import json
+import process
+
+type Door = { url: String, token: String }
+
+fn quoted(s: String) -> String = "\"" + string.replace(string.replace(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+
+fn listed(xs: List[String]) -> String = "[" + list.join(list.map(xs, quoted), ", ") + "]"
+
+effect fn found(bin: String) -> String = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v " + bin] }) {
+  ok(st) => if st.code == 0 then string.trim(st.stdout) else "",
+  err(_) => "",
+}
+
+// nautra: the one named (NAUTRA), or the one on PATH.
+effect fn nautra_bin() -> String = {
+  let named = string.trim(env.get("NAUTRA") ?? "")
+  if named != "" then named else found("nautra")!
+}
+
+// The terminal's program: the one named (COMIDE_SHELL), the one built beside this comide
+// (nautra/build.sh puts it in build/; bin/comide says where that is), or one on PATH.
+effect fn shell_bin() -> String = {
+  let named = string.trim(env.get("COMIDE_SHELL") ?? "")
+  let beside = string.trim(env.get("COMIDE_HOME") ?? "") + "/build/comide-shell"
+  if named != "" then named
+  else if string.trim(env.get("COMIDE_HOME") ?? "") != "" and fs.exists(beside) then beside
+  else found("comide-shell")!
+}
+
+// Where toolchains are installed, shown read-only: without these a closed terminal on
+// macOS has python3, cc and git as stubs with nothing behind them. COMIDE_CONFINED_TOOLS
+// names them instead (a space between each; empty for none).
+effect fn tool_dirs() -> List[String] = match env.get("COMIDE_CONFINED_TOOLS") {
+  some(named) => list.filter(string.split(named, " "), (d) => string.trim(d) != ""),
+  none => {
+    let xcode = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "xcode-select -p 2>/dev/null"] }) {
+      ok(st) => string.strip_suffix(string.trim(st.stdout), "/Contents/Developer") ?? string.trim(st.stdout),
+      err(_) => "",
+    }
+    // The user's own toolchains too, where a version manager keeps them under the home
+    // directory (the first try had python3 and git only as Xcode's stubs, which failed),
+    // and git's settings, without which git stops at once. None of these holds a key;
+    // ~/.cargo is left out because its credentials file would.
+    let home = env.get("HOME") ?? ""
+    let own = if home == "" then [] else [home + "/.local/bin", home + "/.local/share/qusp", home + "/.rustup", home + "/.config/git"]
+    list.unique(list.filter([xcode, "/Library/Developer/CommandLineTools", "/nix", "/opt/homebrew", "/usr/local"] + own, (d) => d != "" and fs.exists(d)))
+  },
+}
+
+// The composition nautra is given: one tool, the terminal, and who may call it.
+// `state` is the terminal's own directory (its working directory, its variables, its
+// jobs), kept across the fresh process each call is.
+fn composition(port: Int, shell: String, root: String, state: String, tools: List[String], net: List[String], deny: List[String], open: Bool) -> String = {
+  let shell_dir = list.join(list.take(string.split(shell, "/"), int.max(1, list.len(string.split(shell, "/")) - 1)), "/")
+  list.join([
+    "# Written by comide --confined for one conversation.",
+    "[mcp]",
+    "listen = " + quoted(int.to_string(port)),
+    "token = \"COMIDE_DOOR_TOKEN\"",
+    "",
+    "[tools.shell]",
+    "command = " + listed([shell, state]),
+    "description = \"The terminal: run a command line, wait for a job, stop a job.\"",
+    "input = { type = \"object\", properties = { command = { type = \"string\" }, job = { type = \"integer\" }, wait_s = { type = \"integer\" }, stop = { type = \"boolean\" }, close = { type = \"boolean\" } } }",
+    // The project first: a command starts in its first mount. The last is the terminal's
+    // own program, which it must be able to read to be started.
+    "mounts = " + listed([root, state, shell_dir + ":ro"] + list.map(tools, (d) => d + ":ro")),
+    if open then "reads = \"open\"" else "",
+    // Whatever the terminal may read, it may not read where keys are kept.
+    "porta = " + listed(list.flat_map(deny, (d) => ["--deny-read", d])),
+    "net = " + listed(net),
+    "env = [\"TMPDIR=/tmp\"]",
+    "timeout = \"6m\"",
+  ], "\n") + "\n"
+}
+
+fn call_body(id: Int, arguments: Value) -> String = json.stringify(value.object([
+  ("jsonrpc", value.string("2.0")), ("id", value.int(id)), ("method", value.string("tools/call")),
+  ("params", value.object([("name", value.string("shell")), ("arguments", arguments)])),
+]))
+
+// What a call's answer says, as the terminal's own words: the text of the result, or why
+// there is none.
+fn answer_text(body: String) -> Result[String, String] = match json.parse(body) {
+  err(_) => err("the confined terminal's answer was not JSON: " + string.take(body, 200)),
+  ok(doc) => match value.get(doc, "error") {
+    some(e) => err(value.get_string(e, "message") ?? json.stringify(e)),
+    none => {
+      let result = value.get(doc, "result") ?? value.object([])
+      let texts = list.map(value.get_array(result, "content") ?? [], (c) => value.get_string(c, "text") ?? "")
+      ok(list.join(texts, "\n"))
+    },
+  },
+}
+
+effect fn post(door: Door, body: String, timeout_s: Int) -> Result[String, String] = {
+  env.set("ALMIDE_HTTP_TIMEOUT_SECS", int.to_string(timeout_s))!
+  match http.send(http.new_request("POST", door.url, body, [("Authorization", "Bearer " + door.token), ("Content-Type", "application/json")])) {
+    err(e) => err(e),
+    ok(r) => if http.status(r) == 200 then ok(http.body(r)) else err("HTTP " + int.to_string(http.status(r)) + " " + string.take(http.body(r), 200)),
+  }
+}
+
+// One order of the terminal, carried out behind the door. A call that could not be made
+// is said to the model as what it is, and nothing is run anywhere else in its place.
+effect fn call(door: Door, arguments: Value) -> String = {
+  let wait_s = value.get_int(arguments, "wait_s") ?? 0
+  match post(door, call_body(datetime.now_ms() % 1000000 + 1, arguments), (if wait_s <= 0 then 30 else int.min(wait_s, 300)) + 60) {
+    err(e) => "[the confined terminal could not be reached: " + e + ". Nothing was run.]",
+    ok(body) => match answer_text(body) {
+      ok(text) => text,
+      err(e) => "[the confined terminal refused the call: " + e + "]",
+    },
+  }
+}
+
+effect fn answers(door: Door) -> Bool = match post(door, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", 3) {
+  ok(body) => string.contains(body, "\"shell\""),
+  err(_) => false,
+}
+
+// Starts nautra with the terminal published, and waits until it answers. `dir` is the
+// conversation's scratch directory: the composition and the token are written there, the
+// token readable by this user only and passed by file, so that it is on no command line.
+effect fn open(root: String, dir: String, state: String) -> Result[Door, String] = {
+  let nautra = nautra_bin()!
+  let shell = shell_bin()!
+  guard nautra != "" else err("--confined needs nautra on PATH (or NAUTRA naming it): https://github.com/Aid-On/nautra")
+  guard shell != "" else err("--confined needs comide's terminal program, build/comide-shell: run nautra/build.sh in comide's directory, or name it with COMIDE_SHELL")
+  let token = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \\n'"] }) {
+    ok(st) => string.trim(st.stdout),
+    err(_) => "",
+  }
+  guard string.len(token) >= 32 else err("--confined could not make a token for its door")
+  let home = env.get("HOME") ?? ""
+  let net = list.filter(string.split(env.get("COMIDE_CONFINED_NET") ?? "", " "), (h) => string.trim(h) != "")
+  let deny = list.filter([home + "/.config/golemide", home + "/.config/comide", home + "/.comide", home + "/.ssh"], (d) => home != "" and fs.exists(d))
+  let open_reads = (env.get("COMIDE_CONFINED_READS") ?? "") == "open"
+  fs.mkdir_p(state)!
+  let token_file = dir + "/door-token"
+  fs.write_text(token_file, token + "\n")!
+  let _ = process.output(process.ProcessCommand { cmd: "chmod", args: ["600", token_file] })
+  // A port nobody is likely to hold; if one is taken, the next is tried.
+  var door: Door? = none
+  var tries = 0
+  var last = ""
+  while option.is_none(door) and tries < 5 {
+    let port = 20000 + (datetime.now_ms() + tries * 7919) % 20000
+    let file = dir + "/confined-" + int.to_string(tries) + ".toml"
+    fs.write_text(file, composition(port, shell, root, state, tool_dirs()!, net, deny, open_reads))!
+    let line = "COMIDE_DOOR_TOKEN=$(cat \"$1\") exec \"$2\" run -f \"$3\" > \"$4\" 2>&1"
+    match process.start(process.ProcessCommand { cmd: "bash", args: ["-c", line, "door", token_file, nautra, file, dir + "/nautra.out"] }) {
+      err(e) => { last = e },
+      ok(_) => {
+        let candidate = Door { url: "http://127.0.0.1:" + int.to_string(port) + "/mcp", token: token }
+        let t0 = datetime.now_ms()
+        while option.is_none(door) and datetime.now_ms() - t0 < 8000 {
+          if answers(candidate)! then { door = some(candidate) } else env.sleep_ms(150)
+        }
+        if option.is_none(door) then { last = string.take(string.trim(fs.read_text(dir + "/nautra.out") ?? ""), 400) } else ()
+      },
+    }
+    tries = tries + 1
+  }
+  match door {
+    some(d) => ok(d),
+    none => err("--confined could not start nautra's door" + (if last == "" then "" else ": " + last)),
+  }
+}
+
+// What the model is told of where its commands run.
+fn note(root: String, net: String) -> String =
+  "Your terminal is confined. A command can write only under " + root + " and /tmp, can read only the project and the system's own directories (the user's home and its keys are not readable), and has "
+    + (if string.trim(net) == "" then "no network at all: nothing can be downloaded or installed from the internet" else "network access only to: " + string.trim(net))
+    + ". A command refused for one of these reasons will be refused again however it is written: do not look for a way round it. Say what was needed, and go on with what can be done inside. The tools (read, edit, write and the others) are not the terminal and work as usual."
+
+test "the composition names one tool, the project first among its mounts, and no network unless given" {
+  let c = composition(20001, "/opt/comide/build/comide-shell", "/w/proj", "/tmp/s/terminal", ["/opt/homebrew"], [], ["/home/u/.ssh"], false)
+  assert(string.contains(c, "listen = \"20001\""))
+  assert(string.contains(c, "command = [\"/opt/comide/build/comide-shell\", \"/tmp/s/terminal\"]"))
+  assert(string.contains(c, "mounts = [\"/w/proj\", \"/tmp/s/terminal\", \"/opt/comide/build:ro\", \"/opt/homebrew:ro\"]"))
+  assert(string.contains(c, "net = []"))
+  assert(string.contains(c, "porta = [\"--deny-read\", \"/home/u/.ssh\"]"))
+  assert(not string.contains(c, "reads"))
+}
+
+test "an answer is its text; an error is said as one" {
+  assert_eq(answer_text("{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"/tmp\\n[exit code 0]\",\"type\":\"text\"}],\"isError\":false}}"), ok("/tmp\n[exit code 0]"))
+  assert_eq(answer_text("{\"id\":2,\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"wait_s must be an integer\"}}"), err("wait_s must be an integer"))
+}

@@ -41,6 +41,7 @@ import self.turn
 import self.ui
 import process
 import self.reference
+import self.confined
 import self.waiting
 import self.watch
 
@@ -126,7 +127,10 @@ effect fn terminal(setup: toolkit.Setup) -> shell.Shell = {
 
 // Ends what the conversation's terminal left running. Called when the conversation ends.
 effect fn close(setup: toolkit.Setup) -> Unit =
-  if fs.exists(setup.scratch + "/terminal/cwd") then shell.close(terminal(setup)!)! else ()
+  if setup.door_url != "" then {
+    let _ = confined.call(confined.Door { url: setup.door_url, token: setup.door_token }, value.object([("close", value.bool(true))]))!
+  }
+  else if fs.exists(setup.scratch + "/terminal/cwd") then shell.close(terminal(setup)!)! else ()
 
 // One model call, watched: a spinner, and Esc to stop it. The reply is JSON and is not
 // shown as it arrives. `none` is the person stopping it.
@@ -227,7 +231,20 @@ fn output_shown(u: ui.Ui, text: String) -> String = {
 // One call of the terminal, with the wait shown: a line rewritten in place that says the
 // command is running, for how long, and the last thing it printed. Esc stops the command.
 // Where nothing is drawn (a run with nobody there) it is shell.call.
-effect fn watched_call(opts: options.Options, sh: shell.Shell, a: Value) -> (shell.Shell, String) = {
+effect fn watched_call(opts: options.Options, setup: toolkit.Setup, sh: shell.Shell, a: Value) -> (shell.Shell, String) =
+  if setup.door_url != "" then confined_call(opts, setup, a)! else local_call(opts, sh, a)!
+
+// The same order, carried out behind nautra's door (confined.almd). The terminal's state
+// is in the same directory, written there by the confined program; it is read again
+// after the call, so the next job's number is the one that program left.
+effect fn confined_call(opts: options.Options, setup: toolkit.Setup, a: Value) -> (shell.Shell, String) = {
+  let tick = turn.ticking(opts, setup, "in the confined terminal")!
+  let text = confined.call(confined.Door { url: setup.door_url, token: setup.door_token }, a)!
+  turn.ticked(tick)!
+  (terminal(setup)!, string.trim_end(text))
+}
+
+effect fn local_call(opts: options.Options, sh: shell.Shell, a: Value) -> (shell.Shell, String) = {
   let command = value.get_string(a, "command") ?? ""
   let job = shell.int_arg(a, "job")
   let starting = string.trim(command) != ""
@@ -304,13 +321,13 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
         list.push(parts, said.shown(o) + "\n" + why)
         stopped = true
       } else {
-        let (next_sh, ran_text) = watched_call(opts, sh, said.arguments(o))!
+        let (next_sh, ran_text) = watched_call(opts, setup, sh, said.arguments(o))!
         // A command that left the terminal somewhere else says so to the model: three
         // commands in a row were written for a directory the terminal had left.
         let now_in = string.trim(shell.text_of(next_sh.dir + "/cwd")!)
         let text = if now_in != "" and now_in != string.trim(before) then ran_text + "\n[the terminal is now in " + now_in + "]" else ran_text
         sh = next_sh
-        shell.keep(sh)!
+        if setup.door_url == "" then shell.keep(sh)! else ()
         let post = if command == "" then hooks.quiet() else turn.hooked(opts, setup, "PostToolUse", "shell", value.object([("command", value.string(o.command))]), string.take(text, 20000), "")!
         let bad = command_failed(text)
         let printed = output_shown(opts.ui, text)
