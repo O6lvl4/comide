@@ -133,6 +133,34 @@ as they are now. Permission to run commands is not kept, and is asked for again.
 every tool's output, and the system prompt with your own instruction files and notes in
 it. The files are readable by you only, and are not in the project.
 
+Inside a conversation, `/resume` lists the project's earlier ones and goes on with the
+one you pick, and `/export` writes the conversation as a text to read: what was asked,
+what comide said and ran, and what came back, with long results cut and the system
+prompt left out. It goes to `~/.comide/exports/`, or to the file you name.
+
+## Going back to before a request
+
+Before each request comide keeps the project's files as they are, and `/rewind` puts them
+back: pick a request of this run, and then the conversation, the files, or both. What
+the request changed is as it was, what it removed is back, what it made is gone.
+
+The files are kept with git, in a repository of comide's own under
+`~/.comide/checkpoints/`: your project's repository is not touched, and nothing is
+committed or staged there. What your `.gitignore` leaves out is neither kept nor put
+back. Two things to know: what a command did outside the project (a database, a remote,
+an installed package) is not undone, and files you changed yourself since that request
+go back with the rest. `COMIDE_CHECKPOINTS=0` keeps nothing; a project that is your
+home directory is never kept.
+
+## Commands
+
+`/help` lists them. Besides the ones named in the sections here: `/copy` (comide's last
+answer, to the clipboard), `/init` (comide writes `AGENTS.md` for the project), `/review`
+(comide reviews the changes not yet committed), `/context`, `/status`, `/permissions`,
+`/hooks`, `/mcp`, `/skills`, `/agents` (what is set up and where it is written), and
+`/doctor` (whether the programs comide leans on are there). A command typed from habit
+that comide has no use for, `/login` say, is answered with what to do instead.
+
 ## Memory
 
 A project has one file of notes that outlive a session:

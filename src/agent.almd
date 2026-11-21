@@ -44,6 +44,8 @@ import self.goal
 import self.settings
 import self.mcp
 import self.rules
+import self.checkpoints
+import self.exported
 
 fn system_prompt(root: String) -> String = """
 You are comide, a coding assistant working in the project at ${root}. You talk with the user and use tools to look at and change the code.
@@ -97,7 +99,43 @@ let COMMANDS = [
   editor.Command { name: "/yes", about: "run shell and verify commands without asking, or ask again" },
   editor.Command { name: "/plan", about: "look and plan, changing nothing until /go" },
   editor.Command { name: "/transcript", about: "where this session's messages are written" },
+  editor.Command { name: "/rewind", about: "go back to before a request: the conversation, the files, or both" },
+  editor.Command { name: "/resume", about: "go on with an earlier conversation in this project" },
+  editor.Command { name: "/export", about: "write the conversation as a text to read (/export FILE)" },
+  editor.Command { name: "/copy", about: "copy comide's last answer" },
+  editor.Command { name: "/init", about: "have comide write AGENTS.md for this project" },
+  editor.Command { name: "/review", about: "have comide review the changes not yet committed" },
+  editor.Command { name: "/context", about: "how much of the model's room the conversation takes" },
+  editor.Command { name: "/status", about: "the model, the project, the session and where things are kept" },
+  editor.Command { name: "/permissions", about: "what runs without asking, what is asked about, what never runs" },
+  editor.Command { name: "/hooks", about: "the checks set to run around tools" },
+  editor.Command { name: "/mcp", about: "the MCP servers whose tools can be reached" },
+  editor.Command { name: "/skills", about: "the skills comide can read when a task calls for one" },
+  editor.Command { name: "/agents", about: "the helpers comide can hand a question to" },
+  editor.Command { name: "/doctor", about: "whether the programs comide leans on are there" },
   editor.Command { name: "/exit", about: "leave" },
+]
+
+// Another name for a command that is here.
+let ALIASES = [("/quit", "/exit"), ("/new", "/clear"), ("/reset", "/clear"), ("/usage", "/cost"), ("/config", "/status"),
+  ("/checkpoint", "/rewind"), ("/undo", "/rewind"), ("/continue", "/resume"), ("/allowed-tools", "/permissions")]
+
+// Commands a person may type from habit that comide has no use for, and what to do instead.
+let NOT_HERE = [
+  ("/login", "comide has no account: the model's key is read from ~/.config/golemide/.env or the environment"),
+  ("/logout", "comide has no account: remove the model's key from ~/.config/golemide/.env to stop using it"),
+  ("/terminal-setup", "nothing to set up: Shift+Enter, Alt+Enter, or \\ then Enter add a line"),
+  ("/vim", "the input box has no vim mode"),
+  ("/add-dir", "comide works in one project: start it with --root DIR, or from that directory"),
+  ("/bug", "say it at https://github.com/O6lvl4/comide/issues"),
+  ("/feedback", "say it at https://github.com/O6lvl4/comide/issues"),
+  ("/release-notes", "the changes are the commits at https://github.com/O6lvl4/comide/commits/main"),
+  ("/upgrade", "comide is run from its source: git pull in its directory, then almide build"),
+  ("/ide", "comide has no editor plug-in"),
+  ("/theme", "colour is on or off: NO_COLOR=1 turns it off"),
+  ("/statusline", "the line under the input box is fixed: the model, the project, the cost"),
+  ("/pr-comments", "ask for it in words: comide can run gh in the terminal"),
+  ("/install-github-app", "comide has no GitHub app: it uses gh in the terminal, as you would"),
 ]
 
 let KEYS_HELP = """
@@ -117,7 +155,11 @@ effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
   // Made new, with a name nobody could have made first: scripts are written here and run.
   let scratch = fs.create_temp_dir("comide-")!
   let has_ctxgate = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v ctxgate"] }) { ok(st) => st.code == 0, err(_) => false }
-  let searx = string.strip_suffix(env.get("COMIDE_SEARXNG_URL") ?? "http://127.0.0.1:8888", "/") ?? "http://127.0.0.1:8888"
+  // Without its trailing slash, if it has one. (Until 0.9.0 an address written without
+  // one was dropped for the default.)
+  let searx_set = string.trim(env.get("COMIDE_SEARXNG_URL") ?? "")
+  let searx_given = if searx_set == "" then "http://127.0.0.1:8888" else searx_set
+  let searx = string.strip_suffix(searx_given, "/") ?? searx_given
   // The model solve runs on, golemide's defaults unless set; the strong one follows it,
   // so a run on one provider stays on it.
   let solve_model = string.trim(env.get("COMIDE_SOLVE_MODEL") ?? "")
@@ -254,11 +296,42 @@ effect fn next_line(opts: options.Options, place: Place, s: options.Session, his
   }
 
 // Where a conversation stands between two lines from the person.
-type Talk = { opts: options.Options, s: options.Session, open: Bool }
+// `marks` are the requests of this run, oldest first, each with where the conversation
+// stood and the files as they were (checkpoints.almd): what /rewind goes back to. `id`
+// names the file the conversation is kept in, which /resume changes.
+type Talk = { opts: options.Options, s: options.Session, open: Bool, marks: List[Mark] = [], id: String = "" }
+
+// `at` is how many messages there were before the request, -1 when the conversation has
+// since been replaced (/clear, /compact, /resume) and only the files can go back.
+// `snapshot` is "" when the files could not be kept.
+type Mark = { at: Int, snapshot: String, said: String }
+
+// The commands that start a request of their own, as a line of plain words does.
+let TURNING = ["/go", "/goal", "/init", "/review"]
+
+fn starts_turn(text: String) -> Bool = match command_of(text) {
+  some(c) => list.contains(TURNING, canonical(c.name)) and (c.name != "/goal" or (c.arg != "" and c.arg != "clear")),
+  none => string.trim(text) != "",
+}
+
+fn canonical(name: String) -> String = match list.find(ALIASES, (a) => a.0 == name) {
+  some(a) => a.1,
+  none => name,
+}
+
+// The files kept as they are now, and the place in the conversation marked.
+effect fn marked(t: Talk, place: Place, text: String) -> Talk = {
+  let snapshot = checkpoints.take(place.home, t.opts.root)!
+  let said = list.first(string.split(string.trim(text), "\n")) ?? ""
+  { ...t, marks: t.marks + [Mark { at: list.len(t.s.messages), snapshot: snapshot, said: if string.len(said) > 70 then string.take(said, 70) + "…" else said }] }
+}
+
+// The conversation was replaced: the marks can still put files back, nothing else.
+fn files_only(marks: List[Mark]) -> List[Mark] = list.map(marks, (m) => Mark { at: -1, snapshot: m.snapshot, said: m.said })
 
 effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
   let u = opts0.ui
-  var t = Talk { opts: opts0, s: place.start, open: true }
+  var t = Talk { opts: opts0, s: place.start, open: true, marks: [], id: place.session_id }
   var history = if opts0.tui then editor.load_history(place.history_file)! else []
   println(ui.banner(u, opts0.model, place.shown_root))
   while t.open {
@@ -273,11 +346,12 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
       none => { t = { ...t, open: false } },
       some(text) => {
         if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
+        if starts_turn(text) then { t = marked(t, place, text)! }
         t = match command_of(text) {
-          some(c) => slash(t, place, c)!,
+          some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
           none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, place.setup, t.s, text)! },
         }
-        if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, place.session_id, t.s)!
+        if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, t.id, t.s)!
       },
     }
   }
@@ -297,9 +371,9 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
   else if c.name == "/help" then { println(ui.help(u) + (if t.opts.tui then "\n\n" + ui.dim(u, KEYS_HELP) else "")); t }
   else if c.name == "/clear" then {
     println(ui.note_line(u, "the conversation is cleared; the project and the cost so far are kept"))
-    { ...t, s: { ...s, messages: place.fresh.messages, check: "" } }
+    { ...t, s: { ...s, messages: place.fresh.messages, check: "" }, marks: files_only(t.marks) }
   }
-  else if c.name == "/compact" then compact(t, place)!
+  else if c.name == "/compact" then { ...compact(t, place)!, marks: files_only(t.marks) }
   else if c.name == "/goal" then aim(t, place, c.arg)!
   else if c.name == "/plan" then {
     let on = if c.arg == "off" then false else if c.arg == "on" then true else not s.plan
@@ -326,7 +400,204 @@ effect fn slash(t: Talk, place: Place, c: Slash) -> Talk = {
     println(ui.note_line(u, place.setup.memory_file + (if kept == "" then " · nothing kept yet" else " · " + int.to_string(list.len(string.split(kept, "\n"))) + " line(s); edit the file to change or remove a note")))
     t
   }
-  else { println(ui.note_line(u, "no command " + c.name + "; /help lists them")); t }
+  else if c.name == "/rewind" then rewind(t, place, c.arg)!
+  else if c.name == "/resume" then resume(t, place, c.arg)!
+  else if c.name == "/export" then { export(t, place, c.arg)!; t }
+  else if c.name == "/copy" then { copy(t)!; t }
+  else if c.name == "/init" then { ...t, s: one_turn(t.opts, place.setup, s, INIT_REQUEST + (if c.arg == "" then "" else "\n\n" + c.arg))! }
+  else if c.name == "/review" then { ...t, s: one_turn(t.opts, place.setup, s, REVIEW_REQUEST + (if c.arg == "" then "" else "\n\nWhat to look at in particular: " + c.arg))! }
+  else { told(t, place, c)!; t }
+}
+
+let INIT_REQUEST = "Look through this project and write AGENTS.md at its root (if there is one already, improve it and keep what is still true). It is read by a coding agent before it starts work here, so write what such an agent could not see at a glance: what the project is, in a sentence or two; how to build it, run it and test it, as the exact commands, checked by running them where that is quick; how the code is laid out, and where the parts that matter are; the conventions that the code keeps and a newcomer would break; and what must not be done here. Leave out what any agent knows already, and keep it under a hundred lines."
+
+let REVIEW_REQUEST = "Review the changes in this project that are not yet committed (git status, git diff, and the files that are new). Change nothing. Read each change in the code around it, and report what is wrong or risky, most serious first: for each, the file and the line, what goes wrong and when, and what would put it right. Say plainly when a change looks right, and say what you did not check. If nothing is uncommitted, review the last commit instead."
+
+// The commands that only say something.
+effect fn told(t: Talk, place: Place, c: Slash) -> Unit = {
+  let u = t.opts.ui
+  let s = t.s
+  let setup = place.setup
+  let lines = if c.name == "/context" then {
+    let chars = list.fold(s.messages, 0, (n, m) => n + string.len(value.get_string(m, "content") ?? ""))
+    [int.to_string(list.len(s.messages)) + " messages, about " + int.to_string(chars / 1000) + "k characters"
+      + (if s.last_in > 0 then "; the last call sent " + int.to_string(s.last_in / 1000) + "k tokens" else ""),
+     "a note takes the conversation's place above " + int.to_string(handover.limit()! / 1000) + "k tokens (COMIDE_COMPACT_TOKENS); /compact does it now"]
+  }
+  else if c.name == "/status" then [
+    "model: " + t.opts.model + " · " + (if t.opts.written then "asked in writing, one terminal" else "tools sent as tool calls (--loop tools)")
+      + (if setup.door_url != "" then " · terminal confined by nautra" else ""),
+    "project: " + t.opts.root,
+    "session: " + t.id + " · " + convo.usd(s.cost) + " over " + int.to_string(s.steps) + " model calls · kept in " + sessions.dir_for(place.home, t.opts.root),
+    "settings: " + config_dir()! + "/comide/settings.json, " + settings.project_file(t.opts.root),
+    "notes between sessions: " + setup.memory_file,
+    "this run's messages: " + place.transcript,
+  ]
+  else if c.name == "/permissions" then
+    ["run without asking: " + listed(setup.allow_rules), "asked about: " + listed(setup.ask_rules), "never run: " + listed(setup.deny_rules),
+     (if s.allow_shell then "this session: shell and verify commands run without asking (/yes to ask again)" else "this session: a command no rule speaks of is asked about (/yes to stop asking)"),
+     "written in: " + config_dir()! + "/comide/settings.json, " + settings.project_file(t.opts.root)]
+  else if c.name == "/hooks" then (if setup.hooks_json == "" then ["no hooks are set; they are written under \"hooks\" in the settings (/status says where)"] else string.split(json.stringify_pretty(json.parse(setup.hooks_json) ?? value.null()), "\n"))
+  else if c.name == "/mcp" then {
+    let servers = if setup.mcp_json == "" then [] else mcp.servers_of(json.parse(setup.mcp_json) ?? value.null())
+    if list.is_empty(servers) then ["no MCP servers are set; they are written under \"mcpServers\" in the settings (/status says where)"]
+    else list.map(servers, (sv) => sv.name + ": " + (if sv.http then sv.url else string.trim(sv.command + " " + list.join(sv.args, " "))))
+  }
+  else if c.name == "/skills" then (if list.is_empty(setup.skills) then ["no skills were found (a skill is a directory with a SKILL.md, in .comide/skills or ~/.config/comide/skills)"] else list.map(setup.skills, (k) => k.0 + ": " + k.1))
+  else if c.name == "/agents" then ["comide has one helper: explore, which it hands a question about the code to, so that the reading does not fill this conversation.",
+    "It runs read-only on " + setup.explore_model + " (COMIDE_EXPLORE_MODEL), and its cost is counted in the session's. There are no helpers to define."]
+  else if c.name == "/doctor" then doctor(t, place)!
+  else match list.find(NOT_HERE, (n) => n.0 == c.name) {
+    some(n) => [n.0 + " is not a command here: " + n.1],
+    none => ["no command " + c.name + "; /help lists them"],
+  }
+  for line in lines { println(ui.note_line(u, line)) }
+}
+
+fn listed(rules_: List[String]) -> String = if list.is_empty(rules_) then "(nothing)" else list.join(rules_, ", ")
+
+effect fn config_dir() -> String = {
+  let config = env.get("XDG_CONFIG_HOME") ?? ""
+  if config == "" then (env.get("HOME") ?? "") + "/.config" else config
+}
+
+// /doctor: the programs comide leans on, each there or not, and what is lost without it.
+effect fn doctor(t: Talk, place: Place) -> List[String] = {
+  let there = (name: String) => match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", "command -v \"$1\"", "comide", name] }) { ok(st) => st.code == 0, err(_) => false }
+  let line = (name: String, ok_: Bool, without: String) => (if ok_ then "ok       " else "missing  ") + name + (if ok_ then "" else ": " + without)
+  let golemide_problem = solving.golemide_problem(t.opts.golemide)!
+  [line("the model (" + t.opts.model + ")", result.is_ok(model.endpoint_of(t.opts.model)), "no key or no such model"),
+   line("golemide", golemide_problem == "", if golemide_problem == "" then "" else golemide_problem),
+   line("hew", there("hew"), "reading falls back to plain files"),
+   line("gramide", there("gramide"), "golemide checks syntax with less"),
+   line("git", there("git"), "no checkpoints: /rewind cannot put files back"),
+   line("ctxgate", place.setup.ctxgate, "long command output is cut, not summarised"),
+   line("nautra", there("nautra") or string.trim(env.get("NAUTRA") ?? "") != "", "--confined cannot be used"),
+   line("a search engine at " + place.setup.searx, web.search_answers(place.setup.searx)!, "web_search is not offered"),
+   line("almide", there("almide"), "the reference tool has nothing to say about Almide")]
+}
+
+// /export: the conversation as a text to read (exported.almd), in a file.
+effect fn export(t: Talk, place: Place, arg: String) -> Unit = {
+  let u = t.opts.ui
+  if not list.any(t.s.messages, (m) => (value.get_string(m, "role") ?? "") == "user") then println(ui.note_line(u, "there is no conversation to write yet"))
+  else {
+    let text = exported.markdown(sessions.title_of(t.s.messages), t.opts.model, place.shown_root, sessions.when(datetime.now_ms()), t.s.messages)
+    let own = arg == ""
+    let file = if own then place.home + "/.comide/exports/" + t.id + ".md" else absolute(match string.strip_prefix(arg, "~/") { some(rest) => place.home + "/" + rest, none => arg }, t.opts.root)
+    if own then { let _ = fs.mkdir_p(place.home + "/.comide/exports") }
+    match fs.write_text(file, text) {
+      ok(_) => {
+        // Under comide's own directory it is the person's only, like the session it came from.
+        if own then { let _ = process.exec("chmod", ["600", file]) }
+        println(ui.note_line(u, "written to " + file + " (" + int.to_string(list.len(string.split(text, "\n"))) + " lines; results are cut, the system prompt is left out)"))
+      },
+      err(e) => println(ui.note_line(u, "could not write " + file + ": " + e)),
+    }
+  }
+}
+
+// /copy: comide's last answer, to the clipboard.
+effect fn copy(t: Talk) -> Unit = {
+  let u = t.opts.ui
+  match list.last(list.filter(t.s.messages, (m) => (value.get_string(m, "role") ?? "") == "assistant" and string.trim(value.get_string(m, "content") ?? "") != "")) {
+    none => println(ui.note_line(u, "comide has not answered yet")),
+    some(m) => {
+      let text = exported.reply(value.get_string(m, "content") ?? "")
+      let program = "if command -v pbcopy > /dev/null; then pbcopy; elif command -v wl-copy > /dev/null; then wl-copy; elif command -v xclip > /dev/null; then xclip -selection clipboard; else exit 3; fi"
+      let code = match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", program], stdin: text, timeout_ms: 5000 }) { ok(st) => st.code, err(_) => 1 }
+      println(ui.note_line(u, if code == 0 then "copied (" + int.to_string(list.len(string.split(text, "\n"))) + " lines)"
+        else if code == 3 then "no clipboard program was found (pbcopy, wl-copy or xclip); /export writes a file instead" else "the clipboard did not take it"))
+    },
+  }
+}
+
+// One of a few, chosen: a menu on a terminal; elsewhere nothing is chosen (-1) and the
+// caller says how to choose by name.
+effect fn chosen(t: Talk, question: String, options_: List[String]) -> Int =
+  if t.opts.tui then editor.choose(t.opts.ui, question, options_)! else -1
+
+// /rewind [N] [conversation|files|both]: back to before the Nth request from the end.
+effect fn rewind(t: Talk, place: Place, arg: String) -> Talk = {
+  let u = t.opts.ui
+  let words = list.filter(string.split(arg, " "), (w) => w != "")
+  let count = list.len(t.marks)
+  let recent = list.take(list.reverse(t.marks), 9)
+  if count == 0 then { println(ui.note_line(u, "there is nothing to go back to yet: /rewind goes back to before a request made in this run")); t }
+  else {
+    let named = int.parse(list.first(words) ?? "") ?? 0
+    let n = if named > 0 then named else 1 + chosen(t, "Go back to before which request?", list.map(recent, (m) => m.said))!
+    if n < 1 or n > count then {
+      if named == 0 and not t.opts.tui then {
+        println(ui.note_line(u, "/rewind N goes back to before one of these (add `conversation` or `files` for one of the two):"))
+        var i = 1
+        for m in recent { println(ui.note_line(u, "  " + int.to_string(i) + ". " + m.said)); i = i + 1 }
+      } else if named > count then println(ui.note_line(u, "there are only " + int.to_string(count) + " requests to go back over"))
+      t
+    } else {
+      let mark = list.get(t.marks, count - n) ?? Mark { at: -1, snapshot: "", said: "" }
+      let differ = if mark.snapshot == "" then [] else checkpoints.changed(place.home, t.opts.root, mark.snapshot)!
+      let can_talk = mark.at >= 0 and mark.at <= list.len(t.s.messages)
+      let can_files = mark.snapshot != ""
+      let files_label = "the files (" + (if not can_files then "none were kept" else int.to_string(list.len(differ)) + " differ") + ")"
+      let word = list.get(words, 1) ?? ""
+      let what = if word == "conversation" or word == "files" or word == "both" then word
+        else if not t.opts.tui then "both"
+        else list.get(["both", "conversation", "files", ""], chosen(t, "Put back what?", ["The conversation and " + files_label, "The conversation only", "Only " + files_label, "Nothing"])!) ?? ""
+      if what == "" then { println(ui.note_line(u, "nothing was put back")); t }
+      else {
+        let do_files = (what == "both" or what == "files") and can_files
+        let do_talk = (what == "both" or what == "conversation") and can_talk
+        let restored = if do_files then checkpoints.restore(place.home, t.opts.root, mark.snapshot) else ok(())
+        match restored {
+          err(e) => { println(ui.note_line(u, e)); t },
+          ok(_) => {
+            if do_files then {
+              println(ui.note_line(u, if list.is_empty(differ) then "the files were already as they were then" else "the files are as they were before that request:"))
+              for d in list.take(differ, 12) { println(ui.note_line(u, "  " + d)) }
+              if list.len(differ) > 12 then println(ui.note_line(u, "  … and " + int.to_string(list.len(differ) - 12) + " more"))
+            } else if what != "conversation" then println(ui.note_line(u, "the files were not kept for that request (no git, or COMIDE_CHECKPOINTS=0); they stay as they are"))
+            if do_talk then println(ui.note_line(u, "the conversation is back to before: " + mark.said))
+            else if what != "files" then println(ui.note_line(u, "the conversation has been replaced since (/clear, /compact or /resume) and cannot go back; it stays as it is"))
+            if do_talk then {
+              let back = list.take(t.s.messages, mark.at)
+              // Back before the first request there is nothing to keep, and a conversation
+              // with nothing asked is not saved over the old file: the file goes, or
+              // --continue would bring back what was just undone.
+              if not list.any(back, (m) => (value.get_string(m, "role") ?? "") == "user") then { let _ = fs.remove(sessions.dir_for(place.home, t.opts.root) + "/" + t.id + ".json") }
+              { ...t, s: { ...t.s, messages: back, check: "", last_in: 0 }, marks: list.take(t.marks, count - n) }
+            } else t
+          },
+        }
+      }
+    }
+  }
+}
+
+// /resume [ID]: an earlier conversation of this project, in place of this one.
+effect fn resume(t: Talk, place: Place, arg: String) -> Talk = {
+  let u = t.opts.ui
+  let ids = list.take(list.filter(sessions.ids(place.home, t.opts.root)!, (id) => id != t.id), 9)
+  let kept = list.filter_map(ids, (id) => result.to_option(sessions.load(sessions.dir_for(place.home, t.opts.root) + "/" + id + ".json")))
+  let label = (k: sessions.Kept) => sessions.when(k.updated_ms) + "  " + k.title
+  if arg == "" and list.is_empty(kept) then { println(ui.note_line(u, "there is no earlier conversation in this project")); t }
+  else {
+    let wanted = if arg != "" then result.to_option(sessions.wanted(place.home, t.opts.root, arg)) else list.get(kept, chosen(t, "Go on with which conversation?", list.map(kept, label))!)
+    match wanted {
+      none => {
+        if arg != "" then println(ui.note_line(u, "no session " + arg + " in this project"))
+        else if not t.opts.tui then {
+          println(ui.note_line(u, "/resume ID goes on with one of these:"))
+          for k in kept { println(ui.note_line(u, "  " + k.id + "  " + label(k))) }
+        }
+        t
+      },
+      some(k) => {
+        println(ui.note_line(u, "going on with the conversation of " + label(k) + " · " + int.to_string(list.len(k.session.messages)) + " messages · " + convo.usd(k.session.cost)))
+        { ...t, s: sessions.taken_up(place.fresh.messages, k.session, t.s.allow_shell), id: if k.id == "" then t.id else k.id, marks: files_only(t.marks) }
+      },
+    }
+  }
 }
 
 // /goal: show the goal, clear it, or set one and start on it (goal.almd).

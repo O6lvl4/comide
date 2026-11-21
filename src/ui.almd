@@ -189,6 +189,19 @@ let HELP = """
   /plan        look and plan, changing nothing; /go approves the plan and carries it out
   /yes         stop asking before shell and verify commands (or ask again)
   /transcript  where this session's messages are written
+
+  /rewind      go back to before a request of this run: the conversation, the files, or both
+               (/rewind N for the Nth from the end; add `conversation` or `files` for one)
+  /resume      go on with an earlier conversation in this project (/resume ID)
+  /export      write the conversation as a text to read; /export FILE says where
+  /copy        copy comide's last answer
+  /init        have comide write AGENTS.md for this project
+  /review      have comide review the changes not yet committed
+  /context     how much of the model's room the conversation takes
+  /status      the model, the project, the session and where things are kept
+  /permissions what runs without asking, what is asked about, what never runs
+  /hooks  /mcp  /skills  /agents   what is set up
+  /doctor      whether the programs comide leans on are there
   /exit        leave
 """
 

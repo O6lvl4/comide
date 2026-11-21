@@ -16,6 +16,7 @@ export XDG_CONFIG_HOME="$tmp/config"
 
 say()  { printf '%s\n' "$*"; }
 bad()  { say "FAIL: $*"; fails=$((fails + 1)); }
+good() { say "ok: $*"; }
 same() { # same WHAT EXPECTED ACTUAL
   if [ "$2" = "$3" ]; then say "ok: $1"; else bad "$1"; say "  expected: $2"; say "  actual:   $3"; fi
 }
@@ -480,6 +481,61 @@ if command -v "$almide" > /dev/null 2>&1; then
   ( cd "$tmp" && : > notes.txt && "$almide" check primer.almd > "$tmp/primer.check" 2>&1 && "$almide" test primer.almd > "$tmp/primer.test" 2>&1 )
   same "and that program passes almide check and its own test" "0" "$?"
 fi
+
+say "== the conversation's commands: going back, going on, writing it out"
+# Two requests, each changing the project; then back to before the second (files only),
+# back to before the first (both), an export, and the commands that only say something.
+# The project has a repository of its own, which must be left as it was.
+rm -rf "$tmp/cfake" "$tmp/cproj" "$tmp/chome"; mkdir -p "$tmp/cfake" "$tmp/cproj/ignored" "$tmp/chome"
+( cd "$tmp/cproj" && git init -q && echo one > a.txt && echo keep > keep.txt && echo 'ignored/' > .gitignore && echo x > ignored/i.txt )
+python3 - "$tmp/cfake" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+r = [say([{"command": "echo two > a.txt; echo new > b.txt; rm keep.txt; echo y > ignored/i.txt"}]), say([], True, "First done."), say([], True, "First done."),
+     say([{"command": "echo three > a.txt"}]), say([], True, "Second done."), say([], True, "Second done.")]
+for i, x in enumerate(r, 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+talk() { ( cd "$tmp/cproj" && HOME="$tmp/chome" XDG_CONFIG_HOME="$tmp/chome/.config" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/cfake" \
+  "$here/comide" --yes --model local:stand-in 2>&1 | sed 's/'"$(printf '\033')"'\[[0-9;]*m//g' ); }
+printf '%s\n' 'change the files' 'change again' '/rewind' '/rewind 1 files' '/export' '/export out.md' '/context' '/status' '/permissions' '/mcp' '/hooks' '/skills' '/agents' '/doctor' '/login' '/usage' '/nope' '/exit' | talk > "$tmp/c1.txt"
+has "/rewind lists the requests of the run, the last first" "1\. change again" "$tmp/c1.txt"
+has "the files go back to before a request" "M a.txt" "$tmp/c1.txt"
+[ "$(cat "$tmp/cproj/a.txt")" = two ] && [ -f "$tmp/cproj/b.txt" ] && good "back before the second request: its change is undone, the first request's stay" || bad "the files after /rewind 1 files: a.txt=$(cat "$tmp/cproj/a.txt")"
+has "/export writes the conversation where comide keeps its own" "written to .*/\.comide/exports/[0-9]*\.md" "$tmp/c1.txt"
+exported=$(ls "$tmp"/chome/.comide/exports/*.md 2>/dev/null | head -1)
+grep -q '^## You' "$exported" && grep -q 'change the files' "$exported" && grep -q 'Second done\.' "$exported" && ! grep -q 'You are comide' "$exported" \
+  && good "the export has what was asked and answered, and not the system prompt" || bad "the export's contents"
+[ -f "$tmp/cproj/out.md" ] && good "/export FILE writes there" || bad "/export out.md wrote no file"
+has "/context says how big the conversation is" "messages, about .*k characters" "$tmp/c1.txt"
+has "/status says where things are kept" "settings: .*settings\.json" "$tmp/c1.txt"
+has "/permissions says what runs without asking" "run without asking: " "$tmp/c1.txt"
+has "/mcp, /hooks and /skills say what is set up" "no MCP servers are set" "$tmp/c1.txt"
+has "/doctor says which programs are there" "^ *ok  *git$" "$tmp/c1.txt"
+has "a command from habit that comide has no use for is answered with what to do" "/login is not a command here" "$tmp/c1.txt"
+has "another name for a command works" "this session: .* model calls" "$tmp/c1.txt"
+has "a command that is nothing is said to be" "no command /nope" "$tmp/c1.txt"
+
+rm -f "$tmp/cproj/out.md" "$tmp"/cfake/request-*
+( cd "$tmp/cproj" && echo one > a.txt && echo keep > keep.txt && rm -f b.txt && echo x > ignored/i.txt )
+rm -rf "$tmp/chome"; mkdir -p "$tmp/chome"
+printf '%s\n' 'change the files' 'change again' '/rewind 2' '/exit' | talk > "$tmp/c2.txt"
+has "back before the first request, the conversation goes back too" "the conversation is back to before: change the files" "$tmp/c2.txt"
+[ "$(cat "$tmp/cproj/a.txt")" = one ] && [ "$(cat "$tmp/cproj/keep.txt" 2>/dev/null)" = keep ] && [ ! -e "$tmp/cproj/b.txt" ] \
+  && good "what was changed is as it was, what was removed is back, what was made is gone" || bad "the files after /rewind 2: $(ls "$tmp/cproj")"
+[ "$(cat "$tmp/cproj/ignored/i.txt")" = y ] && good "what the project's .gitignore leaves out is not kept and not put back" || bad "an ignored file was put back"
+[ -z "$(cd "$tmp/cproj" && git log --oneline 2>/dev/null)" ] && [ -z "$(cd "$tmp/cproj" && git diff --cached --name-only)" ] \
+  && good "the project's own repository has no commit and nothing staged" || bad "the project's repository was touched"
+[ -z "$(ls "$tmp"/chome/.comide/sessions/*/ 2>/dev/null)" ] && good "a conversation gone back to its start is not kept for --continue" || bad "the undone conversation is still kept"
+
+rm -f "$tmp"/cfake/request-*
+printf '%s\n' 'change the files' '/exit' | talk > /dev/null
+kept=$(ls "$tmp"/chome/.comide/sessions/*/ | sed 's/\.json$//' | head -1)
+rm -f "$tmp"/cfake/request-*
+printf '%s\n' '/resume' "/resume $kept" '/exit' | talk > "$tmp/c3.txt"
+has "/resume lists the project's earlier conversations" "$kept .*change the files" "$tmp/c3.txt"
+has "/resume ID goes on with one" "going on with the conversation of .*change the files" "$tmp/c3.txt"
 
 say "== without a task, nothing is started"
 ./comide errand > /dev/null 2>&1

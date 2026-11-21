@@ -1,0 +1,57 @@
+// The project's files as they stood before a request, so that /rewind can put them back.
+//
+// Kept with git, in a repository of comide's own beside the sessions
+// (~/.comide/checkpoints/<project>), whose work tree is the project. The project's own
+// repository, if it has one, is not touched: nothing is committed, staged or stashed
+// there. What the project's .gitignore leaves out is left out here too, so a build
+// directory or node_modules is neither kept nor put back.
+//
+//   COMIDE_CHECKPOINTS=0   keep none (and /rewind then goes back in the conversation only)
+//
+// Not kept: a project that is the home directory or the root of the disk (the first
+// snapshot would read everything there), and anything when git is not installed.
+
+import env
+import process
+import self.place
+
+// A snapshot may take this long; a project too big for it gets no checkpoint, said once.
+let LIMIT_MS = 20000
+
+fn dir_for(home: String, root: String) -> String = home + "/.comide/checkpoints/" + place.key_of(root)
+
+effect fn wanted(home: String, root: String) -> Bool =
+  string.trim(env.get("COMIDE_CHECKPOINTS") ?? "") != "0" and home != "" and root != home and root != "/" and root != ""
+
+// $1 the repository, $2 the project. The index is the project as it is now.
+let PREPARE = "set -e; G=\"$1\"; R=\"$2\"; export GIT_DIR=\"$G\" GIT_WORK_TREE=\"$R\"; cd \"$R\"; "
+  + "[ -f \"$G/HEAD\" ] || { mkdir -p \"$G\"; git init -q; git config gc.auto 0; git config core.autocrlf false; }; "
+  + "git add -A . > /dev/null 2>&1; "
+
+effect fn git(script: String, args: List[String]) -> (Int, String) =
+  match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", PREPARE + script, "comide"] + args, timeout_ms: LIMIT_MS }) {
+    ok(st) => (st.code, string.trim(st.stdout)),
+    err(_) => (1, ""),
+  }
+
+// The project as it is now, kept: the name of the snapshot, or "" when none could be made.
+effect fn take(home: String, root: String) -> String =
+  if not wanted(home, root)! then ""
+  else {
+    let (code, out) = git("git -c user.name=comide -c user.email=comide@localhost commit-tree -m checkpoint \"$(git write-tree)\"", [dir_for(home, root), root])!
+    if code == 0 then out else ""
+  }
+
+// What differs now from a snapshot, a line each: `M path` changed, `A path` not there
+// then, `D path` gone since.
+effect fn changed(home: String, root: String, snapshot: String) -> List[String] = {
+  let (code, out) = git("git diff --cached --name-status \"$3\"", [dir_for(home, root), root, snapshot])!
+  if code != 0 or out == "" then [] else list.map(string.split(out, "\n"), (l) => string.replace(l, "\t", " "))
+}
+
+// The project put back as the snapshot has it: what was made since is removed, what was
+// changed or removed is written again. Files the snapshot never saw (ignored ones) stay.
+effect fn restore(home: String, root: String, snapshot: String) -> Result[Unit, String] = {
+  let (code, _) = git("git diff --cached --name-only --diff-filter=A -z \"$3\" | xargs -0 rm -f --; git checkout -q \"$3\" -- .", [dir_for(home, root), root, snapshot])!
+  if code == 0 then ok(()) else err("the files could not be put back (git said no); nothing else was changed")
+}

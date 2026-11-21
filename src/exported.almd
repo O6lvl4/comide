@@ -1,0 +1,96 @@
+// A conversation as a text a person can read: /export.
+//
+// The session's own file (sessions.almd) is the messages as the model was sent them, the
+// system prompt and every tool's output in full. This is the same conversation written
+// for reading: what was asked, what comide said and ran, and what came back, cut where a
+// result is long. The system prompt is left out: it holds the person's own instruction
+// files and notes, and an export is made to be handed on.
+
+import self.said
+import self.charge
+
+// A result longer than this is cut in the export; the session's file has all of it.
+let RESULT_LINES = 40
+
+fn role_of(m: Value) -> String = value.get_string(m, "role") ?? ""
+fn text_of(m: Value) -> String = value.get_string(m, "content") ?? ""
+
+fn cut(text: String) -> String = {
+  let lines = string.split(string.trim(text), "\n")
+  if list.len(lines) <= RESULT_LINES then list.join(lines, "\n")
+  else list.join(list.take(lines, RESULT_LINES), "\n") + "\n… (" + int.to_string(list.len(lines) - RESULT_LINES) + " more lines)"
+}
+
+fn fenced(text: String) -> String = "````\n" + text + "\n````"
+
+// What the model said in one reply: its words, then what it had run.
+fn reply(text: String) -> String = match said.read_reply(text, true, true) {
+  err(_) => string.trim(text),
+  ok(s) => {
+    let orders = list.join(list.map(s.orders, (o) => said.shown(o)), "\n")
+    list.join(list.filter([string.trim(s.analysis), if orders == "" then "" else fenced(orders)], (p) => p != ""), "\n\n")
+  },
+}
+
+// Whether a reply ended a request: said complete, with nothing more to run.
+fn ended(text: String) -> Bool = match said.read_reply(text, true, true) {
+  err(_) => true,
+  ok(s) => s.complete and list.is_empty(s.orders),
+}
+
+// A message under the heading it belongs under. A "user" message is the person's when it
+// opens the conversation or follows a reply that ended a request; otherwise it is what
+// comide showed the model (results, a note).
+fn section(m: Value, before: String, before_role: String) -> String = {
+  let role = role_of(m)
+  let text = text_of(m)
+  if role == "assistant" then (if string.trim(text) == "" then "" else "## comide\n\n" + reply(text))
+  else if role == "user" then {
+    let own = (before_role != "assistant" or ended(before)) and not string.contains(text, charge.WRITTEN_CONFIRM_NOTE)
+    if own then "## You\n\n" + string.trim(string.strip_prefix(text, "Task Description:\n") ?? text)
+    else "### Result\n\n" + fenced(cut(text))
+  }
+  else if role == "tool" then "### Result\n\n" + fenced(cut(text))
+  else ""
+}
+
+fn markdown(title: String, model: String, root: String, when: String, messages: List[Value]) -> String = {
+  var parts: List[String] = ["# " + (if title == "" then "A conversation with comide" else title), model + " · " + root + " · " + when]
+  var before = ""
+  var before_role = ""
+  for m in messages {
+    let part = section(m, before, before_role)
+    if part != "" then list.push(parts, part)
+    if role_of(m) != "system" then { before = text_of(m); before_role = role_of(m) }
+  }
+  list.join(parts, "\n\n") + "\n"
+}
+
+fn msg(role: String, content: String) -> Value = value.object([("role", value.string(role)), ("content", value.string(content))])
+
+test "a conversation is written for reading: asked, said and run, shown back, asked again" {
+  let done = "{\"analysis\": \"It prints hello.\", \"plan\": \"\", \"commands\": [], \"task_complete\": true}"
+  let text = markdown("say hello", "m", "/p", "now", [
+    msg("system", "SECRET NOTES"),
+    msg("user", "Task Description:\nsay hello"),
+    msg("assistant", "{\"analysis\": \"I will run it.\", \"plan\": \"p\", \"commands\": [{\"command\": \"echo hello\"}], \"task_complete\": false}"),
+    msg("user", "$ echo hello\nhello\n[exit code 0]"),
+    msg("assistant", done),
+    msg("user", charge.WRITTEN_CONFIRM_NOTE),
+    msg("assistant", done),
+    msg("user", "and again"),
+  ])
+  assert(not string.contains(text, "SECRET NOTES"))
+  assert(string.contains(text, "# say hello\n\nm · /p · now"))
+  assert(string.contains(text, "## You\n\nsay hello"))
+  assert(string.contains(text, "## comide\n\nI will run it.\n\n````\n$ echo hello\n````"))
+  assert(string.contains(text, "### Result\n\n````\n$ echo hello\nhello"))
+  assert(string.contains(text, "## You\n\nand again"))
+  assert(not string.contains(text, "## You\n\nAre you sure"))
+}
+
+test "a long result is cut, and said to be" {
+  let long = list.join(list.map(list.range(0, 60), (i) => "line " + int.to_string(i)), "\n")
+  assert(string.contains(cut(long), "… (20 more lines)"))
+  assert_eq(cut("a\nb"), "a\nb")
+}
