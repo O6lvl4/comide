@@ -252,11 +252,49 @@ effect fn watched_call(opts: options.Options, setup: toolkit.Setup, sh: shell.Sh
 // The same order, carried out behind nautra's door (confined.almd). The terminal's state
 // is in the same directory, written there by the confined program; it is read again
 // after the call, so the next job's number is the one that program left.
+//
+// A call behind the door holds this program until it answers, and no key can be read
+// meanwhile. So on a terminal the wait is not left to the door: the command is started
+// there with a wait of a second, and then watched from here, in the files the confined
+// program writes, with the keys read as for a command of this machine's own. Esc sends
+// the door the order to stop the job.
 effect fn confined_call(opts: options.Options, setup: toolkit.Setup, a: Value) -> (shell.Shell, String) = {
-  let tick = turn.ticking(opts, setup, "in the confined terminal")!
-  let text = confined.call(confined.Door { url: setup.door_url, token: setup.door_token }, a)!
-  turn.ticked(tick)!
-  (terminal(setup)!, string.trim_end(text))
+  let door = confined.Door { url: setup.door_url, token: setup.door_token }
+  let before = terminal(setup)!
+  let command = value.get_string(a, "command") ?? ""
+  let job = shell.int_arg(a, "job")
+  let starting = string.trim(command) != ""
+  let waiting_for = not starting and job > 0 and job < before.next and not (value.get_bool(a, "stop") ?? false)
+  if not (opts.live and opts.ui.color and opts.tui) or not (starting or waiting_for) then {
+    let tick = turn.ticking(opts, setup, "in the confined terminal")!
+    let text = confined.call(door, a)!
+    turn.ticked(tick)!
+    (terminal(setup)!, string.trim_end(text))
+  } else {
+    let n = if starting then before.next else job
+    let wait_s = shell.clamp_wait(shell.int_arg(a, "wait_s"))
+    let first = if starting then string.trim_end(confined.call(door, value.object([("command", value.string(command)), ("wait_s", value.int(1))]))!) else ""
+    let now = terminal(setup)!
+    // Not started, refused, or already done within the second: what the door said is the result.
+    if starting and (now.next <= n or shell.finished(now, n)!) then (now, first)
+    else {
+      let t0 = datetime.now_ms()
+      var frame = 0
+      var last = ""
+      var interrupted = false
+      while not shell.finished(now, n)! and datetime.now_ms() - t0 < wait_s * 1000 and not interrupted {
+        interrupted = waiting.pause(opts)!
+        if frame % 5 == 0 then { last = shell.last_line(now, n)! }
+        let room = int.max(10, opts.ui.width - 40)
+        io.print(ui.waiting(opts.ui, frame / 3, (datetime.now_ms() - t0) / 1000, "Running, confined",
+          list.join(list.filter([waiting.hint(opts, "esc to stop")!, string.take(last, room)], (p) => p != ""), " · ")))
+        frame = frame + 1
+      }
+      io.print(ui.clear_line(opts.ui))
+      if interrupted then (now, string.trim_end(confined.call(door, value.object([("job", value.int(n)), ("stop", value.bool(true))]))!) + "\n[The user stopped this command.]")
+      else (now, shell.report(now, n, wait_s)!)
+    }
+  }
 }
 
 effect fn local_call(opts: options.Options, sh: shell.Shell, a: Value) -> (shell.Shell, String) = {

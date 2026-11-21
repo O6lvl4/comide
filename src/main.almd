@@ -32,7 +32,7 @@ local fn chat_args(args: List[String]) -> List[String]? = {
 
 // The version in almide.toml, written here a second time so --version can say it: a
 // program that starts comide can then tell which one it has. Nothing compares the two.
-let VERSION = "0.9.5"
+let VERSION = "0.9.6"
 
 effect fn main() -> Unit = {
   if (list.get(env.args(), 0) ?? "") == "--version" then { println("comide " + VERSION); process.exit(0) }

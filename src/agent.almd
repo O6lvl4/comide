@@ -351,6 +351,10 @@ effect fn marks_of(home: String, root: String, id: String) -> List[Mark] = {
 // What the tools work with while a request is worked: the setup, with where to keep.
 fn setup_now(t: Talk, place: Place) -> toolkit.Setup = { ...place.setup, keep_dir: t.keep, aside: t.opts.aside }
 
+// A request that took this many seconds is announced when it ends (COMIDE_NOTIFY: another
+// number of seconds, 0 for never).
+let NOTIFY_AFTER_S = 20
+
 // The commands that start a request of their own, as a line of plain words does.
 let TURNING = ["/go", "/goal", "/init", "/review"]
 
@@ -404,6 +408,7 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
           let text = line ?? ""
           line = none
           if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
+          let began = datetime.now_ms()
           let own = string.strip_prefix(string.trim(text), "!")
           if option.is_none(own) and starts_turn(text) then { t = marked(t, place, text)! }
           t = match own {
@@ -418,6 +423,11 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
           // What was typed while the request was worked and did not reach the model is
           // not lost. Stopped with Esc to send it, it is the next request, now;
           // otherwise it is in the input box next.
+          // A request that took a while has ended: the terminal is told (a bell, and a
+          // notification where the terminal shows them), for whoever looked away.
+          let notify_s = int.parse(string.trim(env.get("COMIDE_NOTIFY") ?? "")) ?? NOTIFY_AFTER_S
+          if t.opts.tui and notify_s > 0 and datetime.now_ms() - began >= notify_s * 1000 then
+            io.print("\u{1b}]9;comide is done: " + string.take(string.replace(string.replace(list.first(string.split(string.trim(text), "\n")) ?? "", "\u{07}", ""), "\u{1b}", ""), 80) + "\u{07}\u{07}")
           let unsaid = waiting.left(t.opts)!
           let at_once = waiting.stopped_to_send(t.opts)!
           let stopped = waiting.was_stopped(t.opts)!

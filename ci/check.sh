@@ -621,6 +621,30 @@ EOF
 has "!command runs unasked, is shown, and is given to the model with the next request" "^own True$" "$tmp/pt9.out"
 has "Tab after @ completes a file's name, and the request says which are files" "^named True$" "$tmp/pt9.out"
 
+# A /command entered while a request is worked is comide's to do, not words for the
+# model: it is done when the request has ended. And a request that took a while is
+# announced to the terminal when it ends (here: after one second).
+rm -rf "$tmp/fake10" "$tmp/pt10"; mkdir -p "$tmp/fake10" "$tmp/pt10"
+python3 - "$tmp/fake10" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+for i, x in enumerate([say([{"command": "echo one; sleep 4; echo two", "wait_s": 10}]), say([], True, "Done."), say([], True, "Done.")], 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt10" && HOME="$tmp/home" COMIDE_NOTIFY=1 LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake10" \
+    python3 "$here/ci/pty-drive.py" 14 'go@2,\r@2.5,/cost@3.5,\r@4,\x03@11,\x03@11.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt10.raw" 2>&1 )
+python3 - "$tmp/fake10" "$tmp/pt10.raw" > "$tmp/pt10.out" <<'EOF'
+import json, re, sys
+sent = " ".join(m["content"] for n in (2, 3) for m in json.load(open(f"{sys.argv[1]}/request-{n}.json"))["messages"] if m["role"] == "user")
+raw = open(sys.argv[2], errors="replace").read()
+screen = re.sub(r"\x1b\[[0-9;?<>]*[A-Za-z]", " ", raw)
+print("command", "/cost" not in sent and "this session: " in screen)
+print("announced", "\x1b]9;comide is done: go\x07" in raw)
+EOF
+has "a /command entered mid-request is not told to the model; it is done when the request ends" "^command True$" "$tmp/pt10.out"
+has "a request that took a while is announced to the terminal when it ends" "^announced True$" "$tmp/pt10.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the
@@ -802,6 +826,31 @@ replies = [say(tries), say([], done=True, analysis="Done."), say([], done=True, 
 for i, r in enumerate(replies, 1):
     json.dump(r, open(f"{fake}/reply-{i}.json", "w"))
 EOF
+  # On a terminal, a confined command is watched from here and the keys are read while it
+  # runs: a line entered is told with its result, and Esc with something typed stops the
+  # job behind the door and sends it.
+  rm -rf "$tmp/fakec" "$tmp/ptc"; mkdir -p "$tmp/fakec" "$tmp/ptc"
+  python3 - "$tmp/fakec" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+r = [say([{"command": "echo quick"}, {"command": "echo one; sleep 5; echo two", "wait_s": 20}]),
+     say([{"command": "echo three; sleep 40; echo four", "wait_s": 60}]), say([], True, "Turned."), say([], True, "Turned.")]
+for i, x in enumerate(r, 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+  ( cd "$tmp/ptc" && HOME="$tmp/home" COMIDE_NOTIFY=0 LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_SHELL="$here/build/comide-shell" COMIDE_FAKE="$tmp/fakec" \
+      python3 "$here/ci/pty-drive.py" 30 'go@5,\r@5.5,use tabs@8.5,\r@9.2,other way@16,\x1b@17,\x03@27,\x03@27.4' -- "$here/comide" --yes --confined --model local:stand-in > "$tmp/ptc.raw" 2>&1 )
+  python3 - "$tmp/fakec" > "$tmp/ptc.out" <<'EOF'
+import json, sys
+users = lambda n: [m["content"] for m in json.load(open(f"{sys.argv[1]}/request-{n}.json"))["messages"] if m["role"] == "user"]
+print("told", users(2)[-1].endswith("use tabs") and "quick\n[exit code 0]" in users(2)[-1] and "one\ntwo\n[exit code 0]" in users(2)[-1])
+print("stopped", users(3)[-1] == "other way" and "The user stopped this command" in users(3)[-2] and "four" not in users(3)[-2].split("echo four")[-1])
+EOF
+  has "a confined command is watched: what is typed while it runs is told with its result" "^told True$" "$tmp/ptc.out"
+  has "and Esc with something typed stops the job behind the door and sends it" "^stopped True$" "$tmp/ptc.out"
+  pgrep -f 'sleep 40' > /dev/null && bad "the stopped confined job is still running" || good "the job that was stopped is not left running"
+
   LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_SHELL="$here/build/comide-shell" COMIDE_FAKE="$tmp/fake" ./comide -p "try the walls" --yes --confined --model local:stand-in --root "$probe/cw/proj" > "$tmp/cw.out" 2> "$tmp/cw.err"
   same "exit 0" "0" "$?"
   python3 - "$tmp/fake" > "$tmp/cw.sent" <<'EOF'

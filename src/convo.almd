@@ -64,6 +64,9 @@ fn final_text(r: model.Reply) -> String =
 fn retryable(e: String) -> Bool =
   list.any(["status 429", "status 50", "status 529", "status 408", "status 409", "status 425"], (s) => string.contains(e, s))
     or string.starts_with(e, "transport")
+    // The provider went silent mid-answer ("request timeout: idle_ms 120000 exceeded").
+    // Seen straight after a 500 from the same provider: the next try is what recovers.
+    or string.contains(e, "idle_ms")
 
 // The waits between tries, doubling to a minute: about four minutes in all. Measured
 // 2026-09-25: three tries 15 s apart spanned 45 s, and a DNS outage longer than that
@@ -179,4 +182,5 @@ test "retries wait longer each time, up to a minute" {
   assert(retryable("status 429: rate limited"))
   assert(retryable("status 529: {\"type\":\"overloaded_error\"}"))
   assert(not retryable("status 400: bad request"))
+  assert(retryable("request timeout: idle_ms 120000 exceeded"))
 }

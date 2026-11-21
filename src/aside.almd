@@ -66,7 +66,9 @@ effect fn back(path: String, file: String) -> Bool = {
 // A key that is not a stop: what it does to what is typed.
 effect fn typed(path: String, k: term.Key) -> Unit = {
   let now = draft(path)!
-  if k.kind == "enter" then moved(path, told_file(path))!
+  // A /command is comide's to carry out, not something to tell the model: entered while
+  // a request is worked, it is put by, and done when the request has ended.
+  if k.kind == "enter" then moved(path, if string.starts_with(string.trim(now), "/") then after_file(path) else told_file(path))!
   else if k.kind == "tab" then moved(path, after_file(path))!
   else if k.kind == "up" then {
     if now == "" and not back(path, told_file(path))! then { let _ = back(path, after_file(path))! }
@@ -113,6 +115,7 @@ effect fn hint(path: String, base: String, width: Int) -> String =
     let waiting = list.join(list.filter([if n_told > 0 then int.to_string(n_told) + " for the next step" else "", if n_after > 0 then int.to_string(n_after) + " for after" else ""], (p) => p != ""), ", ")
     list.join(list.filter([base,
       if waiting == "" then "" else waiting + (if now == "" then " (↑ takes one back)" else ""),
-      if now != "" then "❯ " + string.take_end(now, int.max(10, width - 96)) + "▏ enter: next step · tab: after · esc: stop and send now"
+      if string.starts_with(string.trim(now), "/") then "❯ " + string.take_end(now, int.max(10, width - 96)) + "▏ enter: done when this request ends · esc: stop and do it now"
+        else if now != "" then "❯ " + string.take_end(now, int.max(10, width - 96)) + "▏ enter: next step · tab: after · esc: stop and send now"
         else if waiting == "" then "type to tell comide more" else if n_told > 0 then "esc: stop and send now" else ""], (p) => p != ""), " · ")
   }

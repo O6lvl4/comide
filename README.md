@@ -442,6 +442,12 @@ nothing typed puts it in front of you again, to change or to drop. When comide s
 ("Run this command?"), what you were typing is not taken for the answer: the question
 opens once the keys have gone quiet, and what you typed is kept as what it was.
 
+A `/command` entered while comide works is done when the request ends, not told to the
+model. When a request that took more than twenty seconds ends, the terminal is told: a
+bell, and a notification where the terminal shows them (`COMIDE_NOTIFY`: another number
+of seconds, or 0 for never). All of this holds with `--confined` too: a confined command
+is watched from outside the enclosure, so the keys are read while it runs.
+
 At the input box, Esc twice on an empty line is `/rewind`. A line that begins with `!`
 is a command of your own: it runs in the project as you typed it, with no question,
 and comide is shown it and its output with your next request (`!cargo test`, then
