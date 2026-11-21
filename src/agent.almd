@@ -141,7 +141,8 @@ let NOT_HERE = [
 
 let KEYS_HELP = """
   enter send · shift+enter, alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
-  while comide works: type and press enter to tell it more, without stopping it · esc or ctrl+c: interrupt
+  while comide works: type and press enter to tell it more at the next step, without stopping it
+  esc: stop; with something typed, stop and send it now · ctrl+c: stop only
   ctrl+c twice or ctrl+d on an empty box: leave
 """
 
@@ -386,18 +387,29 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
     t = { ...t, draft: "" }
     match next_line(t.opts, place, t.s, history, draft)! {
       none => { t = { ...t, open: false } },
-      some(text) => {
-        if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
-        if starts_turn(text) then { t = marked(t, place, text)! }
-        t = match command_of(text) {
-          some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
-          none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, setup_now(t, place), t.s, text)! },
+      some(first) => {
+        // The line, and then whatever a request was stopped to send at once (waiting.almd).
+        var line: String? = some(first)
+        while option.is_some(line) and t.open {
+          let text = line ?? ""
+          line = none
+          if t.opts.tui then { editor.remember(place.history_file, text)!; list.push(history, text) }
+          if starts_turn(text) then { t = marked(t, place, text)! }
+          t = match command_of(text) {
+            some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
+            none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, setup_now(t, place), t.s, text)! },
+          }
+          // What was typed while the request was worked and did not reach the model is
+          // not lost. Stopped with Esc to send it, it is the next request, now;
+          // otherwise it is in the input box next.
+          let unsaid = waiting.left(t.opts)!
+          let at_once = waiting.stopped_to_send(t.opts)!
+          if unsaid != "" and at_once then {
+            println("\n" + ui.note_line(t.opts.ui, "stopped, and sent: " + (list.first(string.split(unsaid, "\n")) ?? "")))
+            line = some(unsaid)
+          } else if unsaid != "" and t.draft == "" then { t = { ...t, draft: unsaid } }
+          if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, t.id, t.s)!
         }
-        // What was typed while the request was worked and did not reach the model is
-        // not lost: it is in the input box next.
-        let unsaid = waiting.left(t.opts)!
-        if unsaid != "" and t.draft == "" then { t = { ...t, draft: unsaid } }
-        if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, t.id, t.s)!
       },
     }
   }

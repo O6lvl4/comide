@@ -427,7 +427,13 @@ You need not stop comide to tell it something. While it works, type: the line sh
 beside the progress, and Enter hands it over. The model reads it with the results of
 the step it is on, before its next reply, as something you said. What you typed and did
 not enter, or entered when the request was already ending, is in the input box when the
-request ends. Esc still stops the request at once.
+request ends.
+
+A step can be long, and what you hand over waits for it. So Esc means two things. With
+nothing typed, it stops what is running, as before. With something typed, or handed over
+and still waiting, it stops the request there and sends that at once as the next
+request: the way to turn comide round in the middle of a long command. Ctrl+C only
+stops, whatever is typed.
 
 ## Web search
 

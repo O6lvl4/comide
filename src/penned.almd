@@ -308,6 +308,8 @@ effect fn run_orders(opts: options.Options, setup: toolkit.Setup, sh0: shell.She
   var sigs: List[String] = []
   var stopped = false
   for o in orders {
+    // Stopped to say something else (waiting.almd): what is left of the reply is not run.
+    if waiting.stopping(opts)! then { stopped = true }
     if stopped then list.push(parts, said.shown(o) + "\n[not run: an earlier command of this reply was not run]")
     else if o.tool != "" and string.trim(o.command) == "" then {
       list.push(sigs, watch.signature(o.tool, o.args))
@@ -471,7 +473,12 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
               // Complete is asked about once, as in an errand, when work was done in this
               // request. An answer to a question is not asked about: it is the answer.
               let next = if w.complete and not acted then said.Done else said.after(w, asked)
-              match next {
+              // The person stopped a command to say something else at once: the request
+              // ends here, with what was run on record, and what they typed is the next one.
+              if waiting.stopping(opts)! then {
+                list.push(messages, exchange.message("user", ran.seen + "\n\n[The user stopped the request here to say something else.]"))
+                done = true
+              } else match next {
                 Work => {
                   if not had_orders and not w.complete then {
                     // Words with nothing to run and not said to be the end: taken as the answer,

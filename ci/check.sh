@@ -485,6 +485,33 @@ has "and told once" "^once True$" "$tmp/pt3.out"
 has "it is shown while it is typed, and said to have been told" "^shown True$" "$tmp/pt3.out"
 has "what was typed and not entered is in the input box when the request ends" "^kept True$" "$tmp/pt3.out"
 
+# Esc with something typed: the request stops there (the command, and what the reply had
+# left to run), and what was typed is the next request at once. Esc with nothing typed
+# stops the command only, as it always did, and sends nothing.
+rm -rf "$tmp/fake4" "$tmp/pt4"; mkdir -p "$tmp/fake4" "$tmp/pt4"
+python3 - "$tmp/fake4" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+r = [say([{"command": "echo one; sleep 30; echo never", "wait_s": 40}, {"command": "echo second-order"}]),
+     say([{"command": "sleep 20; echo again", "wait_s": 30}]), say([], True, "Done."), say([], True, "Done.")]
+for i, x in enumerate(r, 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt4" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake4" \
+    python3 "$here/ci/pty-drive.py" 16 'go@2,\r@2.5,other way@4,\x1b@5.5,\x1b@8.5,\x03@13,\x03@13.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt4.raw" 2>&1 )
+python3 - "$tmp/fake4" "$tmp/pt4.raw" > "$tmp/pt4.out" <<'EOF'
+import json, re, sys
+users = lambda n: [m["content"] for m in json.load(open(f"{sys.argv[1]}/request-{n}.json"))["messages"] if m["role"] == "user"]
+screen = re.sub(r"\x1b\[[0-9;?<>]*[A-Za-z]", " ", open(sys.argv[2], errors="replace").read()).replace("\r", "\n")
+print("sent", users(2)[-1] == "other way" and "stopped the request here" in users(2)[-2] and "second-order\n[not run" in users(2)[-2])
+print("said", "stopped, and sent: other way" in screen and "never" not in screen)
+print("plain", "[The user stopped this command.]" in users(3)[-1] and screen.count("stopped, and sent") == 1)
+EOF
+has "Esc with something typed stops the request and sends it as the next one at once" "^sent True$" "$tmp/pt4.out"
+has "and says so; the command it stopped did not go on" "^said True$" "$tmp/pt4.out"
+has "Esc with nothing typed stops the command only, and sends nothing" "^plain True$" "$tmp/pt4.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the
