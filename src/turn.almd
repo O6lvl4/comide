@@ -126,8 +126,12 @@ effect fn handed_over(opts: options.Options, setup: toolkit.Setup, t: Turn) -> T
   }
 
 // One model call and what follows from it.
-effect fn step(opts: options.Options, setup: toolkit.Setup, s: options.Session, t: Turn) -> Turn = {
+effect fn step(opts: options.Options, setup: toolkit.Setup, s: options.Session, t0: Turn) -> Turn = {
   let u = opts.ui
+  // What the person said while the last step was worked (waiting.almd) is said to the
+  // model before its next reply.
+  let said_meanwhile = waiting.told(opts)!
+  let t = if said_meanwhile == "" then t0 else { ...t0, messages: t0.messages + [convo.message("user", said_meanwhile)] }
   if t.steps >= opts.max_steps then {
     options.show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(t.steps) + " steps without a final answer; say how to continue"))!
     ended(t)

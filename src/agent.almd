@@ -45,6 +45,7 @@ import self.settings
 import self.mcp
 import self.rules
 import self.checkpoints
+import self.waiting
 import self.exported
 
 fn system_prompt(root: String) -> String = """
@@ -140,7 +141,8 @@ let NOT_HERE = [
 
 let KEYS_HELP = """
   enter send · shift+enter, alt+enter or \\ then enter a new line · ↑↓ history · tab complete a command
-  esc or ctrl+c while comide works: interrupt · ctrl+c twice or ctrl+d on an empty box: leave
+  while comide works: type and press enter to tell it more, without stopping it · esc or ctrl+c: interrupt
+  ctrl+c twice or ctrl+d on an empty box: leave
 """
 
 // `fresh` is a conversation with nothing said in it, which /clear goes back to; `start` is
@@ -260,7 +262,9 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
     let saved = if term.is_tty()! then term.enter_raw()! else none
     let tui = option.is_some(saved)
     let (_, cols) = if tui then term.size()! else (24, opts0.ui.width)
-    let outcome = match talk(options.with_terminal(opts0, tui, ui.Ui { color: opts0.ui.color, width: int.max(40, int.min(160, cols)) }), place) {
+    // Where what is typed while a request is worked is held (waiting.almd).
+    let seated = { ...options.with_terminal(opts0, tui, ui.Ui { color: opts0.ui.color, width: int.max(40, int.min(160, cols)) }), aside: if tui then setup.scratch + "/aside" else "" }
+    let outcome = match talk(seated, place) {
       ok(n) => ok(n),
       err(e) => err(e),
     }
@@ -389,6 +393,10 @@ effect fn talk(opts0: options.Options, place: Place) -> Result[Int, String] = {
           some(c) => slash(t, place, Slash { name: canonical(c.name), arg: c.arg })!,
           none => if string.trim(text) == "" then t else { ...t, s: one_turn(t.opts, setup_now(t, place), t.s, text)! },
         }
+        // What was typed while the request was worked and did not reach the model is
+        // not lost: it is in the input box next.
+        let unsaid = waiting.left(t.opts)!
+        if unsaid != "" and t.draft == "" then { t = { ...t, draft: unsaid } }
         if place.setup.depth == 0 then sessions.save(place.home, t.opts.root, t.opts.model, t.id, t.s)!
       },
     }

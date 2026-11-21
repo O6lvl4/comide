@@ -133,6 +133,17 @@ effect fn close(setup: toolkit.Setup) -> Unit =
   }
   else if fs.exists(setup.scratch + "/terminal/cwd") then shell.close(terminal(setup)!)! else ()
 
+// What the person said while comide worked (waiting.almd), put at the end of what the
+// model is about to read: under the last results, which are a "user" message too.
+fn with_told(messages: List[Value], said_: String) -> List[Value] =
+  if said_ == "" then messages
+  else match list.last(messages) {
+    some(m) => if (value.get_string(m, "role") ?? "") == "user"
+      then list.take(messages, list.len(messages) - 1) + [exchange.message("user", (value.get_string(m, "content") ?? "") + "\n\n" + said_)]
+      else messages + [exchange.message("user", said_)],
+    none => messages,
+  }
+
 // One model call, watched: a spinner, and Esc to stop it. The reply is JSON and is not
 // shown as it arrives. `none` is the person stopping it.
 effect fn heard(opts: options.Options, scratch: String, n: Int, messages: List[Value], tries: Int) -> Result[exchange.Reply?, String] = {
@@ -147,7 +158,7 @@ effect fn heard(opts: options.Options, scratch: String, n: Int, messages: List[V
         var interrupted = false
         while not model.is_done(c)! and datetime.now_ms() - t0 <= CALL_MAX_MS and not interrupted {
           interrupted = waiting.pause(opts)!
-          if opts.live and opts.ui.color then io.print(ui.waiting(opts.ui, frame / 3, (datetime.now_ms() - t0) / 1000, "Working", if opts.tui then "esc to interrupt" else ""))
+          if opts.live and opts.ui.color then io.print(ui.waiting(opts.ui, frame / 3, (datetime.now_ms() - t0) / 1000, "Working", if opts.tui then waiting.hint(opts, "esc to interrupt")! else ""))
           frame = frame + 1
         }
         if opts.live and opts.ui.color then io.print(ui.clear_line(opts.ui))
@@ -270,7 +281,7 @@ effect fn local_call(opts: options.Options, sh: shell.Shell, a: Value) -> (shell
         if frame % 5 == 0 then { last = shell.last_line(now, n)! }
         let room = int.max(10, opts.ui.width - 40)
         io.print(ui.waiting(opts.ui, frame / 3, (datetime.now_ms() - t0) / 1000, "Running",
-          list.join(list.filter([if opts.tui then "esc to stop" else "", string.take(last, room)], (p) => p != ""), " · ")))
+          list.join(list.filter([if opts.tui then waiting.hint(opts, "esc to stop")! else "", string.take(last, room)], (p) => p != ""), " · ")))
         frame = frame + 1
       }
       io.print(ui.clear_line(opts.ui))
@@ -413,6 +424,8 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
           },
         }
       }
+      // What the person said while the last step was worked goes in with its results.
+      messages = with_told(messages, waiting.told(opts)!)
       if steps >= opts.max_steps then {
         options.show(opts, "\n" + ui.note_line(u, "stopped after " + int.to_string(steps) + " steps without a final answer; say how to continue"))!
         done = true

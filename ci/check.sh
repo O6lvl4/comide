@@ -456,6 +456,35 @@ EOF
 has "Shift+Enter and Option+Enter are new lines in what is sent" "^lines True$" "$tmp/pt2.out"
 has "the terminal is asked to tell modified keys apart, and the asking is taken back" "^asked True taken back True$" "$tmp/pt2.out"
 
+# Said while comide works. A command is running: a line is typed and Enter pressed, and
+# the model reads it with that command's results, before its next reply. A second line is
+# typed and not entered while the next command runs: when the request ends it is in the
+# input box, not lost.
+rm -rf "$tmp/fake3" "$tmp/pt3"; mkdir -p "$tmp/fake3" "$tmp/pt3"
+python3 - "$tmp/fake3" <<'EOF'
+import json, sys
+def say(commands, done=False, analysis="a"):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+r = [say([{"command": "echo one; sleep 4; echo two", "wait_s": 10}]), say([{"command": "sleep 3; echo three", "wait_s": 10}]), say([], True, "All done."), say([], True, "All done.")]
+for i, x in enumerate(r, 1):
+    json.dump(x, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+( cd "$tmp/pt3" && HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake3" \
+    python3 "$here/ci/pty-drive.py" 16 'go@2,\r@2.5,use tabs@4,\r@5,too late@9.5,\x03@14,\x03@14.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt3.raw" 2>&1 )
+python3 - "$tmp/fake3" "$tmp/pt3.raw" > "$tmp/pt3.out" <<'EOF'
+import json, re, sys
+last = lambda n: json.load(open(f"{sys.argv[1]}/request-{n}.json"))["messages"][-1]["content"]
+screen = re.sub(r"\x1b\[[0-9;?<>]*[A-Za-z]", " ", open(sys.argv[2], errors="replace").read()).replace("\r", "\n")
+print("told", "While you were working, the user said this" in last(2) and last(2).endswith("use tabs") and "[exit code 0]" in last(2))
+print("once", "use tabs" not in last(3))
+print("shown", "❯ use tabs" in screen and "told comide: use tabs" in screen)
+print("kept", any("too late" in l and "│" in l for l in screen.split("\n")[-40:]))
+EOF
+has "what is typed and entered while a command runs is told to the model with its results" "^told True$" "$tmp/pt3.out"
+has "and told once" "^once True$" "$tmp/pt3.out"
+has "it is shown while it is typed, and said to have been told" "^shown True$" "$tmp/pt3.out"
+has "what was typed and not entered is in the input box when the request ends" "^kept True$" "$tmp/pt3.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the

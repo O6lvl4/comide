@@ -423,6 +423,12 @@ Enter sends · Shift+Enter or Alt+Enter (Option on a Mac) adds a line, as does `
 Enter · ↑↓ history · Tab completes `/commands` ·
 Esc interrupts a turn · Ctrl+D leaves. `/help` lists the rest.
 
+You need not stop comide to tell it something. While it works, type: the line shows
+beside the progress, and Enter hands it over. The model reads it with the results of
+the step it is on, before its next reply, as something you said. What you typed and did
+not enter, or entered when the request was already ending, is in the input box when the
+request ends. Esc still stops the request at once.
+
 ## Web search
 
 `web_search` needs a SearXNG with JSON answers on, bound to this machine:
