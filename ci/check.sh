@@ -645,6 +645,44 @@ EOF
 has "a /command entered mid-request is not told to the model; it is done when the request ends" "^command True$" "$tmp/pt10.out"
 has "a request that took a while is announced to the terminal when it ends" "^announced True$" "$tmp/pt10.out"
 
+# Images. The conversation's model may take none, so `look` shows the image to a model
+# that does (here a stand-in that speaks HTTP) and gives back what it said. Ctrl+V takes
+# the image on the clipboard (here a command that stands in for it: the checks do not
+# touch the person's clipboard) into a file named with @, and the request says that an
+# image is looked at with look.
+rm -rf "$tmp/fake11" "$tmp/eyes" "$tmp/pt11"; mkdir -p "$tmp/fake11" "$tmp/eyes" "$tmp/pt11"
+python3 - "$tmp/fake11" "$tmp/eyes" "$tmp/shot.png" <<'EOF'
+import json, struct, sys, zlib
+fake, eyes, shot = sys.argv[1:4]
+chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+raw = b"".join(b"\x00" + b"\xe0\x10\x10" * 8 for _ in range(8))
+open(shot, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 8, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+json.dump({"content": "A red square."}, open(f"{eyes}/reply-1.json", "w"))
+say = lambda commands, done=False: {"content": json.dumps({"analysis": "Seen.", "plan": "p", "commands": commands, "task_complete": done})}
+for i, x in enumerate([say([{"tool": "look", "args": {"path": shot, "question": "What is it?"}}]), say([], True), say([], True)], 1):
+    json.dump(x, open(f"{fake}/reply-{i}.json", "w"))
+EOF
+port11=${EYES_PORT:-18941}
+python3 "$here/ci/fake-model.py" "$port11" "$tmp/eyes" & eyes=$!
+python3 -c 'import time; time.sleep(0.7)'
+( cd "$tmp/pt11" && HOME="$tmp/home" COMIDE_NOTIFY=0 COMIDE_IMAGE_MODEL=local:eyes COMIDE_PASTE_IMAGE="cp '$tmp/shot.png' \"\$1\"" LOCAL_BASE_URL="http://127.0.0.1:$port11/v1" LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake11" \
+    python3 "$here/ci/pty-drive.py" 12 'what is \x16@2,this@3,\r@3.5,\x03@10,\x03@10.4' -- "$here/comide" --yes --model local:stand-in > "$tmp/pt11.raw" 2>&1 )
+kill "$eyes" 2> /dev/null || true
+python3 - "$tmp/fake11" "$tmp/eyes" > "$tmp/pt11.out" <<'EOF'
+import json, os, re, sys
+fake, eyes = sys.argv[1:3]
+sent = json.load(open(f"{fake}/request-1.json"))["messages"][-1]["content"]
+named = re.search(r"what is @(\S+/\.comide/pasted/\d+\.png) this", sent)
+print("pasted", bool(named) and os.path.getsize(named.group(1)) > 0 and "an image with the look tool" in sent)
+asked = json.load(open(f"{eyes}/request-1.json"))["messages"][0]["content"]
+print("shown", asked[0]["text"] == "What is it?" and asked[1]["image_url"]["url"].startswith("data:image/png;base64,iVBOR"))
+back = json.load(open(f"{fake}/request-2.json"))["messages"][-1]["content"]
+print("told", "A red square." in back and "You have not seen the image yourself" in back)
+EOF
+has "Ctrl+V puts the clipboard's image in a file named with @, and the request says to look at it" "^pasted True$" "$tmp/pt11.out"
+has "look shows the image and the question to the model that takes images" "^shown True$" "$tmp/pt11.out"
+has "and what that model said comes back as text, said to be another's eyes" "^told True$" "$tmp/pt11.out"
+
 # What the model was told in that conversation: the machine is the person's, and, where
 # almide is installed, that the reference tool tells about the language. The tool's answer
 # is the syntax as one program; the program is taken out of the answer and given to the

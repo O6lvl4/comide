@@ -1,0 +1,75 @@
+// Looking at an image: the tool `look`.
+//
+// The model a conversation runs on may not take images at all (the default,
+// cf:glm-5.3, refuses them outright: "is not a multimodal model"). So an image is not
+// put into the conversation. It is shown to a model that does take images, with the
+// question, and what that model says comes back as text. The conversation holds the
+// file's path and the words about it, never the image: nothing that keeps, exports or
+// shortens a conversation has to know that images exist.
+//
+//   COMIDE_IMAGE_MODEL   the model that looks (default: cf:gemma-4-26b)
+//
+// What this costs: the conversation's model has not seen the image, only read about it.
+// A question it did not think to ask is not answered, so the question should say what
+// matters; and it can be asked again.
+//
+// The image goes to that model's provider as it would go to the conversation's: the
+// file is read here, made smaller when the machine can (sips, on a Mac: no side longer
+// than 1568 pixels), and sent inline. Nothing is written beside the file.
+
+import env
+import fs
+import self.model
+import self.toolkit
+import self.pictures
+
+let DEFAULT_MODEL = "cf:gemma-4-26b"
+// Past this, inline, a provider refuses the request; said here first, in plain words.
+let LARGEST_BYTES = 6000000
+let WAIT_MS = 180000
+
+effect fn model_name() -> String = {
+  let set = string.trim(env.get("COMIDE_IMAGE_MODEL") ?? "")
+  if set == "" then DEFAULT_MODEL else set
+}
+
+// $1 the image, $2 a place for a smaller copy, $3 the largest size sent. Prints the image
+// as base64 on one line; exit 3 when it is too large even so.
+let ENCODE = "f=\"$1\"; if command -v sips > /dev/null 2>&1 && sips -Z 1568 \"$f\" --out \"$2\" > /dev/null 2>&1; then f=\"$2\"; fi; "
+  + "[ \"$(wc -c < \"$f\")\" -le \"$3\" ] || exit 3; base64 < \"$f\" | tr -d '\\n'"
+
+effect fn look(s: toolkit.Setup, a: Value) -> toolkit.ToolResult = {
+  let given = toolkit.str_arg(a, "path")
+  let path = toolkit.under_root(s, given)
+  let asked = string.trim(toolkit.str_arg(a, "question"))
+  let question = if asked == "" then "Describe this image: what it shows, any text in it word for word, and anything that looks wrong." else asked
+  match pictures.kind_of(path) {
+    none => toolkit.failed("look takes an image file (png, jpg, gif, webp); " + given + " is not one. Use read for text.", "not an image"),
+    some(media) => if not fs.is_file(path) then toolkit.failed("there is no file " + given, "no such file")
+      else {
+        let small = s.scratch + "/look-" + int.to_string(datetime.now_ms()) + "." + pictures.extension(path)
+        let (code, data) = toolkit.run_program("bash", ["-c", ENCODE, "comide", path, small, int.to_string(LARGEST_BYTES)], 60)!
+        if code == 3 then toolkit.failed(given + " is too large to send (over " + int.to_string(LARGEST_BYTES / 1000000) + " MB). Make a smaller copy and look at that.", "too large")
+        else if code != 0 or string.trim(data) == "" then toolkit.failed("the image could not be read: " + string.take(data, 200), "could not be read")
+        else {
+          let name = model_name()!
+          match seen(name, pictures.messages(question, media, string.trim(data)), s.scratch) {
+            err(e) => toolkit.failed("the model that looks at images (" + name + ", COMIDE_IMAGE_MODEL) could not be asked: " + string.take(e, 300), "could not be asked"),
+            ok(r) => toolkit.ToolResult { text: "[" + given + ", as " + name + " sees it. You have not seen the image yourself: ask again for what this leaves out.]\n" + string.trim(r.content),
+              brief: toolkit.count_lines(r.content), failed: false, cost_usd: r.cost_usd },
+          }
+        }
+      },
+  }
+}
+
+effect fn seen(name: String, messages_: List[Value], scratch: String) -> Result[model.Reply, String] =
+  match model.start(name, messages_, [], 2000, "", scratch) {
+    err(e) => err(e),
+    ok(c) => {
+      let t0 = datetime.now_ms()
+      while not model.is_done(c)! and datetime.now_ms() - t0 < WAIT_MS { env.sleep_ms(100) }
+      if not model.is_done(c)! then { model.abandon(c)!; err("no answer within " + int.to_string(WAIT_MS / 1000) + " s") }
+      else model.settle(c)
+    },
+  }

@@ -18,6 +18,7 @@
 
 import io
 import fs
+import env
 import json
 import process
 import self.term
@@ -115,11 +116,17 @@ effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: S
   b = Box { ed: b.ed, above: draw(0, frame(u, b.ed, placeholder, status, commands))!, history_at: b.history_at, draft: b.draft, armed: b.armed }
   while option.is_none(result) {
     let k = term.read_key()!
+    if k.kind == "ctrl" and k.text == "v" then {
+      // Ctrl+V: an image on the clipboard becomes a file, named in the text with @.
+      let file = pasted_image()!
+      b = redrawn(u, if file == "" then b else with_ed(b, textbox.insert(b.ed, "@" + file + " ")), k, placeholder,
+        if file == "" then "there is no image on the clipboard (text is pasted with the terminal's own paste)" else "pasted as " + file, commands)!
+    }
     let named = if k.kind == "tab" and root != "" then mention(textbox.text(b.ed), b.ed.cursor == list.len(b.ed.chars)) else none
     if option.is_some(named) then {
       let (ed, said) = file_completed(root, b.ed, named ?? "")!
       b = redrawn(u, with_ed(b, ed), k, placeholder, if said == "" then status else said, commands)!
-    } else if k.kind != "none" then {
+    } else if k.kind != "none" and not (k.kind == "ctrl" and k.text == "v") then {
       let (next, done) = on_key(b, k, history, commands)
       match done {
         some(p) => {
@@ -133,6 +140,28 @@ effect fn prompt(u: ui.Ui, history: List[String], placeholder: String, status: S
   }
   term.keys_off()!
   result ?? Prompted { kind: "leave", text: "" }
+}
+
+// ---- an image pasted --------------------------------------------------------------------
+
+// $1 where the image goes, as PNG. The clipboard is read with what the machine has.
+let PASTE = "if command -v pngpaste > /dev/null 2>&1; then pngpaste \"$1\" 2> /dev/null; "
+  + "elif command -v osascript > /dev/null 2>&1; then osascript -e 'set f to open for access POSIX file (item 1 of {\"'\"$1\"'\"}) with write permission' -e 'write (the clipboard as «class PNGf») to f' -e 'close access f' > /dev/null 2>&1; "
+  + "elif command -v wl-paste > /dev/null 2>&1; then wl-paste -t image/png > \"$1\" 2> /dev/null; "
+  + "elif command -v xclip > /dev/null 2>&1; then xclip -selection clipboard -t image/png -o > \"$1\" 2> /dev/null; fi; [ -s \"$1\" ]"
+
+// The image on the clipboard, written to a file of comide's own (~/.comide/pasted), for
+// the person only: its path, or "" when the clipboard holds no image.
+// COMIDE_PASTE_IMAGE is a command to use instead; it is given the path as $1.
+effect fn pasted_image() -> String = {
+  let dir = (env.get("HOME") ?? "") + "/.comide/pasted"
+  let file = dir + "/" + int.to_string(datetime.now_ms()) + ".png"
+  let own = string.trim(env.get("COMIDE_PASTE_IMAGE") ?? "")
+  let script = "umask 077; mkdir -p \"$2\"; " + (if own == "" then PASTE else own + "; [ -s \"$1\" ]") + " || { rm -f \"$1\"; exit 1; }"
+  match process.output(process.ProcessCommand { cmd: "bash", args: ["-c", script, "comide", file, dir], timeout_ms: 5000 }) {
+    ok(st) => if st.code == 0 then file else "",
+    err(_) => "",
+  }
 }
 
 // ---- a file named with @ ---------------------------------------------------------------

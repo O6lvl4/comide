@@ -46,6 +46,7 @@ import self.mcp
 import self.rules
 import self.checkpoints
 import self.waiting
+import self.pictures
 import self.exported
 
 fn system_prompt(root: String) -> String = """
@@ -167,7 +168,11 @@ effect fn setup_of(opts: options.Options) -> Result[toolkit.Setup, String] = {
   let searx = string.strip_suffix(searx_given, "/") ?? searx_given
   // The model solve runs on, golemide's defaults unless set; the strong one follows it,
   // so a run on one provider stays on it.
-  let solve_model = string.trim(env.get("COMIDE_SOLVE_MODEL") ?? "")
+  // golemide 0.4.0's own default is a model its provider withdrew on 2026-11-20
+  // (cf:glm-5.3-flash, HTTP 410): left to it, every solve failed. Unset, solve runs on
+  // the conversation's model.
+  let solve_set = string.trim(env.get("COMIDE_SOLVE_MODEL") ?? "")
+  let solve_model = if solve_set == "" then opts.model else solve_set
   let solve_strong = string.trim(env.get("COMIDE_SOLVE_STRONG_MODEL") ?? "")
   let solve_timeout_s = int.parse(string.trim(env.get("COMIDE_SOLVE_TIMEOUT_S") ?? "")) ?? 300
   ok(toolkit.Setup { root: opts.root, golemide: opts.golemide, scratch: scratch, ctxgate: has_ctxgate, searx: searx,
@@ -254,7 +259,7 @@ effect fn chat(opts0: options.Options) -> Result[Int, String] = {
     history_file: home + "/.comide/history", home: home,
     session_id: match kept { some(k) => if k.id == "" then int.to_string(datetime.now_ms()) else k.id, none => int.to_string(datetime.now_ms()) } }
   if not opts0.live then {
-    let after = one_turn(opts0, setup, start, opts0.prompt)!
+    let after = one_turn(opts0, setup, start, context_for(opts0.root, "", opts0.prompt)!)!
     penned.close(setup)!
     // A helper's conversation is not the person's: kept, it would be the one --continue finds.
     if setup.depth == 0 then sessions.save(home, opts0.root, opts0.model, place.session_id, after)!
@@ -476,12 +481,15 @@ effect fn bang(t: Talk, place: Place, command: String) -> Talk = {
 
 // The request as the model is given it: with what the person ran themselves since the
 // last one, and with the files they named with `@` said to be files.
-effect fn with_context(t: Talk, text: String) -> String = {
+effect fn with_context(t: Talk, text: String) -> String = context_for(t.opts.root, t.ran, text)!
+
+effect fn context_for(root: String, ran: String, text: String) -> String = {
   let words = list.filter_map(string.split(string.replace(text, "\n", " "), " "), (w) => string.strip_prefix(w, "@"))
-  let files = list.filter(list.map(words, (w) => string.strip_suffix(w, "/") ?? w), (w) => w != "" and fs.exists(absolute(w, t.opts.root)))
-  (if t.ran == "" then "" else "[The user ran this themselves, in the project, before asking:]\n" + t.ran + "\n\n")
+  let files = list.filter(list.map(words, (w) => string.strip_suffix(w, "/") ?? w), (w) => w != "" and fs.exists(absolute(w, root)))
+  (if ran == "" then "" else "[The user ran this themselves, in the project, before asking:]\n" + ran + "\n\n")
     + text
-    + (if list.is_empty(files) then "" else "\n\n[Named with @, in the project: " + list.join(files, ", ") + ". Look at them before you answer.]")
+    + (if list.is_empty(files) then "" else "\n\n[Named with @, in the project: " + list.join(files, ", ") + ". Look at them before you answer"
+      + (if list.any(files, pictures.is_image) then ": an image with the look tool, which shows it to a model that takes images" else "") + ".]")
 }
 
 // One request, worked by the loop the session was started with.
@@ -782,7 +790,7 @@ effect fn compact(t: Talk, place: Place) -> Talk = {
 
 effect fn switch_model(t: Talk, to: String) -> Talk = {
   let u = t.opts.ui
-  if to == "" then { println(ui.note_line(u, "model: " + t.opts.model + "   (/model cf:glm-5.3-flash, /model claude, /model openai:gpt-5 to switch)")); t }
+  if to == "" then { println(ui.note_line(u, "model: " + t.opts.model + "   (/model cf:gemma-4-26b, /model claude, /model openai:gpt-5 to switch)")); t }
   else match model.endpoint_of(to) {
     ok(_) => { println(ui.note_line(u, "model: " + to)); { ...t, opts: options.with_model(t.opts, to) } },
     err(e) => { println(ui.note_line(u, e + "; still " + t.opts.model)); t },
@@ -837,7 +845,7 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                    met, and the goal is kept with the conversation
   --root DIR       the project (default: the working directory)
   --model M        which model thinks, as PROVIDER:MODEL (default cf:glm-5.3)
-                     cf:glm-5.3, cf:glm-5.3-flash, ...   Cloudflare Workers AI
+                     cf:glm-5.3, cf:gemma-4-26b, ...    Cloudflare Workers AI
                      openai:gpt-5, openrouter:..., ollama:qwen3, ...
                                      any OpenAI-compatible service: NAME_API_KEY, and
                                      NAME_BASE_URL for one comide does not know
@@ -866,8 +874,9 @@ comide [run PROMPT | -p PROMPT] [--continue | --resume ID] [--root DIR] [--model
                    $COMIDE_RUNNER, else none); KIND is read, shell or solve. aitrium uses
                    it to confine each call and keep the keys out of it
 
-solve runs on golemide's own models (cf:glm-5.3-flash, escalating to cf:glm-5.3);
-COMIDE_SOLVE_MODEL and COMIDE_SOLVE_STRONG_MODEL choose others, with the same names.
+solve runs on the conversation's model; COMIDE_SOLVE_MODEL and COMIDE_SOLVE_STRONG_MODEL
+choose others, with the same names. look shows an image to COMIDE_IMAGE_MODEL
+(default cf:gemma-4-26b), since the conversation's model may not take images.
 A solve may take COMIDE_SOLVE_TIMEOUT_S seconds (default 300); golemide stops in time to
 say how far it got.
 

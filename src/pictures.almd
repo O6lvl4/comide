@@ -1,0 +1,32 @@
+// What is an image, by its name, and how one is sent to a model with a question: the
+// parts of seeing.almd that need no model, so that they can be tested.
+
+let KINDS = [("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")]
+
+fn extension(path: String) -> String = string.to_lower(list.last(string.split(path, ".")) ?? "")
+
+// The media type a file's name says it is, or none when it is not an image this can send.
+fn kind_of(path: String) -> String? = option.map(list.find(KINDS, (k) => k.0 == extension(path)), (k) => k.1)
+
+fn is_image(path: String) -> Bool = option.is_some(kind_of(path))
+
+// The request as it is sent: the question, then the image, in the shape the
+// OpenAI-compatible endpoints take.
+fn messages(question: String, media: String, data: String) -> List[Value] = [value.object([
+  ("role", value.string("user")),
+  ("content", value.array([
+    value.object([("type", value.string("text")), ("text", value.string(question))]),
+    value.object([("type", value.string("image_url")), ("image_url", value.object([("url", value.string("data:" + media + ";base64," + data))]))]),
+  ])),
+])]
+
+test "an image is known by its name, and sent after the question in the shape endpoints take" {
+  assert_eq(kind_of("shots/Home Page.PNG"), some("image/png"))
+  assert_eq(kind_of("a.jpeg"), some("image/jpeg"))
+  assert_eq(kind_of("notes.md"), none)
+  assert(is_image("x.webp"))
+  let m = list.first(messages("what is it?", "image/png", "QUJD")) ?? value.null()
+  let parts = value.get_array(m, "content") ?? []
+  assert_eq(value.get_string(list.get(parts, 0) ?? value.null(), "text") ?? "", "what is it?")
+  assert_eq(value.get_string(value.get(list.get(parts, 1) ?? value.null(), "image_url") ?? value.null(), "url") ?? "", "data:image/png;base64,QUJD")
+}

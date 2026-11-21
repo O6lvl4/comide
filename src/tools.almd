@@ -19,6 +19,7 @@ import self.skills
 import self.memory
 import self.exploring
 import self.mcp
+import self.seeing
 import self.checkpoints
 import fs
 
@@ -50,6 +51,8 @@ fn definitions() -> List[Value] = [
     [prop("path", "string", "directory (default: the project root)"), prop("depth", "integer", "levels to show (default 3)")], []),
   tool("map", "Rank the project's files by relevance to a task and list their main symbols. Useful first in a project you have not seen.",
     [prop("task", "string", "what you are trying to do")], ["task"]),
+  tool("look", "Look at an image file: a screenshot, a diagram, a photo, a chart you made. Another model, one that takes images, is shown it with your question and its answer comes back as text; you do not see the image yourself. Say in the question what matters (the text in it, the layout, what looks wrong), and ask again for what an answer leaves out. For text files use read.",
+    [prop("path", "string", "the image: png, jpg, gif or webp"), prop("question", "string", "what you need to know about it (default: a full description)")], ["path"]),
   tool("edit", "Replace text in a file. Copy old exactly from what read showed, without the line-number prefix; it is matched exactly first, then with indentation and whitespace loosened, and must match one place. The syntax of the result is checked before it is written: an edit that breaks it is refused and nothing is written.",
     [prop("path", "string", "file to change"), prop("old", "string", "the text to replace"), prop("new", "string", "the replacement")], ["path", "old", "new"]),
   tool("write", "Create a file, or replace a file's whole content. The syntax is checked before it is written. To implement or fix code that a command can check, use solve instead.",
@@ -133,6 +136,7 @@ effect fn looked(s: toolkit.Setup, name: String, a: Value) -> toolkit.ToolResult
   if name == "read" then some(read(s, a)!)
   else if name == "outline" or name == "tree" or name == "search" then some(hew_listing(s, name, a)!)
   else if name == "map" then some(map(s, a)!)
+  else if name == "look" then some(seeing.look(s, a)!)
   else if name == "skill" then some(skill(s, a)!)
   else if name == "remember" then some(remember(s, a)!)
   else if name == "explore" then some(exploring.explore(s, a)!)

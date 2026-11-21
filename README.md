@@ -71,10 +71,17 @@ The model's tools are programs that already exist:
 | `solve` | `golemide solve --json`: edit, verify, retry until the command passes |
 | `shell` | ctxgate: long output summarised, the exit status kept |
 | `web_search`, `web_fetch` | SearXNG, and Almide's `http` with every redirect checked |
+| `look` | a model that takes images (`COMIDE_IMAGE_MODEL`, default `cf:gemma-4-26b`): shown the image and a question, it answers in text |
 | `reference` | the language's own toolchain: the syntax as one checked program, a standard library module's functions (Almide) |
 
 A shell command, and the verify command `solve` would run, are asked about first.
 Pages are read only from the public web.
+
+The conversation's model may take no images (the default, `cf:glm-5.3`, refuses them),
+so an image is never put into the conversation. `look` shows it to a model that does
+take images, and what that model says comes back as text: a screenshot you name with
+`@` or paste with Ctrl+V, or one comide made itself. The conversation's model has then
+read about the image and not seen it, so a detail nobody asked about can be missed.
 
 ## Instructions
 
@@ -448,7 +455,8 @@ bell, and a notification where the terminal shows them (`COMIDE_NOTIFY`: another
 of seconds, or 0 for never). All of this holds with `--confined` too: a confined command
 is watched from outside the enclosure, so the keys are read while it runs.
 
-At the input box, Esc twice on an empty line is `/rewind`. A line that begins with `!`
+At the input box, Esc twice on an empty line is `/rewind`. Ctrl+V takes an image from
+the clipboard into a file of comide's own and names it in your text with `@`. A line that begins with `!`
 is a command of your own: it runs in the project as you typed it, with no question,
 and comide is shown it and its output with your next request (`!cargo test`, then
 "why does that fail?"). `@` and Tab complete a file's name, and comide is told which of
