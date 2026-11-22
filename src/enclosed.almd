@@ -141,7 +141,7 @@ fn division(listed: String) -> String = {
 
 fn tools_note(listed: String) -> String = if listed == "" then "" else "\n\nBesides the terminal you have tools. A command object may also be:\n"
   + "- {\"tool\": \"NAME\", \"args\": {...}}: run one of the tools below, with its arguments. It runs in the order you wrote it, and its result is shown to you like a command's output.\n\n"
-  + "A text of more than a few lines (a file's contents) is not written inside the JSON. Write \"@body:NAME\" where it is meant, as a tool argument or as a \"command\", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`. These texts are read, though they come after the JSON: a reply that names one does not end at the object's closing brace.\n\n"
+  + "A text of more than a few lines (a file's contents) is not written inside the JSON. Write \"@body:NAME\" where it is meant, as a tool argument or as a \"command\", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`. These texts are read, though they come after the JSON: a reply that names one does not end at the object's closing brace. They may be written before the object instead, the object last.\n\n"
   + "Each tool can do only what it says: a tool that reads cannot write, and none of them can start a program or reach a network. " + division(listed) + "\n\nThe tools:\n" + listed
 
 // A command line copied from the material (what is quoted in the task, what has been

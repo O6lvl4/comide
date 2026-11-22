@@ -58,11 +58,27 @@ Important notes:
 //
 // A reply that names a text and ends at the object's closing brace is said so in its own
 // words. Told only to "provide a proper JSON response", a model sent the same object
-// again, which was proper JSON already, five times running.
+// again, which was proper JSON already, five times running. Told to go on past the
+// closing brace, it stopped there five times more. Asked for the texts first and the
+// object last, it wrote them (twice in two, the same conversation sent again).
 fn unread_note(reason: String) -> String =
-  if string.contains(reason, "that is not written after the object") then
-    "Previous response ended at the object's closing brace: " + reason + ". None of its commands were run. Its JSON was right. Send the same object again and do not stop at its closing brace: on the lines after it, write each text it names as it is, with nothing escaped, between its two lines:\n<<<BODY NAME\n(the text)\n>>>BODY NAME"
-  else "Previous response had parsing errors: " + reason + ". None of its commands were run. Please fix these issues and provide a proper JSON response."
+  match string.index_of(reason, "that is not written after the object: ") {
+    some(i) => {
+      let names = list.map(string.split(string.drop(reason, i + 38), ", "), (n) => string.trim(string.replace(n, "@body:", "")))
+      "Previous response ended at the object's closing brace: " + reason + ". None of its commands were run. Its JSON was right. This time write the text first and the object last: begin the reply with\n"
+        + list.join(list.map(names, (n) => "<<<BODY " + n + "\n(the text, as it is, with nothing escaped)\n>>>BODY " + n), "\n")
+        + "\nand only after that the same JSON object."
+    },
+    none => "Previous response had parsing errors: " + reason + ". None of its commands were run. Please fix these issues and provide a proper JSON response.",
+  }
+
+test "a reply that named a text and stopped is asked for the text first, by its name" {
+  let note = unread_note("a command names a text that is not written after the object: @body:a, @body:b")
+  assert(string.contains(note, "begin the reply with\n<<<BODY a\n"))
+  assert(string.contains(note, ">>>BODY a\n<<<BODY b\n"))
+  assert(string.ends_with(note, ">>>BODY b\nand only after that the same JSON object."))
+  assert(string.contains(unread_note("the reply is not valid JSON"), "provide a proper JSON response"))
+}
 
 // Said when a reply reached the output limit: its JSON has no end, so nothing was run.
 let WRITTEN_CUT_NOTE = "ERROR! Your last response reached the output limit before the JSON was finished, so none of the commands in it were run. Respond again with a shorter response: fewer commands, and long files written in parts."

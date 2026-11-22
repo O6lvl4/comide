@@ -42,8 +42,15 @@ let BODY_REF = "@body:"
 // newline, as a file does. `whole`: the reply was not cut off, so a last text with no
 // closing line runs to the reply's end (the model forgets the line; seen twice in one
 // task). In a reply that was cut off it is an error: half a file is not written.
+//
+// The texts may come first and the object last. A model that ends its reply at the
+// object's closing brace, as a reply with no texts does, cannot write them after it: one
+// did so fifteen times running, meaning each time to go on. Asked for the texts first, it
+// wrote them. The object is looked for before the first text, and after the texts only
+// when it is not there.
 fn bodies_in(text: String, whole: Bool) -> Result[(String, List[(String, String)]), String] = {
   var head: List[String] = []
+  var tail: List[String] = []
   var found: List[(String, String)] = []
   var name = ""
   var lines: List[String] = []
@@ -52,7 +59,7 @@ fn bodies_in(text: String, whole: Bool) -> Result[(String, List[(String, String)
     if name == "" then {
       match string.strip_prefix(l, BODY_OPEN) {
         some(n) => { name = string.trim(n); began = true; lines = [] },
-        none => if not began then list.push(head, l) else (),
+        none => if not began then list.push(head, l) else list.push(tail, l),
       }
     } else if string.trim(l) == BODY_CLOSE + name then {
       list.push(found, (name, list.join(lines, "\n") + "\n"))
@@ -62,7 +69,8 @@ fn bodies_in(text: String, whole: Bool) -> Result[(String, List[(String, String)
   if name != "" and not whole then err("the text " + name + " has no closing line (" + BODY_CLOSE + name + ")")
   else {
     if name != "" then list.push(found, (name, string.trim_end(list.join(lines, "\n")) + "\n")) else ()
-    ok((list.join(head, "\n"), found))
+    let first = list.join(head, "\n")
+    ok((if string.contains(first, "{") then first else list.join(tail, "\n"), found))
   }
 }
 
@@ -191,6 +199,9 @@ test "a long text is written after the object and named where it is meant" {
   assert_eq(list.map(s.orders, (o) => o.args), ["{\"path\":\"a.py\",\"content\":\"d = {\\\"k\\\": [1]}\\nprint(\\\"}\\\")\\n\"}", "{}"])
   assert_eq(list.map(s.orders, (o) => o.command), ["", "python3 a.py\n"])
   assert_eq(read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}},{\"command\":\"@body:run\"}]}\n<<<BODY run\nls\n>>>BODY run\n", true), err("a command names a text that is not written after the object: @body:a"))
+  // The texts first and the object last is read the same.
+  let first = read_with("<<<BODY a\nd = {\"k\": 1}\n>>>BODY a\n{\"commands\":[{\"tool\":\"write\",\"args\":{\"path\":\"a.py\",\"content\":\"@body:a\"}}],\"task_complete\":false}", true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(list.map(first.orders, (o) => o.args), ["{\"path\":\"a.py\",\"content\":\"d = {\\\"k\\\": 1}\\n\"}"])
   // A text that was written, and itself speaks of "@body:", is not one that is missing.
   let about = read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}}]}\n<<<BODY a\nx = \"@body:b\"\n>>>BODY a\n", true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
   assert_eq(list.len(about.orders), 1)
