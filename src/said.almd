@@ -90,6 +90,25 @@ fn order_of(v: Value, bodies: List[(String, String)]) -> Order =
       none => "{}",
     } }
 
+// The texts a command names that are not written after the object. Asked of the command
+// as the model wrote it, not as filled: a file whose own contents say "@body:" is a text
+// that was written, not one that is missing.
+fn missing(c: Value, bodies: List[(String, String)]) -> List[String] = {
+  let given = [value.get(c, "command") ?? value.string("")] + (match value.get(c, "args") {
+    some(a) => match value.as_object(a) { ok(rows) => list.map(rows, (r) => r.1), err(_) => [] },
+    none => [],
+  })
+  list.fold(given, [], (names, v) => match value.as_string(v) {
+    err(_) => names,
+    ok(s) => match string.strip_prefix(s, BODY_REF) {
+      none => names,
+      some(n) => if list.any(bodies, (b) => b.0 == string.trim(n)) then names else names + [string.trim(n)],
+    },
+  })
+}
+
+let NOT_WRITTEN = "that is not written after the object"
+
 // The object in a reply: from its first brace to its last.
 fn object_in(text: String) -> String? = match string.index_of(text, "{") {
   none => none,
@@ -114,9 +133,9 @@ fn read_reply(text: String, tools: Bool, whole: Bool) -> Result[Said, String] = 
       ok(d) => {
         let orders = list.map(value.get_array(d, "commands") ?? [], (c) => order_of(c, parts.1))
         let empty = list.filter(orders, (o) => string.trim(o.command) == "" and o.job <= 0 and not (tools and o.tool != ""))
-        let unnamed = list.filter(orders, (o) => string.starts_with(o.command, BODY_REF) or string.contains(o.args, "\"" + BODY_REF))
+        let unnamed = list.fold(value.get_array(d, "commands") ?? [], [], (names, c) => names + missing(c, parts.1))
         if not list.is_empty(empty) then err(if tools then "a command has none of \"command\", \"job\" and \"tool\"" else "a command has neither \"command\" nor \"job\"")
-        else if not list.is_empty(unnamed) then err("a command names a text (" + BODY_REF + "NAME) that is not written after the object between " + BODY_OPEN + "NAME and " + BODY_CLOSE + "NAME lines")
+        else if not list.is_empty(unnamed) then err("a command names a text " + NOT_WRITTEN + ": " + list.join(list.map(unnamed, (n) => BODY_REF + n), ", "))
         else ok(Said { analysis: value.as_string(filled(value.get(d, "analysis") ?? value.string(""), parts.1)) ?? "", plan: value.get_string(d, "plan") ?? "",
           orders: orders, complete: value.get_bool(d, "task_complete") ?? false })
       },
@@ -171,7 +190,10 @@ test "a long text is written after the object and named where it is meant" {
   let s = read_with(reply, true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
   assert_eq(list.map(s.orders, (o) => o.args), ["{\"path\":\"a.py\",\"content\":\"d = {\\\"k\\\": [1]}\\nprint(\\\"}\\\")\\n\"}", "{}"])
   assert_eq(list.map(s.orders, (o) => o.command), ["", "python3 a.py\n"])
-  assert(string.starts_with(match read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}}]}", true) { ok(_) => "", err(e) => e }, "a command names a text"))
+  assert_eq(read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}},{\"command\":\"@body:run\"}]}\n<<<BODY run\nls\n>>>BODY run\n", true), err("a command names a text that is not written after the object: @body:a"))
+  // A text that was written, and itself speaks of "@body:", is not one that is missing.
+  let about = read_with("{\"commands\":[{\"tool\":\"write\",\"args\":{\"content\":\"@body:a\"}}]}\n<<<BODY a\nx = \"@body:b\"\n>>>BODY a\n", true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(list.len(about.orders), 1)
   assert(string.starts_with(match read_with("{\"commands\":[]}\n<<<BODY a\nx\n", true) { ok(_) => "", err(e) => e }, "the text a has no closing line"))
   let open = read_reply("{\"commands\":[{\"command\":\"@body:a\"}]}\n<<<BODY a\necho x\n\n", true, true) ?? Said { analysis: "", plan: "", orders: [], complete: true }
   assert_eq(list.map(open.orders, (o) => o.command), ["echo x\n"])

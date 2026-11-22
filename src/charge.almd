@@ -55,8 +55,14 @@ Important notes:
 """
 
 // Said back when a reply cannot be read, as terminus-2 does; nothing was run.
+//
+// A reply that names a text and ends at the object's closing brace is said so in its own
+// words. Told only to "provide a proper JSON response", a model sent the same object
+// again, which was proper JSON already, five times running.
 fn unread_note(reason: String) -> String =
-  "Previous response had parsing errors: " + reason + ". None of its commands were run. Please fix these issues and provide a proper JSON response."
+  if string.contains(reason, "that is not written after the object") then
+    "Previous response ended at the object's closing brace: " + reason + ". None of its commands were run. Its JSON was right. Send the same object again and do not stop at its closing brace: on the lines after it, write each text it names as it is, with nothing escaped, between its two lines:\n<<<BODY NAME\n(the text)\n>>>BODY NAME"
+  else "Previous response had parsing errors: " + reason + ". None of its commands were run. Please fix these issues and provide a proper JSON response."
 
 // Said when a reply reached the output limit: its JSON has no end, so nothing was run.
 let WRITTEN_CUT_NOTE = "ERROR! Your last response reached the output limit before the JSON was finished, so none of the commands in it were run. Respond again with a shorter response: fewer commands, and long files written in parts."

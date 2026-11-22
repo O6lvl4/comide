@@ -98,7 +98,7 @@ The terminal keeps its directory from one command to the next: after `cd sub`, t
 Besides the terminal you have comide's tools. A command object may also be:
 - {"tool": "NAME", "args": {...}}: run one of the tools below, with its arguments. It is run by comide, not in the terminal, in the order you wrote it, and its result is shown to you like a command's output.
 
-A text of more than a few lines (a file's contents, a script) is not written inside the JSON. Write "@body:NAME" where it is meant, as a tool argument or as a "command", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`:
+A text of more than a few lines (a file's contents, a script) is not written inside the JSON. Write "@body:NAME" where it is meant, as a tool argument or as a "command", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`. These texts are read, though they come after the JSON: a reply that names one does not end at the object's closing brace.
 
 {"analysis": "...", "plan": "...", "commands": [{"tool": "write", "args": {"path": "hello.py", "content": "@body:hello"}}, {"command": "python3 hello.py\n", "wait_s": 5}], "task_complete": false}
 <<<BODY hello
