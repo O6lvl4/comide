@@ -205,6 +205,15 @@ for i, r in enumerate(replies, 1):
 EOF
 COMIDE_CHECK=1 COMIDE_FAKE="$tmp/fake" COMIDE_LOG_DIR="$tmp/log" ./comide errand "write the unusual thing to /app/out.txt" --root "$tmp/root" > /dev/null 2> "$tmp/run5.err"
 same "exit 0" "0" "$?"
+
+# A reply that cannot be read is asked for again; the very same reply a second time ends
+# it, without a third, fourth and fifth asking.
+mkdir -p "$tmp/fake-same" "$tmp/log-same"
+for i in 1 2 3 4 5; do printf '%s' '{"content": "I will look around first."}' > "$tmp/fake-same/reply-$i.json"; done
+COMIDE_FAKE="$tmp/fake-same" COMIDE_LOG_DIR="$tmp/log-same" ./comide errand "do the thing" --root "$tmp/root" > /dev/null 2> "$tmp/run-same.err"
+same "the same unreadable reply twice ends the run" "4" "$?"
+same "and it was asked for twice, not five times" "2" "$(ls "$tmp/fake-same" | grep -c '^request-')"
+same "and why is said" "1" "$(grep -c 'the same reply came back, word for word' "$tmp/run-same.err")"
 python3 - "$tmp/fake" "$tmp/log" > "$tmp/sent5.out" <<'EOF'
 import json, sys
 m = json.load(open(sys.argv[1] + "/request-4.json"))["messages"]

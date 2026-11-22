@@ -46,7 +46,7 @@ fn section(m: Value, before: String, before_role: String) -> String = {
   let text = text_of(m)
   if role == "assistant" then (if string.trim(text) == "" then "" else "## comide\n\n" + reply(text))
   else if role == "user" then {
-    let own = (before_role != "assistant" or ended(before)) and not string.contains(text, charge.WRITTEN_CONFIRM_NOTE)
+    let own = (before_role != "assistant" or ended(before)) and not string.contains(text, charge.WRITTEN_CONFIRM_NOTE) and not string.contains(text, charge.SURE_NOTE)
     if own then "## You\n\n" + string.trim(string.strip_prefix(text, "Task Description:\n") ?? text)
     else "### Result\n\n" + fenced(cut(text))
   }

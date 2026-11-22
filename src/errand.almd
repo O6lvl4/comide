@@ -156,8 +156,7 @@ effect fn work(g: gate.Gate, sh0: shell.Shell, task: String, model: String, root
 // The same loop with the model asked in writing (said.almd): no tool is sent, every reply
 // is one JSON object, and its commands are run in order and their output handed back as
 // the next message. A reply that cannot be read runs nothing and is said back; so many in
-// a row end the run.
-let UNREAD_ROUNDS = 5
+// a row end the run (charge.after_unread).
 
 effect fn on(name: String) -> Bool = string.trim(env.get(name) ?? "") == "1"
 
@@ -198,7 +197,7 @@ effect fn work_written(g: gate.Gate, sh0: shell.Shell, task: String, model: Stri
   var records: List[Value] = []
   var spent = 0.0
   var steps = 0
-  var unread = 0
+  var unread = charge.none_unread()
   var asked = false
   var done = false
   var code = 0
@@ -229,16 +228,20 @@ effect fn work_written(g: gate.Gate, sh0: shell.Shell, task: String, model: Stri
         record(log_dir, records, spent, messages)!
         match said.read(r.content) {
           err(reason) => {
-            unread = unread + 1
             eprintln("\n  the reply could not be read (" + reason + "); nothing was run")
-            if unread >= UNREAD_ROUNDS then {
-              eprintln("\nstopped: " + int.to_string(unread) + " replies in a row could not be read")
-              code = 4
-              done = true
-            } else list.push(messages, exchange.message("user", if r.finish == "length" then charge.WRITTEN_CUT_NOTE else charge.unread_note(reason)))
+            let (now, what) = charge.after_unread(unread, r.content, reason, r.finish == "length")
+            unread = now
+            match what {
+              GiveUp(why) => {
+                eprintln("\nstopped: " + why)
+                code = 4
+                done = true
+              },
+              Again(note) => list.push(messages, exchange.message("user", note)),
+            }
           },
           ok(s) => {
-            unread = 0
+            unread = charge.none_unread()
             if string.trim(s.analysis) != "" then eprintln("\n" + charge.first_line(s.analysis, 300))
             let (next_sh, seen) = run_orders(g, sh, s.orders)!
             sh = next_sh

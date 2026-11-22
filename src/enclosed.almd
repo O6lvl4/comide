@@ -41,7 +41,6 @@ import self.copied
 
 let TOOLS = "http://tools.nautra/"
 let TRIES = 4
-let UNREAD_ROUNDS = 5
 // A function, not a constant: a top-level record does not build as a component (almide 0.70.0).
 fn limits() -> http.HttpLimits = http.HttpLimits { total_ms: 1800000, idle_ms: 300000 }
 
@@ -190,7 +189,7 @@ effect fn main() -> Unit = {
   var records: List[Value] = []
   var spent = 0.0
   var steps = 0
-  var unread = 0
+  var unread = charge.none_unread()
   var asked = false
   // What the model said when it first said it was done: asked whether it is sure, it
   // answers that question in fewer words. With nothing run in between, the first is the
@@ -220,15 +219,19 @@ effect fn main() -> Unit = {
         record(log_dir, records, spent, messages)!
         match said.read_reply(r.content, listed != "", r.finish != "length") {
           err(reason) => {
-            unread = unread + 1
             eprintln("\n  the reply could not be read (" + reason + "); nothing was run")
-            if unread >= UNREAD_ROUNDS then {
-              failure = int.to_string(unread) + " replies in a row could not be read"
-              done = true
-            } else list.push(messages, exchange.message("user", if r.finish == "length" then charge.WRITTEN_CUT_NOTE else charge.unread_note(reason)))
+            let (now, what) = charge.after_unread(unread, r.content, reason, r.finish == "length")
+            unread = now
+            match what {
+              GiveUp(why) => {
+                failure = why
+                done = true
+              },
+              Again(note) => list.push(messages, exchange.message("user", note)),
+            }
           },
           ok(s) => {
-            unread = 0
+            unread = charge.none_unread()
             if string.trim(s.analysis) != "" then eprintln("\n" + charge.first_line(s.analysis, 300))
             // What the model wrote itself and was let run is its own: shown back to it with
             // the output, it is not material, or no command could be run twice.

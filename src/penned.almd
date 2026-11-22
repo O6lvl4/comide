@@ -47,7 +47,6 @@ import self.waiting
 import self.watch
 
 let MAX_TOKENS = 65536
-let UNREAD_ROUNDS = 5
 let CALL_MAX_MS = 930000
 let STOP_ROUNDS = 5
 
@@ -100,7 +99,7 @@ Besides the terminal you have comide's tools. A command object may also be:
 
 A text of more than a few lines (a file's contents, a script) is not written inside the JSON. Write "@body:NAME" where it is meant, as a tool argument or as a "command", and after the closing brace of the object write the text as it is, with nothing escaped, between a line `<<<BODY NAME` and a line `>>>BODY NAME`. These texts are read, though they come after the JSON: a reply that names one does not end at the object's closing brace. They may be written before the object instead, the object last.
 
-{"analysis": "...", "plan": "...", "commands": [{"tool": "write", "args": {"path": "hello.py", "content": "@body:hello"}}, {"command": "python3 hello.py\n", "wait_s": 5}], "task_complete": false}
+{"analysis": "...", "plan": "...", "commands": [{"tool": "write", "args": {"path": "hello.py", "content": "@body:hello"}}, {"command": "python3 hello.py", "wait_s": 5}], "task_complete": false}
 <<<BODY hello
 print("as it is, quotes and all")
 >>>BODY hello
@@ -426,7 +425,7 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
     var tcached = 0
     var tout = 0
     var last_in = s.last_in
-    var unread = 0
+    var unread = charge.none_unread()
     var asked = false
     // What the model said when it first said it was done. Asked whether it is sure, it
     // answers that question ("Yes, the task is complete: ..."), in fewer words and without
@@ -489,15 +488,19 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
           turn.record_cost(s.cost + cost)!
           match said.read_reply(r.content, true, r.finish != "length") {
             err(reason) => {
-              unread = unread + 1
               options.show(opts, "\n" + ui.note_line(u, "the reply could not be read (" + reason + "); nothing was run"))!
-              if unread >= UNREAD_ROUNDS then {
-                options.show(opts, "\n" + ui.result_line(u, int.to_string(unread) + " replies in a row could not be read; say how to continue", true))!
-                done = true
-              } else list.push(messages, exchange.message("user", if r.finish == "length" then charge.WRITTEN_CUT_NOTE else charge.unread_note(reason)))
+              let (now, what) = charge.after_unread(unread, r.content, reason, r.finish == "length")
+              unread = now
+              match what {
+                GiveUp(why) => {
+                  options.show(opts, "\n" + ui.result_line(u, why + "; say how to continue", true))!
+                  done = true
+                },
+                Again(note) => list.push(messages, exchange.message("user", note)),
+              }
             },
             ok(w) => {
-              unread = 0
+              unread = charge.none_unread()
               let had_orders = not list.is_empty(w.orders)
               // The analysis of a step that goes on is shown as a note; the last one is the answer.
               if string.trim(w.analysis) != "" and (had_orders or not w.complete) then options.show(opts, "\n" + ui.note_line(u, charge.first_line(w.analysis, 300)))!
@@ -539,7 +542,7 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
                   first_said = ""
                 },
                 AskSure => {
-                  list.push(messages, exchange.message("user", ran.seen + "\n\n" + charge.WRITTEN_CONFIRM_NOTE))
+                  list.push(messages, exchange.message("user", ran.seen + "\n\n" + charge.SURE_NOTE))
                   asked = true
                   first_said = w.analysis
                 },
@@ -626,6 +629,14 @@ test "the model is told of every tool but the terminal, with its arguments, and 
   assert(string.contains(p, "- web_search: "))
   assert(not string.contains(system_prompt("/p", ["web_search"], false), "- web_search: "))
   assert(string.contains(p, "<<<BODY hello"))
+  // The example the model is shown is one the reader reads: the two were written apart,
+  // and a form the prompt asks for and the reader refuses is found here, not in a session.
+  let from = string.index_of(p, "{\"analysis\": \"...\", \"plan\": \"...\", \"commands\": [{\"tool\": \"write\"") ?? 0
+  let upto = (string.index_of(p, ">>>BODY hello") ?? 0) + 13
+  assert_eq(match said.read_reply(string.slice(p, from, upto), true, true) { ok(_) => "", err(e) => e }, "")
+  let shown = said.read_reply(string.slice(p, from, upto), true, true) ?? said.Said { analysis: "", plan: "", orders: [], complete: true }
+  assert_eq(list.map(shown.orders, (o) => o.tool), ["write", ""])
+  assert(string.contains(list.get(shown.orders, 0)?.args ?? "", "as it is, quotes and all"))
   assert(string.contains(p, "- edit: "))
   assert(string.contains(p, "- solve: "))
   assert(string.contains(p, "- mcp_call: "))

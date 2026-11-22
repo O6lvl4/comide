@@ -85,7 +85,63 @@ let WRITTEN_CUT_NOTE = "ERROR! Your last response reached the output limit befor
 
 let WRITTEN_CONFIRM_NOTE = "Are you sure you want to mark the task as complete? Your work will be graded as it stands now and you will not be able to make any further corrections. If so, include \"task_complete\": true in your JSON response again."
 
+// The same question in a conversation with a person, where nothing is graded and anything
+// can be corrected afterwards: the model is not told what is not so.
+let SURE_NOTE = "Before this is given to the user as finished: is anything left undone, or done and not checked? If so, go on with it. If not, include \"task_complete\": true in your JSON response again."
+
 let NOTHING_NOTE = "(no commands were given)"
+
+// What to do after a reply that cannot be read, for every loop that asks in writing.
+//
+// A reply is asked for again with a note that says what was wrong, UNREAD_ROUNDS times at
+// most. But asking again sends the whole conversation again, and a reply that fails the
+// same way is not made better by a third and a fourth asking: fifteen replies in one
+// conversation failed for one reason, five at a time, each sent with 110,000 tokens. So
+// the same reason SAME_ROUNDS times running ends it, and the very same reply twice ends
+// it at once.
+let UNREAD_ROUNDS = 5
+let SAME_ROUNDS = 3
+
+type Unread = { count: Int, same: Int, reason: String, reply: String }
+
+fn none_unread() -> Unread = Unread { count: 0, same: 0, reason: "", reply: "" }
+
+type AfterUnread =
+  | Again(String)    // ask again, with this note
+  | GiveUp(String)   // stop asking; this is why
+
+fn after_unread(u: Unread, reply: String, reason: String, cut: Bool) -> (Unread, AfterUnread) = {
+  let same = if u.count > 0 and reason == u.reason then u.same + 1 else 1
+  let count = u.count + 1
+  let what = if u.count > 0 and reply == u.reply then GiveUp("the same reply came back, word for word, and still cannot be read")
+    else if same >= SAME_ROUNDS then GiveUp(int.to_string(same) + " replies in a row could not be read, each for the same reason")
+    else if count >= UNREAD_ROUNDS then GiveUp(int.to_string(count) + " replies in a row could not be read")
+    else Again(if cut then WRITTEN_CUT_NOTE else unread_note(reason))
+  (Unread { count: count, same: same, reason: reason, reply: reply }, what)
+}
+
+test "a reply that cannot be read is asked for again, but not the same failure over and over" {
+  let (a, first) = after_unread(none_unread(), "r1", "the reply is not valid JSON: x", false)
+  assert_eq(first, Again(unread_note("the reply is not valid JSON: x")))
+  // Another reason: asked again, up to the limit.
+  let (b, second) = after_unread(a, "r2", "there is no JSON object in the reply", true)
+  assert_eq(second, Again(WRITTEN_CUT_NOTE))
+  // The same reason three times running ends it.
+  let (c, third) = after_unread(b, "r3", "there is no JSON object in the reply", false)
+  assert_eq(third, Again(unread_note("there is no JSON object in the reply")))
+  assert_eq(after_unread(c, "r4", "there is no JSON object in the reply", false).1, GiveUp("3 replies in a row could not be read, each for the same reason"))
+  // The very same reply ends it at once.
+  assert_eq(after_unread(a, "r1", "another reason", false).1, GiveUp("the same reply came back, word for word, and still cannot be read"))
+  // Different reasons each time: the limit of rounds.
+  var u = none_unread()
+  var last = Again("")
+  for i in [1, 2, 3, 4, 5] {
+    let (next, what) = after_unread(u, "r" + int.to_string(i), "reason " + int.to_string(i), false)
+    u = next
+    last = what
+  }
+  assert_eq(last, GiveUp("5 replies in a row could not be read"))
+}
 
 // Two things added to terminus-2 by the two agents built on it that beat it with the same
 // model on the official Terminal-Bench 2.0 board (Opus 4.6: terminus-2 62.9, Terminus-KIRA
