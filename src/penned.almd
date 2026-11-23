@@ -85,7 +85,22 @@ let OWN_MACHINE = "\n\nThis is the user's own machine. Do not install, update or
 
 // `someone`: a person is at the terminal, and the machine is theirs (a conversation). With
 // nobody there (-p in a container, a measured run) the machine is the task's to change.
-fn system_prompt(root: String, without: List[String], someone: Bool) -> String = string.trim(charge.written_prompt(root)) + (if someone then OWN_MACHINE else "") + """
+// The prompt an errand is given, with the one sentence changed that is not so in a
+// conversation: there, some text after the JSON is read (the texts a reply names). A
+// rewrite of the whole base made the model write four times as much for the same work;
+// this one sentence, changed alone, did not.
+let NOT_READ = "- Text before or after the JSON is tolerated but is not read."
+let NOT_READ_BUT = "- Text before or after the JSON is tolerated but is not read, except the texts between <<<BODY and >>>BODY lines described below."
+
+fn base(root: String) -> String = string.replace(string.trim(charge.written_prompt(root)), NOT_READ, NOT_READ_BUT)
+
+test "the conversation is not told that nothing after the JSON is read" {
+  let p = system_prompt("/p", [], true)
+  assert(string.contains(p, NOT_READ_BUT))
+  assert(not string.contains(p, NOT_READ))
+}
+
+fn system_prompt(root: String, without: List[String], someone: Bool) -> String = base(root) + (if someone then OWN_MACHINE else "") + """
 
 
 You are comide, a coding assistant, working with a user in the project at ${root}. The terminal starts there. What the user asks may be a task or a question; when you set "task_complete", your "analysis" is what the user reads as your answer: say what you changed and how you know it works, or answer the question, in the language the user wrote in. If nothing checked the work, say so. A question that needs no command is answered at once, with "commands" empty and "task_complete" true.
