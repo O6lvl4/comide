@@ -1,0 +1,16 @@
+# The tasks to think with. Their runs may be read, and changes may be made because of
+# what they show. Their score decides nothing: a change proves itself on
+# bench/tb2/tasks-held-out.txt.
+#
+# The ten that had been run and read before the sets were fixed (2026-11-19), where
+# terminus-2 and an earlier harness of ours were run side by side and the records compared.
+adaptive-rejection-sampler
+cancel-async-tasks
+constraints-scheduling
+extract-elf
+fix-ocaml-gc
+mteb-retrieve
+polyglot-c-py
+pytorch-model-recovery
+sam-cell-seg
+torch-pipeline-parallelism

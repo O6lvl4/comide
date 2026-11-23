@@ -1,0 +1,21 @@
+# The tasks a change proves itself on. Nothing of them is read but their names and the
+# rows of a measurement: not the task text, not the tests, not a run's record. A task that
+# is read for any other reason moves to bench/tb2/tasks-seen.txt and the next in the order
+# takes its place.
+#
+# Chosen by bench/tb2/select.py on 2026-11-19, from the tasks of Terminal-Bench 2
+# (harbor-framework/terminal-bench-2 at 2fd12b8) that are not in bench/tb2/tasks-seen.txt:
+# the first ten in select.py's order. All ten build and start on this
+# machine (bench/tb2/buildable.sh). One was replaced: protein-assembly, eighth in the order,
+# on which terminus-2 cannot start (bench/tb2/tasks-unbuildable.txt); sanitize-git-repo, the
+# eleventh, took its place.
+extract-moves-from-video
+feal-differential-cryptanalysis
+portfolio-optimization
+cobol-modernization
+make-mips-interpreter
+sqlite-with-gcov
+db-wal-recovery
+write-compressor
+fix-code-vulnerability
+sanitize-git-repo

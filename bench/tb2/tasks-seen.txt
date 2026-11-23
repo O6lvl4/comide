@@ -1,0 +1,21 @@
+# Terminal-Bench 2 tasks whose text, tests or runs have been read while working on an
+# agent of ours. None of them may be held out: bench/tb2/select.py leaves them out.
+#
+# Every name an earlier list of ours ever held (2026-11-18 and 19), whether it was run,
+# replaced or removed. Add a held-out task here the day anything
+# of it is read for another reason than judging a measurement.
+adaptive-rejection-sampler
+cancel-async-tasks
+constraints-scheduling
+extract-elf
+fix-git
+fix-ocaml-gc
+install-windows-3.11
+make-doom-for-mips
+mteb-retrieve
+polyglot-c-py
+pytorch-model-recovery
+rstan-to-pystan
+run-pdp11-code
+sam-cell-seg
+torch-pipeline-parallelism

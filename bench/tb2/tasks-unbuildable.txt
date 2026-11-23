@@ -1,0 +1,10 @@
+# Tasks that cannot be run on this machine as their authors meant. bench/tb2/select.py leaves
+# them out and puts the next in its order in their place. One line each: the name, then
+# why.
+#
+# protein-assembly: the container builds and starts, but terminus-2 cannot install tmux
+# in it within its own 120 s (harbor's tmux_session.py, _TOOL_INSTALL_TIMEOUT_SEC): twice,
+# beside another task and alone, 2026-11-19, the trial ended "Command timed out after 120
+# seconds" before a model was called. A baseline that cannot start says nothing about
+# the task, and an agent that needs no tmux would be handed a point for it.
+protein-assembly

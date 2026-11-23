@@ -302,6 +302,14 @@ letter, and not in your own words, is not run, and the model is told why. A comm
 model wrote in other words passes: this stops an order carried out as it was written,
 not every way of following one.
 
+To see what comes of such a text without anything of yours at stake, there is a closed
+place for one experiment: `nautra/lab.sh LAB_DIR TASK` runs comide under nautra on a
+Docker network with no route out, beside a target started for that run and a catch-all
+that records whatever is sent to it. Decoys are put where the enclosure says nothing can
+be read, and `ci/lab-leaks.py` says afterwards whether any of them, or the model's key,
+got out. `ci/lab-check.sh` checks the place itself with a stand-in for the model. What
+measures with it is in [bench/](bench/README.md).
+
 ## A confined terminal
 
 `comide --confined` keeps the conversation where it is and puts the terminal somewhere it
