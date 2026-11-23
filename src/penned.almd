@@ -504,6 +504,14 @@ effect fn turn(opts: options.Options, setup0: toolkit.Setup, s: options.Session,
               let had_orders = not list.is_empty(w.orders)
               // The analysis of a step that goes on is shown as a note; the last one is the answer.
               if string.trim(w.analysis) != "" and (had_orders or not w.complete) then options.show(opts, "\n" + ui.note_line(u, charge.first_line(w.analysis, 300)))!
+              // Asked whether it is sure, the model went on to run something. What it had
+              // said as its answer has not been shown yet, and will not be the last word:
+              // it is shown now, whole. (A review's findings were lost this way, behind
+              // the "two things found" said after tidying up.)
+              if asked and had_orders and string.trim(first_said) != "" then {
+                answer(opts, first_said)!
+                first_said = ""
+              }
               let ran = run_orders(opts, setup, sh, allow, work, w.orders)!
               sh = ran.sh
               allow = ran.allow

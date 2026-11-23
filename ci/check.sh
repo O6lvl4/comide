@@ -405,6 +405,27 @@ has "the model is told how to write a long text" "^told True$" "$tmp/bd.sent"
 has "with no search engine answering, the search is not offered" "^no search True$" "$tmp/bd.sent"
 has "a text named and not written is said back, and nothing runs" "^missing True$" "$tmp/bd.sent"
 
+# Asked whether it is sure, the model tidies up first and then says less: what it said as
+# its answer before is not lost behind that.
+mkdir -p "$tmp/fake-tidy" "$tmp/td"
+python3 - "$tmp/fake-tidy" <<'EOF'
+import json, sys
+def say(analysis, commands, done):
+    return {"content": json.dumps({"analysis": analysis, "plan": "p", "commands": commands, "task_complete": done})}
+replies = [say("Looking.", [{"command": "echo looked > seen.txt"}], False),
+           say("Two things found:\n1. the first\n2. the second", [], True),
+           say("Tidied up. Two things found.", [{"command": "rm seen.txt"}], True)]
+for i, r in enumerate(replies, 1):
+    json.dump(r, open(f"{sys.argv[1]}/reply-{i}.json", "w"))
+EOF
+HOME="$tmp/home" LOCAL_BASE_URL=http://127.0.0.1:9/v1 LOCAL_API_KEY=none COMIDE_SEARXNG_URL=http://127.0.0.1:9 COMIDE_FAKE="$tmp/fake-tidy" \
+  ./comide -p "look it over" --yes --model local:stand-in --root "$tmp/td" > "$tmp/td.out" 2> "$tmp/td.err"
+same "exit 0" "0" "$?"
+same "the answer said before the tidying is shown, and then the last word" "Two things found:
+1. the first
+2. the second
+Tidied up. Two things found." "$(cat "$tmp/td.out")"
+
 say "== on a terminal: the input box takes the keys, and what runs is shown running"
 # In a pseudo-terminal (ci/pty-drive.py): two wide characters typed, one erased, sent;
 # the model's reply runs a command that takes two seconds. From the epoch 15 stdlib to
